@@ -1,0 +1,42 @@
+# Legwork configuration.
+#
+# Copy this file to `config` (same directory) and edit. `config` is gitignored.
+# scripts/legwork_runner.py loads it at startup, so launchd (which does not
+# read your shell profile), cron and manual runs share one source of truth.
+# Real environment variables always override the file. Values may use $HOME
+# and ~, which are expanded. Lines are KEY=VALUE; # starts a comment.
+#
+# You can also point the runner at a config elsewhere with LEGWORK_CONFIG=/path.
+
+# Where the legwork repo lives. Default: $HOME/legwork.
+LEGWORK_DIR=$HOME/legwork
+
+# Autonomous fires per project per calendar day. Default: 8.
+LEGWORK_DAILY_CAP=8
+
+# --- Review pipeline (OPTIONAL) ---------------------------------------------
+# The n8n webhooks the SessionEnd hook and the runner post to. Leave BOTH unset
+# to run the queue with no reviewer: the runner still fires sessions and they
+# still wrap, the review post and the Telegram alerts are just skipped.
+#   LEGWORK_WEBHOOK_URL  receives session evidence for review.
+#   LEGWORK_ALERT_URL    receives runner stall alerts and the daily heartbeat.
+# LEGWORK_WEBHOOK_URL=https://your-n8n-host/webhook/legwork-review
+# LEGWORK_ALERT_URL=https://your-n8n-host/webhook/legwork-alert
+
+# --- Claude config dirs (OPTIONAL) ------------------------------------------
+# Run autonomous sessions under a dedicated Claude config dir, so they never
+# inherit whatever account your interactive shell defaults to. Leave unset to
+# use the default config. A project may set `account: <name>` in its
+# frontmatter; set CLAUDE_CONFIG_DIR_<NAME> (uppercased) to give that account
+# its own config dir.
+# CLAUDE_CONFIG_DIR=$HOME/.claude-legwork
+# CLAUDE_CONFIG_DIR_WORK=$HOME/.claude-legwork-work
+
+# --- Applied outside the runner (documented here so config lives in one place)
+# REVIEWER_MODEL is read by reviewer/n8n-build-node.js (the model the reviewer
+# call uses). Set it there, or wherever you paste that node. Default:
+# claude-sonnet-4-6.
+# REVIEWER_MODEL=claude-sonnet-4-6
+#
+# The launchd tick interval lives in scripts/com.legwork.runner.plist
+# (StartInterval, seconds). Default: 300 (every 5 minutes).

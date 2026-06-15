@@ -1,0 +1,1647 @@
+{
+  "name": "Legwork reply capture",
+  "nodes": [
+    {
+      "id": "tg-trigger-1",
+      "name": "Reply trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_WITH_LEGWORKTG_CRED_ID",
+          "name": "LegworkTG"
+        }
+      }
+    },
+    {
+      "id": "if-needsyou-1",
+      "name": "Is review reply",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "cond-review-letter",
+              "leftValue": "={{ /^(NEEDS YOU|PASS|REVISE)\\s/.test((($json.message || {}).reply_to_message || {}).text || '') }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "code-extract-1",
+      "name": "Extract",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Classify a Telegram reply to a review letter. Letters start with one of\n// NEEDS YOU (escalation: expects one decision letter, or continue to take\n// the brief's recommendation), PASS or REVISE (advise mode: continue\n// re-queues the project). Trust nothing: validate everything.\nconst msg = $json.message || {};\nconst orig = (msg.reply_to_message && msg.reply_to_message.text) || '';\nconst firstLine = (orig.split('\\n')[0] || '').trim();\nconst fm = firstLine.match(/^(NEEDS YOU|PASS|REVISE)\\s+([a-z0-9-]+)$/i);\nconst kind = fm ? fm[1].toUpperCase() : '';\nconst repo = fm ? fm[2].toLowerCase() : '';\nconst reply = (msg.text || '').trim();\n\n// A decision is exactly one letter, optionally with trailing . ) or !\n// The old first-letter-of-anything rule made \"continue\" read as C.\nconst lm = reply.match(/^([A-Za-z])[.)!]?$/);\nconst singleLetter = lm ? lm[1].toUpperCase() : '';\nconst go = /^(go|continue|cont|carry on|keep going|y|yes|ok|okay|next|proceed)[.!]?$/i.test(reply);\n\n// Option letters the escalation brief actually offered (\"A. ...\" lines).\nconst offered = [];\nconst optRe = /^\\s*([A-Z])\\.\\s/gm;\nlet om;\nwhile ((om = optRe.exec(orig)) !== null) {\n  if (!offered.includes(om[1])) offered.push(om[1]);\n}\n\nlet mode = '', letter = '', viaRecommendation = false, fixPrompt = '';\nif (kind === 'NEEDS YOU') {\n  if (singleLetter && (offered.length === 0 || offered.includes(singleLetter))) {\n    mode = 'decision';\n    letter = singleLetter;\n  } else if (go) {\n    const rm = orig.match(/Recommendation:[^\\n]*?\\b([A-Z])\\b/);\n    if (rm && (offered.length === 0 || offered.includes(rm[1]))) {\n      mode = 'decision';\n      letter = rm[1];\n      viaRecommendation = true;\n    }\n  }\n} else if (kind === 'PASS' && go) {\n  mode = 'requeue';\n} else if (kind === 'REVISE' && go) {\n  const fxm = orig.match(/Fix prompt \\(queued for next session\\):\\s*\\n([\\s\\S]+)$/);\n  fixPrompt = fxm ? fxm[1].trim() : '';\n  if (fixPrompt === '(missing)') fixPrompt = '';\n  mode = 'requeue_fix';\n}\n\nconst valid = /^[a-z0-9-]+$/.test(repo) && mode !== '';\nconst date = new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/London' });\nreturn [{ json: {\n  repo: repo, kind: kind, mode: mode, letter: letter,\n  viaRecommendation: viaRecommendation, fixPrompt: fixPrompt,\n  valid: valid, briefText: orig, date: date,\n  chatId: (msg.chat && msg.chat.id) || null,\n  replyToId: msg.message_id || null\n} }];\n"
+      }
+    },
+    {
+      "id": "if-valid-1",
+      "name": "Valid decision",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        660,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "cond-valid",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "http-ghget-1",
+      "name": "GitHub get file",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        -40
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.github.com/repos/REPLACE_WITH_OWNER/REPLACE_WITH_REPO/contents/projects/{{ $json.repo }}.md?ref=main",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            },
+            {
+              "name": "X-GitHub-Api-Version",
+              "value": "2022-11-28"
+            },
+            {
+              "name": "User-Agent",
+              "value": "legwork-reply-capture"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_GITHUB_CRED_ID",
+          "name": "GitHub legwork contents"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "code-build-1",
+      "name": "Build write-back",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        -40
+      ],
+      "parameters": {
+        "jsCode": "// Decode the project file, prepend the right log line, flip any in-flight\n// status to queued, bump updated, and decide whether a prompt mint is\n// needed. The Next prompt block itself is replaced later, in Finalize.\nconst ex = $('Extract').first().json;\nconst gh = $json;\nconst repo = ex.repo;\nconst date = ex.date;\nconst mode = ex.mode;\n\nconst raw = Buffer.from(String(gh.content || '').replace(/\\s/g, ''), 'base64').toString('utf8');\n\nlet logLine;\nif (mode === 'decision') {\n  logLine = '- ' + date + ': Human decision via Telegram: ' + ex.letter +\n    (ex.viaRecommendation ? ' (continue accepted the recommendation)' : '');\n} else if (mode === 'requeue') {\n  logLine = '- ' + date + ': Pass acknowledged via Telegram: continue with the already-minted prompt.';\n} else {\n  logLine = '- ' + date + ': Revise accepted via Telegram: fix prompt queued.';\n}\n\nlet edited = raw.replace(/(##[ \\t]*Log[^\\n]*\\n+)/, function (m) { return m + logLine + '\\n'; });\nif (edited === raw) {\n  edited = raw.replace(/\\s+$/, '') + '\\n\\n## Log\\n\\n' + logLine + '\\n';\n}\n// queued is the state the runner fires on. Flip whatever in-flight state\n// the file is in, but never resurrect done or icebox from a stray reply.\nedited = edited.replace(/^status:[ \\t]*(escalated|review|running)[ \\t]*$/m, 'status: queued');\nedited = edited.replace(/^updated:.*$/m, 'updated: ' + date);\n\n// Autonomy and Vision steer the confirmation text and the minter.\nconst autonomyLoop = /^autonomy:[ \\t]*loop[ \\t]*$/m.test(raw);\nconst vm = raw.match(/##[ \\t]*Vision[ \\t]*\\n([\\s\\S]*?)(?=\\n##[ \\t]|$)/);\nconst vision = vm ? vm[1].trim() : '';\n\nconst needsMint = mode === 'decision';\nlet request = null;\nif (needsMint) {\n\nconst SYSTEM = \"You mint the next starting prompt for one project in a personal \\\"legwork\\\" work queue. A human has just resolved an escalation by choosing one lettered option. Your job is to write the prompt that the next work session starts from.\\n\\nOutput ONLY the prompt text. No preamble, no explanation, no surrounding code fences.\\n\\nRules for the prompt you write:\\n- Assume a cold start with no loaded context. Open by pointing at standing context, for example \\\"Read PROJECT.md and the last three log entries in legwork/projects/<file>.\\\" Use the real project file name.\\n- Exactly one task, small enough to finish in a single sitting. If the chosen option implies a large effort, cut it down to the first concrete step and leave the rest implied.\\n- Include a \\\"Done when:\\\" line with a concrete, verifiable finish line.\\n- End with exactly: \\\"Final step: run /wrap to update the tracker and mint the next prompt.\\\"\\n- Keep the whole prompt under 15 lines.\\n- Plain, direct prose. No em dashes anywhere.\\n- If the project is not a Claude coding task (a decision, a call, an errand), write the next human action instead and open the prompt with \\\"Human action, not a Claude session.\\\"\";\n  const userContent =\n    'Project file: projects/' + repo + '.md\\n\\n' +\n    (vision ? 'Project vision, the standing brief the prompt must serve:\\n' + vision + '\\n\\n' : '') +\n    'The human reviewed an escalation for this project and replied with a single ' +\n    'decision letter: ' + ex.letter + '\\n\\n' +\n    'The escalation brief that was sent to them was:\\n\\n' + ex.briefText + '\\n\\n' +\n    'Write the replacement Next prompt that carries out the chosen option (' + ex.letter +\n    '). Output only the prompt text, no preamble, no code fences.';\n  request = {\n    model: 'claude-sonnet-4-6',\n    max_tokens: 1024,\n    system: SYSTEM,\n    messages: [{ role: 'user', content: userContent }]\n  };\n}\n\nreturn [{ json: {\n  repo: repo, letter: ex.letter, date: date, mode: mode,\n  viaRecommendation: ex.viaRecommendation, fixPrompt: ex.fixPrompt,\n  needsMint: needsMint, autonomyLoop: autonomyLoop,\n  sha: gh.sha, contentEdited: edited,\n  chatId: ex.chatId, replyToId: ex.replyToId,\n  request: request\n} }];\n"
+      }
+    },
+    {
+      "id": "http-mint-1",
+      "name": "Call minter",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1320,
+        -40
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.request) }}",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_ANTHROPIC_CRED_ID",
+          "name": "Anthropic"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "code-finalize-1",
+      "name": "Finalize content",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        -40
+      ],
+      "parameters": {
+        "jsCode": "// Assemble the final file body. decision: install the minted prompt, or a\n// marker when the mint failed. requeue: keep the existing block untouched.\n// requeue_fix: install the fix prompt lifted from the revise letter, or a\n// marker if it could not be read. Never leave a stale brief in place.\nconst bw = $('Build write-back').first().json;\nlet body = bw.contentEdited;\nconst repo = bw.repo;\nconst letter = bw.letter;\nconst date = bw.date;\nconst mode = bw.mode;\nconst fireNote = bw.autonomyLoop\n  ? ' The runner will fire it within minutes.'\n  : ' Copy the prompt off the dashboard or /resume when ready.';\n\nfunction setPromptBlock(newBlock) {\n  body = body.replace(/(##[ \\t]*Next prompt[ \\t]*\\n+)```[\\s\\S]*?```/,\n    function (m, p1) { return p1 + newBlock; });\n}\n\nlet confirmText = '';\nif (mode === 'requeue') {\n  confirmText = 'Queued ' + repo + ' with the already-minted prompt.' + fireNote;\n} else if (mode === 'requeue_fix') {\n  const fix = (bw.fixPrompt || '').replace(/```[a-zA-Z]*\\n?/g, '').replace(/```/g, '').trim();\n  if (fix) {\n    setPromptBlock('```text\\n' + fix + '\\n```');\n    confirmText = 'Queued ' + repo + ': revise accepted, fix prompt installed.' + fireNote;\n  } else {\n    setPromptBlock('```text\\nPROMPT NEEDED. A revise was accepted on ' + date +\n      ' but its fix prompt could not be read from the letter. Run /resume ' + repo +\n      ' to mint a fresh prompt.\\n```');\n    confirmText = 'Queued ' + repo + ': revise accepted, but the fix prompt could not be read (run /resume ' + repo + ').';\n  }\n} else {\n  let minted = '';\n  try {\n    const blocks = $json.content || [];\n    minted = blocks.filter(function (b) { return b.type === 'text'; })\n                   .map(function (b) { return b.text; }).join('\\n').trim();\n  } catch (e) { minted = ''; }\n  minted = minted.replace(/```[a-zA-Z]*\\n?/g, '').replace(/```/g, '').trim();\n  const via = bw.viaRecommendation ? ' (continue took the recommendation)' : '';\n  if (minted) {\n    setPromptBlock('```text\\n' + minted + '\\n```');\n    confirmText = 'Queued ' + repo + ': decision ' + letter + via + ' logged, next prompt minted.' + fireNote;\n  } else {\n    setPromptBlock('```text\\nPROMPT NEEDED. Decision ' + letter + ' was logged on ' + date +\n      ' and status set to queued, but the next prompt could not be minted automatically. ' +\n      'Run /resume ' + repo + ' to mint a fresh prompt.\\n```');\n    confirmText = 'Logged ' + repo + ': decision ' + letter + via +\n      ' recorded and status set to queued, but the next prompt needs minting (run /resume ' + repo + ').';\n  }\n}\n\nconst contentB64 = Buffer.from(body, 'utf8').toString('base64');\nconst commitMessage = mode === 'decision'\n  ? 'legwork: reply capture, decision ' + letter + ' on ' + repo\n  : 'legwork: reply capture, continue on ' + repo;\n\nreturn [{ json: {\n  repo: repo, letter: letter, mode: mode, sha: bw.sha,\n  contentB64: contentB64, commitMessage: commitMessage,\n  chatId: bw.chatId, replyToId: bw.replyToId, confirmText: confirmText\n} }];\n"
+      }
+    },
+    {
+      "id": "http-ghput-1",
+      "name": "GitHub put file",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1760,
+        -40
+      ],
+      "parameters": {
+        "method": "PUT",
+        "url": "=https://api.github.com/repos/REPLACE_WITH_OWNER/REPLACE_WITH_REPO/contents/projects/{{ $json.repo }}.md",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            },
+            {
+              "name": "X-GitHub-Api-Version",
+              "value": "2022-11-28"
+            },
+            {
+              "name": "User-Agent",
+              "value": "legwork-reply-capture"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ message: $json.commitMessage, content: $json.contentB64, sha: $json.sha, branch: 'main' }) }}",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_GITHUB_CRED_ID",
+          "name": "GitHub legwork contents"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "tg-confirm-1",
+      "name": "Telegram confirm",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1980,
+        -40
+      ],
+      "parameters": {
+        "chatId": "={{ $('Finalize content').first().json.chatId }}",
+        "text": "={{ $('Finalize content').first().json.confirmText }}",
+        "additionalFields": {
+          "reply_to_message_id": "={{ $('Finalize content').first().json.replyToId }}"
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_WITH_LEGWORKTG_CRED_ID",
+          "name": "LegworkTG"
+        }
+      }
+    },
+    {
+      "id": "tg-parsefail-1",
+      "name": "Telegram could not parse",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        880,
+        200
+      ],
+      "parameters": {
+        "chatId": "={{ $('Extract').first().json.chatId }}",
+        "text": "=Reply capture: I could not act on that reply. To a NEEDS YOU letter, reply with one option letter, or continue to take the recommendation. To a PASS or REVISE letter, reply continue to queue the next session.",
+        "additionalFields": {
+          "reply_to_message_id": "={{ $('Extract').first().json.replyToId }}"
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_WITH_LEGWORKTG_CRED_ID",
+          "name": "LegworkTG"
+        }
+      }
+    },
+    {
+      "id": "tg-fetchfail-1",
+      "name": "Telegram fetch failed",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1100,
+        200
+      ],
+      "parameters": {
+        "chatId": "={{ $('Extract').first().json.chatId }}",
+        "text": "={{ 'Reply capture: could not fetch projects/' + $('Extract').first().json.repo + '.md from GitHub. Decision ' + $('Extract').first().json.letter + ' was NOT logged.' }}",
+        "additionalFields": {
+          "reply_to_message_id": "={{ $('Extract').first().json.replyToId }}"
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_WITH_LEGWORKTG_CRED_ID",
+          "name": "LegworkTG"
+        }
+      }
+    },
+    {
+      "id": "tg-commitfail-1",
+      "name": "Telegram commit failed",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1760,
+        200
+      ],
+      "parameters": {
+        "chatId": "={{ $('Finalize content').first().json.chatId }}",
+        "text": "={{ 'Reply capture: prepared the decision for ' + $('Finalize content').first().json.repo + ' but the GitHub commit FAILED. Nothing was written. Letter ' + $('Finalize content').first().json.letter + '.' }}",
+        "additionalFields": {
+          "reply_to_message_id": "={{ $('Finalize content').first().json.replyToId }}"
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_WITH_LEGWORKTG_CRED_ID",
+          "name": "LegworkTG"
+        }
+      }
+    },
+    {
+      "id": "if-needsmint-1",
+      "name": "Needs mint",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1210,
+        -40
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "cond-needsmint",
+              "leftValue": "={{ $json.needsMint }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "code-cmdparse-1",
+      "name": "Parse command",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        480
+      ],
+      "parameters": {
+        "jsCode": "// Non-reply messages land here: slash commands drive the queue from the\n// phone. Anything that is not a command is ignored without a reply.\nconst msg = $json.message || {};\nconst text = (msg.text || '').trim();\nif (!text.startsWith('/')) return [];\n\nconst m = text.match(/^\\/([a-zA-Z]+)(?:@\\w+)?\\s*([\\s\\S]*)$/);\nconst cmd = m ? m[1].toLowerCase() : '';\nconst rest = m ? m[2].trim() : '';\nconst date = new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/London' });\nconst chatId = (msg.chat && msg.chat.id) || null;\nconst replyToId = msg.message_id || null;\n\nconst HELP = 'Legwork commands:\\n' +\n  '/board  every project by status\\n' +\n  '/show <project>  status, last log, next prompt\\n' +\n  '/fire <project>  queue one session (one-shot for non-loop projects)\\n' +\n  '/loop <project>  grant standing autonomy (needs a Vision)\\n' +\n  '/prompt <project> <text>  mint and install the next prompt, queued\\n' +\n  '/pause and /resume  stop and restart the runner\\n' +\n  'Replying to a review letter works as before.';\n\nfunction out(extra) {\n  const base = { cmd: cmd, date: date, chatId: chatId, replyToId: replyToId, repo: '', text: '' };\n  for (const k in extra) base[k] = extra[k];\n  return [{ json: base }];\n}\n\nif (cmd === 'board' || cmd === 'status') return out({ cmd: 'board', route: 'board' });\nif (cmd === 'pause' || cmd === 'resume') return out({ route: 'pause' });\nif (cmd === 'help' || cmd === 'start') return out({ route: 'reply', replyText: HELP });\n\nif (cmd === 'show' || cmd === 'fire' || cmd === 'loop' || cmd === 'prompt') {\n  const am = rest.match(/^(\\S+)\\s*([\\s\\S]*)$/);\n  const repo = am ? am[1].toLowerCase().replace(/\\.md$/, '') : '';\n  const free = am ? am[2].trim() : '';\n  if (!/^[a-z0-9-]+$/.test(repo)) {\n    return out({ route: 'reply', replyText: 'Give me a project name: /' + cmd + ' <project>. Send /board to see them.' });\n  }\n  if (cmd === 'prompt' && !free) {\n    return out({ route: 'reply', replyText: 'Tell me what the session should do: /prompt ' + repo + ' <what to do>.' });\n  }\n  return out({ route: 'file', repo: repo, text: free });\n}\nreturn out({ route: 'reply', replyText: 'Unknown command /' + cmd + '.\\n\\n' + HELP });\n"
+      }
+    },
+    {
+      "id": "if-cmdboard-1",
+      "name": "Is board",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        440,
+        480
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "cond-if-cmdboard-1",
+              "leftValue": "={{ $json.route }}",
+              "rightValue": "board",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "if-cmdfile-1",
+      "name": "Is file command",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        660,
+        560
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "cond-if-cmdfile-1",
+              "leftValue": "={{ $json.route }}",
+              "rightValue": "file",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "if-cmdpause-1",
+      "name": "Is pause command",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        880,
+        640
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "cond-if-cmdpause-1",
+              "leftValue": "={{ $json.route }}",
+              "rightValue": "pause",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "http-cmdlist-1",
+      "name": "List projects",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        340
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.github.com/repos/REPLACE_WITH_OWNER/REPLACE_WITH_REPO/contents/projects?ref=main",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            },
+            {
+              "name": "X-GitHub-Api-Version",
+              "value": "2022-11-28"
+            },
+            {
+              "name": "User-Agent",
+              "value": "legwork-reply-capture"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_GITHUB_CRED_ID",
+          "name": "GitHub legwork contents"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "code-cmdpick-1",
+      "name": "Pick project files",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        340
+      ],
+      "parameters": {
+        "jsCode": "// Keep real project files: *.md, skip _template and anything not a file.\nconst picked = [];\nfor (const item of $input.all()) {\n  const f = item.json;\n  if (f.type === 'file' && /\\.md$/.test(String(f.name || '')) && !String(f.name).startsWith('_')) {\n    picked.push({ json: { name: f.name } });\n  }\n}\nreturn picked;\n"
+      }
+    },
+    {
+      "id": "http-cmdeach-1",
+      "name": "Get each project",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1100,
+        340
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.github.com/repos/REPLACE_WITH_OWNER/REPLACE_WITH_REPO/contents/projects/{{ $json.name }}?ref=main",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github.raw+json"
+            },
+            {
+              "name": "X-GitHub-Api-Version",
+              "value": "2022-11-28"
+            },
+            {
+              "name": "User-Agent",
+              "value": "legwork-reply-capture"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_GITHUB_CRED_ID",
+          "name": "GitHub legwork contents"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "code-cmdboard-1",
+      "name": "Build board",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        340
+      ],
+      "parameters": {
+        "jsCode": "// One message: every project grouped by what it needs from you.\nconst ex = $('Parse command').first().json;\nconst files = $('Pick project files').all();\nconst bodies = $input.all();\n\nfunction metaOf(text) {\n  const m = {};\n  const parts = String(text).split('---');\n  if (parts.length >= 3) {\n    for (const line of parts[1].trim().split('\\n')) {\n      const i = line.indexOf(':');\n      if (i > 0) m[line.slice(0, i).trim()] = line.slice(i + 1).trim();\n    }\n  }\n  return m;\n}\nfunction age(updated) {\n  const t = Date.parse(String(updated || '').slice(0, 10));\n  if (isNaN(t)) return '';\n  const d = Math.max(0, Math.round((Date.now() - t) / 86400000));\n  return ' (' + d + 'd)';\n}\n\nconst needsYou = [], review = [], running = [], autoQ = [], manualQ = [], blocked = [];\nlet icebox = 0, done = 0;\n\nfor (let i = 0; i < bodies.length; i++) {\n  const raw = String(bodies[i].json.data || '');\n  const stem = String((files[i] || { json: {} }).json.name || '').replace(/\\.md$/, '');\n  const meta = metaOf(raw);\n  const status = (meta.status || 'queued').toLowerCase();\n  const label = stem + age(meta.updated);\n  if (status === 'icebox') { icebox++; continue; }\n  if (status === 'done') { done++; continue; }\n  if (meta.blocked_on) { blocked.push(stem + ' (' + meta.blocked_on.slice(0, 40) + ')'); continue; }\n  if (status === 'escalated') { needsYou.push(label); continue; }\n  if (status === 'review') { review.push(label); continue; }\n  if (status === 'running') { running.push(label); continue; }\n  const pm = raw.match(/##\\s*Next prompt[\\s\\S]*?```[a-zA-Z]*\\n([\\s\\S]*?)```/);\n  const prompt = pm ? pm[1].trim() : '';\n  const marker = !prompt || /^(Human action|DECISION NEEDED|PROMPT NEEDED)/.test(prompt);\n  const loops = (meta.autonomy || '').toLowerCase() === 'loop' && /^##[ \\t]*Vision[ \\t]*$/m.test(raw);\n  const oneShot = !!meta.fire_once;\n  let tag = '';\n  if (marker) tag = ' (needs a prompt)';\n  else if (oneShot) tag = ' (one-shot pending)';\n  if ((loops || oneShot) && !marker) autoQ.push(stem + tag);\n  else manualQ.push(stem + tag);\n}\n\nconst lines = ['Legwork board ' + ex.date];\nif (needsYou.length) lines.push('NEEDS YOU: ' + needsYou.join(', '));\nif (review.length) lines.push('In review: ' + review.join(', '));\nif (running.length) lines.push('Running: ' + running.join(', '));\nif (autoQ.length) lines.push('Queued, fires on its own: ' + autoQ.join(', '));\nif (manualQ.length) lines.push('Queued, waiting on you: ' + manualQ.join(', '));\nif (blocked.length) lines.push('Blocked: ' + blocked.join(', '));\nlines.push('Icebox ' + icebox + ', done ' + done + '.');\nlines.push('/show <project> for detail, /fire <project> to run one.');\n\nreturn [{ json: { replyText: lines.join('\\n'), chatId: ex.chatId, replyToId: ex.replyToId } }];\n"
+      }
+    },
+    {
+      "id": "http-cmdget-1",
+      "name": "Cmd get file",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        480
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.github.com/repos/REPLACE_WITH_OWNER/REPLACE_WITH_REPO/contents/projects/{{ $json.repo }}.md?ref=main",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            },
+            {
+              "name": "X-GitHub-Api-Version",
+              "value": "2022-11-28"
+            },
+            {
+              "name": "User-Agent",
+              "value": "legwork-reply-capture"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_GITHUB_CRED_ID",
+          "name": "GitHub legwork contents"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "code-cmdapply-1",
+      "name": "Apply command",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        480
+      ],
+      "parameters": {
+        "jsCode": "// Act on /show, /fire, /loop and /prompt against the fetched project file.\n// Reads are answered directly; writes hand contentEdited to the PUT.\nconst ex = $('Parse command').first().json;\nconst gh = $json;\nconst raw = Buffer.from(String(gh.content || '').replace(/\\s/g, ''), 'base64').toString('utf8');\nconst date = ex.date, repo = ex.repo, cmd = ex.cmd;\n\nfunction metaOf(text) {\n  const m = {};\n  const parts = String(text).split('---');\n  if (parts.length >= 3) {\n    for (const line of parts[1].trim().split('\\n')) {\n      const i = line.indexOf(':');\n      if (i > 0) m[line.slice(0, i).trim()] = line.slice(i + 1).trim();\n    }\n  }\n  return m;\n}\nconst meta = metaOf(raw);\nconst status = (meta.status || 'queued').toLowerCase();\nconst hasVision = /^##[ \\t]*Vision[ \\t]*$/m.test(raw);\nconst autonomyLoop = (meta.autonomy || '').toLowerCase() === 'loop';\nconst pm = raw.match(/##\\s*Next prompt[\\s\\S]*?```[a-zA-Z]*\\n([\\s\\S]*?)```/);\nconst prompt = pm ? pm[1].trim() : '';\nconst marker = !prompt || /^(Human action|DECISION NEEDED|PROMPT NEEDED)/.test(prompt);\nconst fires = autonomyLoop && hasVision;\n\nfunction reply(text) {\n  return [{ json: { needsPut: false, needsMint: false, replyText: text, chatId: ex.chatId, replyToId: ex.replyToId } }];\n}\nfunction addLog(body, line) {\n  const w = body.replace(/(##[ \\t]*Log[^\\n]*\\n+)/, function (mm) { return mm + line + '\\n'; });\n  return w === body ? body.replace(/\\s+$/, '') + '\\n\\n## Log\\n\\n' + line + '\\n' : w;\n}\nfunction bump(body) { return body.replace(/^updated:.*$/m, 'updated: ' + date); }\n\nif (cmd === 'show') {\n  const lm = raw.match(/##[ \\t]*Log[^\\n]*\\n+([\\s\\S]*?)(?=\\n##[ \\t]|$)/);\n  const logTail = lm ? lm[1].trim().split('\\n').slice(0, 3).join('\\n') : '(no log)';\n  let p = prompt || '(no prompt)';\n  if (p.length > 2200) p = p.slice(0, 2200) + '\\n[truncated]';\n  const head = [repo + ': ' + status + ', updated ' + (meta.updated || '?')];\n  if (meta.blocked_on) head.push('Blocked on: ' + meta.blocked_on);\n  if (autonomyLoop) head.push('Autonomy: loop' + (hasVision ? '' : ' (but no Vision, the runner refuses it)'));\n  if (meta.fire_once) head.push('One-shot fire pending (' + meta.fire_once + ')');\n  return reply(head.join('\\n') + '\\n\\nLast log:\\n' + logTail + '\\n\\nNext prompt:\\n' + p);\n}\n\nif (status === 'done' || status === 'icebox') {\n  return reply(repo + ' is ' + status + '; /' + cmd + ' never resurrects it. Reopen it at the desk.');\n}\n\nif (cmd === 'fire') {\n  if (meta.blocked_on) return reply(repo + ' is blocked_on: ' + meta.blocked_on + '. Clear the blocker first.');\n  if (status === 'running') return reply(repo + ' is running right now; firing again would double up. Wait for its letter.');\n  if (marker) return reply(repo + ' has no fireable prompt. Send /prompt ' + repo + ' <what to do> first.');\n  if (status === 'queued' && fires && !meta.fire_once) {\n    return reply(repo + ' is already queued and fires on its own on the next tick.');\n  }\n  let edited = raw.replace(/^status:[ \\t]*(escalated|review)[ \\t]*$/m, 'status: queued');\n  const oneShot = !fires;\n  if (oneShot && !meta.fire_once) edited = edited.replace(/\\n---/, '\\nfire_once: ' + date + '\\n---');\n  edited = bump(addLog(edited, '- ' + date + ': Fired via Telegram (/fire' + (oneShot ? ', one-shot' : '') + ').'));\n  return [{ json: { needsPut: true, needsMint: false, cmd: cmd, repo: repo, date: date, sha: gh.sha,\n    contentEdited: edited, request: null,\n    confirmText: 'Queued ' + repo + (oneShot ? ' for one session' : '') + '. The runner fires it within 5 minutes.',\n    chatId: ex.chatId, replyToId: ex.replyToId } }];\n}\n\nif (cmd === 'loop') {\n  if (autonomyLoop) return reply(repo + ' already has autonomy: loop.');\n  if (!hasVision) return reply(repo + ' has no Vision section, so the runner would refuse it. Run /vision ' + repo + ' at the desk first; autonomy needs its standing brief.');\n  let edited = raw.replace(/\\n---/, '\\nautonomy: loop\\n---');\n  edited = bump(addLog(edited, '- ' + date + ': Autonomy granted via Telegram (/loop).'));\n  const tail = (status === 'queued' && !marker)\n    ? ' It is queued, so the runner fires it on the next tick.'\n    : ' It fires whenever it is next queued.';\n  return [{ json: { needsPut: true, needsMint: false, cmd: cmd, repo: repo, date: date, sha: gh.sha,\n    contentEdited: edited, request: null,\n    confirmText: 'Granted autonomy: loop to ' + repo + '.' + tail,\n    chatId: ex.chatId, replyToId: ex.replyToId } }];\n}\n\nif (cmd === 'prompt') {\n  if (status === 'running') return reply(repo + ' is running; its wrap would overwrite a new prompt. Wait for the letter.');\n  let edited = raw.replace(/^status:[ \\t]*(escalated|review)[ \\t]*$/m, 'status: queued');\n  edited = bump(addLog(edited, '- ' + date + ': Prompt set via Telegram (/prompt).'));\n  const vm = raw.match(/##[ \\t]*Vision[ \\t]*\\n([\\s\\S]*?)(?=\\n##[ \\t]|$)/);\n  const vision = vm ? vm[1].trim() : '';\n  const lm2 = raw.match(/##[ \\t]*Log[^\\n]*\\n+([\\s\\S]*?)(?=\\n##[ \\t]|$)/);\n  const logTail = lm2 ? lm2[1].trim().split('\\n').slice(0, 3).join('\\n') : '';\n  const SYSTEM = \"You mint the next starting prompt for one project in a personal \\\"legwork\\\" work queue. The human has just sent, from their phone, a short instruction for what the next work session should do. Your job is to turn it into the prompt that session starts from.\\n\\nOutput ONLY the prompt text. No preamble, no explanation, no surrounding code fences.\\n\\nRules for the prompt you write:\\n- Assume a cold start with no loaded context. Open by pointing at standing context, for example \\\"Read PROJECT.md and the last three log entries in legwork/projects/<file>.\\\" Use the real project file name.\\n- Exactly one task, small enough to finish in a single sitting. If the instruction implies a large effort, cut it down to the first concrete step and leave the rest implied.\\n- Include a \\\"Done when:\\\" line with a concrete, verifiable finish line.\\n- End with exactly: \\\"Final step: run /wrap to update the tracker and mint the next prompt.\\\"\\n- Keep the whole prompt under 15 lines.\\n- Plain, direct prose. No em dashes anywhere.\\n- If the project is not a Claude coding task (a decision, a call, an errand), write the next human action instead and open the prompt with \\\"Human action, not a Claude session.\\\"\";\n  const userContent = 'Project file: projects/' + repo + '.md\\n\\n' +\n    (vision ? 'Project vision, the standing brief the prompt must serve:\\n' + vision + '\\n\\n' : '') +\n    (logTail ? 'Recent log entries, newest first:\\n' + logTail + '\\n\\n' : '') +\n    'The human wants the next session to do this:\\n\\n' + ex.text + '\\n\\n' +\n    'Write the Next prompt that carries this out. Output only the prompt text, no preamble, no code fences.';\n  const request = { model: 'claude-sonnet-4-6', max_tokens: 1024, system: SYSTEM,\n    messages: [{ role: 'user', content: userContent }] };\n  const fireNote = fires ? ' The runner fires it within minutes.' : ' Send /fire ' + repo + ' to run it.';\n  return [{ json: { needsPut: true, needsMint: true, cmd: cmd, repo: repo, date: date, sha: gh.sha,\n    contentEdited: edited, request: request,\n    confirmText: 'Queued ' + repo + ' with a freshly minted prompt.' + fireNote,\n    chatId: ex.chatId, replyToId: ex.replyToId } }];\n}\n\nreturn reply('Unhandled command /' + cmd + '.');\n"
+      }
+    },
+    {
+      "id": "if-cmdput-1",
+      "name": "Cmd needs put",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1320,
+        480
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "cond-if-cmdput-1",
+              "leftValue": "={{ $json.needsPut }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "if-cmdmint-1",
+      "name": "Cmd needs mint",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1540,
+        520
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "cond-if-cmdmint-1",
+              "leftValue": "={{ $json.needsMint }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "http-cmdmint-1",
+      "name": "Cmd call minter",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1760,
+        560
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.request) }}",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_ANTHROPIC_CRED_ID",
+          "name": "Anthropic"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "code-cmdfinal-1",
+      "name": "Cmd finalize",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1980,
+        520
+      ],
+      "parameters": {
+        "jsCode": "// Assemble the final body for the PUT. /prompt installs the minted prompt,\n// or a PROMPT NEEDED marker when the mint failed; /fire and /loop pass\n// their edited body straight through.\nconst ap = $('Apply command').first().json;\nlet body = ap.contentEdited;\nlet confirmText = ap.confirmText;\nif (ap.needsMint) {\n  let minted = '';\n  try {\n    const blocks = $json.content || [];\n    minted = blocks.filter(function (b) { return b.type === 'text'; })\n                   .map(function (b) { return b.text; }).join('\\n').trim();\n  } catch (e) { minted = ''; }\n  minted = minted.replace(/```[a-zA-Z]*\\n?/g, '').replace(/```/g, '').trim();\n  const block = minted\n    ? '```text\\n' + minted + '\\n```'\n    : '```text\\nPROMPT NEEDED. A /prompt mint failed on ' + ap.date + '. Send /prompt ' + ap.repo + ' again or run /resume ' + ap.repo + ' at the desk.\\n```';\n  body = body.replace(/(##[ \\t]*Next prompt[ \\t]*\\n+)```[\\s\\S]*?```/, function (m, p1) { return p1 + block; });\n  if (!minted) confirmText = ap.repo + ': the prompt mint FAILED; a PROMPT NEEDED marker was installed. Send /prompt again.';\n}\nreturn [{ json: { repo: ap.repo, sha: ap.sha,\n  contentB64: Buffer.from(body, 'utf8').toString('base64'),\n  commitMessage: 'legwork: telegram /' + ap.cmd + ' on ' + ap.repo,\n  chatId: ap.chatId, replyToId: ap.replyToId, confirmText: confirmText } }];\n"
+      }
+    },
+    {
+      "id": "http-cmdput-1",
+      "name": "Cmd put file",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2200,
+        520
+      ],
+      "parameters": {
+        "method": "PUT",
+        "url": "=https://api.github.com/repos/REPLACE_WITH_OWNER/REPLACE_WITH_REPO/contents/projects/{{ $json.repo }}.md",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            },
+            {
+              "name": "X-GitHub-Api-Version",
+              "value": "2022-11-28"
+            },
+            {
+              "name": "User-Agent",
+              "value": "legwork-reply-capture"
+            }
+          ]
+        },
+        "options": {},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ message: $json.commitMessage, content: $json.contentB64, sha: $json.sha, branch: 'main' }) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_GITHUB_CRED_ID",
+          "name": "GitHub legwork contents"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "http-cmdpget-1",
+      "name": "Get pause flag",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1100,
+        640
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.github.com/repos/REPLACE_WITH_OWNER/REPLACE_WITH_REPO/contents/.runner-pause-remote?ref=main",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            },
+            {
+              "name": "X-GitHub-Api-Version",
+              "value": "2022-11-28"
+            },
+            {
+              "name": "User-Agent",
+              "value": "legwork-reply-capture"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_GITHUB_CRED_ID",
+          "name": "GitHub legwork contents"
+        }
+      }
+    },
+    {
+      "id": "code-cmdpop-1",
+      "name": "Build pause op",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        640
+      ],
+      "parameters": {
+        "jsCode": "// /pause commits the tracked .runner-pause-remote flag; /resume deletes\n// it. The runner checks the flag at tick start and again after its pull.\nconst ex = $('Parse command').first().json;\nconst sha = $json.sha || '';\nfunction reply(text) {\n  return [{ json: { hasOp: false, replyText: text, chatId: ex.chatId, replyToId: ex.replyToId } }];\n}\nif (ex.cmd === 'pause') {\n  if (sha) return reply('Runner is already paused. Send /resume to lift it.');\n  return [{ json: { hasOp: true, method: 'PUT',\n    body: { message: 'legwork: telegram /pause',\n      content: Buffer.from('Paused via Telegram on ' + ex.date + '\\n', 'utf8').toString('base64'),\n      branch: 'main' },\n    confirmText: 'Runner paused: nothing fires until you send /resume.',\n    chatId: ex.chatId, replyToId: ex.replyToId } }];\n}\nif (!sha) return reply('Runner is not paused from here. A local .runner-pause, if one exists, can only be deleted at the desk.');\nreturn [{ json: { hasOp: true, method: 'DELETE',\n  body: { message: 'legwork: telegram /resume', sha: sha, branch: 'main' },\n  confirmText: 'Runner resumed: eligible queued projects fire on the next tick.',\n  chatId: ex.chatId, replyToId: ex.replyToId } }];\n"
+      }
+    },
+    {
+      "id": "if-cmdpop-1",
+      "name": "Pause has op",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1540,
+        640
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "cond-if-cmdpop-1",
+              "leftValue": "={{ $json.hasOp }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "if-cmdpcreate-1",
+      "name": "Pause is create",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1760,
+        680
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "cond-if-cmdpcreate-1",
+              "leftValue": "={{ $json.method }}",
+              "rightValue": "PUT",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "http-cmdpput-1",
+      "name": "Pause create",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1980,
+        640
+      ],
+      "parameters": {
+        "method": "PUT",
+        "url": "https://api.github.com/repos/REPLACE_WITH_OWNER/REPLACE_WITH_REPO/contents/.runner-pause-remote",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            },
+            {
+              "name": "X-GitHub-Api-Version",
+              "value": "2022-11-28"
+            },
+            {
+              "name": "User-Agent",
+              "value": "legwork-reply-capture"
+            }
+          ]
+        },
+        "options": {},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_GITHUB_CRED_ID",
+          "name": "GitHub legwork contents"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "http-cmdpdel-1",
+      "name": "Pause delete",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1980,
+        760
+      ],
+      "parameters": {
+        "method": "DELETE",
+        "url": "https://api.github.com/repos/REPLACE_WITH_OWNER/REPLACE_WITH_REPO/contents/.runner-pause-remote",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            },
+            {
+              "name": "X-GitHub-Api-Version",
+              "value": "2022-11-28"
+            },
+            {
+              "name": "User-Agent",
+              "value": "legwork-reply-capture"
+            }
+          ]
+        },
+        "options": {},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_GITHUB_CRED_ID",
+          "name": "GitHub legwork contents"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "code-cmdpdone-1",
+      "name": "Pause done",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        700
+      ],
+      "parameters": {
+        "jsCode": "const op = $('Build pause op').first().json;\nreturn [{ json: { replyText: op.confirmText, chatId: op.chatId, replyToId: op.replyToId } }];\n"
+      }
+    },
+    {
+      "id": "tg-cmdreply-1",
+      "name": "Cmd reply",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1760,
+        420
+      ],
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "={{ $json.replyText }}",
+        "additionalFields": {
+          "reply_to_message_id": "={{ $json.replyToId }}"
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_WITH_LEGWORKTG_CRED_ID",
+          "name": "LegworkTG"
+        }
+      }
+    },
+    {
+      "id": "tg-cmdnotfound-1",
+      "name": "Cmd telegram not found",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1100,
+        560
+      ],
+      "parameters": {
+        "chatId": "={{ $('Parse command').first().json.chatId }}",
+        "text": "={{ 'No project file projects/' + $('Parse command').first().json.repo + '.md on the remote. Send /board to see the list.' }}",
+        "additionalFields": {
+          "reply_to_message_id": "={{ $('Parse command').first().json.replyToId }}"
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_WITH_LEGWORKTG_CRED_ID",
+          "name": "LegworkTG"
+        }
+      }
+    },
+    {
+      "id": "tg-cmdconfirm-1",
+      "name": "Cmd telegram confirm",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2420,
+        460
+      ],
+      "parameters": {
+        "chatId": "={{ $('Cmd finalize').first().json.chatId }}",
+        "text": "={{ $('Cmd finalize').first().json.confirmText }}",
+        "additionalFields": {
+          "reply_to_message_id": "={{ $('Cmd finalize').first().json.replyToId }}"
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_WITH_LEGWORKTG_CRED_ID",
+          "name": "LegworkTG"
+        }
+      }
+    },
+    {
+      "id": "tg-cmdcommitfail-1",
+      "name": "Cmd telegram commit failed",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2420,
+        600
+      ],
+      "parameters": {
+        "chatId": "={{ $('Cmd finalize').first().json.chatId }}",
+        "text": "={{ 'Prepared the change for ' + $('Cmd finalize').first().json.repo + ' but the GitHub commit FAILED. Nothing was written.' }}",
+        "additionalFields": {
+          "reply_to_message_id": "={{ $('Cmd finalize').first().json.replyToId }}"
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_WITH_LEGWORKTG_CRED_ID",
+          "name": "LegworkTG"
+        }
+      }
+    },
+    {
+      "id": "tg-cmdfail-1",
+      "name": "Cmd telegram failed",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1540,
+        340
+      ],
+      "parameters": {
+        "chatId": "={{ $('Parse command').first().json.chatId }}",
+        "text": "={{ 'Command /' + $('Parse command').first().json.cmd + ' failed: GitHub did not respond as expected. Nothing was written.' }}",
+        "additionalFields": {
+          "reply_to_message_id": "={{ $('Parse command').first().json.replyToId }}"
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_WITH_LEGWORKTG_CRED_ID",
+          "name": "LegworkTG"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Reply trigger": {
+      "main": [
+        [
+          {
+            "node": "Is review reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract": {
+      "main": [
+        [
+          {
+            "node": "Valid decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid decision": {
+      "main": [
+        [
+          {
+            "node": "GitHub get file",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Telegram could not parse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GitHub get file": {
+      "main": [
+        [
+          {
+            "node": "Build write-back",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Telegram fetch failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build write-back": {
+      "main": [
+        [
+          {
+            "node": "Needs mint",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call minter": {
+      "main": [
+        [
+          {
+            "node": "Finalize content",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finalize content": {
+      "main": [
+        [
+          {
+            "node": "GitHub put file",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GitHub put file": {
+      "main": [
+        [
+          {
+            "node": "Telegram confirm",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Telegram commit failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is review reply": {
+      "main": [
+        [
+          {
+            "node": "Extract",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Parse command",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs mint": {
+      "main": [
+        [
+          {
+            "node": "Call minter",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finalize content",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse command": {
+      "main": [
+        [
+          {
+            "node": "Is board",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is board": {
+      "main": [
+        [
+          {
+            "node": "List projects",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Is file command",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is file command": {
+      "main": [
+        [
+          {
+            "node": "Cmd get file",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Is pause command",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is pause command": {
+      "main": [
+        [
+          {
+            "node": "Get pause flag",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Cmd reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List projects": {
+      "main": [
+        [
+          {
+            "node": "Pick project files",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Cmd telegram failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pick project files": {
+      "main": [
+        [
+          {
+            "node": "Get each project",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get each project": {
+      "main": [
+        [
+          {
+            "node": "Build board",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Cmd telegram failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build board": {
+      "main": [
+        [
+          {
+            "node": "Cmd reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cmd get file": {
+      "main": [
+        [
+          {
+            "node": "Apply command",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Cmd telegram not found",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply command": {
+      "main": [
+        [
+          {
+            "node": "Cmd needs put",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cmd needs put": {
+      "main": [
+        [
+          {
+            "node": "Cmd needs mint",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Cmd reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cmd needs mint": {
+      "main": [
+        [
+          {
+            "node": "Cmd call minter",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Cmd finalize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cmd call minter": {
+      "main": [
+        [
+          {
+            "node": "Cmd finalize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cmd finalize": {
+      "main": [
+        [
+          {
+            "node": "Cmd put file",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cmd put file": {
+      "main": [
+        [
+          {
+            "node": "Cmd telegram confirm",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Cmd telegram commit failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get pause flag": {
+      "main": [
+        [
+          {
+            "node": "Build pause op",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build pause op": {
+      "main": [
+        [
+          {
+            "node": "Pause has op",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pause has op": {
+      "main": [
+        [
+          {
+            "node": "Pause is create",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Cmd reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pause is create": {
+      "main": [
+        [
+          {
+            "node": "Pause create",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Pause delete",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pause create": {
+      "main": [
+        [
+          {
+            "node": "Pause done",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Cmd telegram failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pause delete": {
+      "main": [
+        [
+          {
+            "node": "Pause done",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Cmd telegram failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pause done": {
+      "main": [
+        [
+          {
+            "node": "Cmd reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

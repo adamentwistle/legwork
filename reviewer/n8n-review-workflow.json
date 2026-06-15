@@ -1,0 +1,935 @@
+{
+  "name": "Legwork review pipeline",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "nodes": [
+    {
+      "id": "wh-legwork-1",
+      "name": "Session end webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "legwork-review",
+        "responseMode": "onReceived",
+        "options": {}
+      }
+    },
+    {
+      "id": "code-build-1",
+      "name": "Build review request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Paste this entire file into the \"Build review request\" Code node in n8n.\n// Keep in sync with reviewer/rubric.md.\n// The reviewer model. Reads REVIEWER_MODEL from the env when the n8n node has\n// env access, else the default below. (config.example documents it.)\nconst REVIEWER_MODEL =\n  (typeof process !== 'undefined' && process.env && process.env.REVIEWER_MODEL) ||\n  'claude-sonnet-4-6';\nconst RUBRIC = `You are the reviewer in a personal agent pipeline. A Claude Code work session has just ended. You receive evidence: repo, branch, last commit, diff stat, uncommitted file names, test output if any, and the project's tracker entry when one exists. The tracker entry contains the prompt this session was meant to execute, including a Done when line. Your job is triage, not full code review. Reply with JSON only, no prose, no markdown fences.\n\nVerdicts:\n- pass: work looks complete and safe, evidence supports the claim.\n- revise: something concrete is wrong or unfinished and a fresh session could fix it without the human. You must write the fix prompt.\n- escalate: a human decision is required, or policy forces it.\n\nJudging against intent:\n- When a tracker entry is present, judge the evidence against its Task and Done when lines. If the evidence satisfies Done when, scope is resolved: never escalate to ask whether the task was the whole task.\n- When no tracker entry exists, say so in the summary and judge the work on its own terms. Prefer pass or revise over escalate for ordinary ambiguity in untracked repos.\n- Uncommitted files are not by themselves escalation-worthy. Escalate for them only if a filename suggests secrets (.env, key, pem, token, credentials) or the diff touches auth.\n\nInfrastructure exits are not broken environments. When end_reason is runner-recovery, the runner closed the session, not a /wrap, and a test_output that begins with RUNNER: is the runner's note rather than a test result. It means the session may have been cut short by infrastructure: an API overload or 5xx, a usage limit, or the harness exiting before the wrap hook fired. Do not read that note as a broken environment, a broken repo, or a failed setup, and do not treat an empty diff or absent commits as proof the work was bad: nothing was attempted, or the work never reached a commit. Judge the real commits, diff and tests on their merits. If this session's commits and a real diff show the task done, pass; if nothing was committed, prefer revise with a fix prompt that restates the original task and its Done when so a later session retries it. Escalate only if the original task itself forces it under the policy below, never because the runner reported the exit.\n\nAlways escalate, regardless of confidence, when the work touches money, payments, billing or transfers; anything deployed, published, sent or public-facing; credentials, secrets or auth; destructive or hard-to-reverse operations; the evidence contradicts the tracker entry's task; retry_count is 2 or higher; the session modifies the legwork pipeline itself, meaning the repo under review is legwork and the diff touches its hooks, reviewer rubric, n8n workflow or dashboard build script (scripts/ or reviewer/), since self modification of the pipeline always escalates; or the diff is empty while the commit claims real work. Never pass on prose alone.\n\nsession_commits lists the commits made during this session; attribute only those to the session. last_commit may predate the session and must not be judged as this session's work. Weigh evidence over narrative. When torn between pass and revise, choose revise. When torn between revise and escalate, choose escalate.\n\nOutput schema:\n{\"verdict\":\"pass|revise|escalate\",\"confidence\":0.0,\"summary\":\"one line\",\"reasons\":[\"short\"],\"fix_prompt\":\"only for revise: complete cold-start prompt (context pointer, one task, Done when line, final step runs /wrap)\",\"decision_brief\":{\"attempted\":\"one line\",\"uncertain\":\"one line\",\"options\":[\"A. ...\",\"B. ...\"],\"recommendation\":\"one line that names exactly one option letter\"}}\nInclude fix_prompt only for revise. Include decision_brief only for escalate. The brief must be answerable with one letter, and the recommendation must name exactly one letter.`;\n\nconst p = $json.body || $json;\n\nconst evidence = [\n  `repo: ${p.repo || 'unknown'}`,\n  `branch: ${p.branch || 'unknown'}`,\n  `last_commit: ${p.last_commit || 'none'}`,\n  `uncommitted_files: ${p.uncommitted_files || '0'}`,\n  `retry_count: ${p.retry_count || 0}`,\n  `end_reason: ${p.end_reason || 'normal'}`,\n  '',\n  'uncommitted file names:',\n  p.uncommitted_list || '(none)',\n  '',\n  'commits made this session:',\n  p.session_commits || '(none recorded)',\n  '',\n  'diff_stat:',\n  p.diff_stat || '(empty)',\n  '',\n  'test_output:',\n  p.test_output || '(none provided)',\n  '',\n  'tracker entry (the prompt this session was meant to execute):',\n  p.tracker_entry || '(no tracker entry: untracked repo)'\n].join('\\n');\n\nreturn [{\n  json: {\n    evidence: p,\n    request: {\n      model: REVIEWER_MODEL,\n      max_tokens: 1500,\n      system: RUBRIC,\n      messages: [{ role: 'user', content: `Session evidence:\\n\\n${evidence}` }]\n    }\n  }\n}];"
+      }
+    },
+    {
+      "id": "http-anthropic-1",
+      "name": "Call reviewer",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.request) }}",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_CREDENTIAL_ID",
+          "name": "Anthropic x-api-key"
+        }
+      }
+    },
+    {
+      "id": "code-parse-1",
+      "name": "Parse verdict",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const evidence = $('Build review request').first().json.evidence || {};\nconst repo = evidence.repo || 'unknown repo';\n\nlet verdict = {\n  verdict: 'escalate',\n  confidence: 0,\n  summary: 'Reviewer output could not be parsed. Failing safe.',\n  reasons: ['parse failure'],\n  decision_brief: {\n    attempted: 'Automated review of the last session.',\n    uncertain: 'The reviewer reply was not valid JSON.',\n    options: ['A. Check the n8n execution log.', 'B. Re-run the review.'],\n    recommendation: 'A.'\n  }\n};\n\ntry {\n  const blocks = $json.content || [];\n  const text = blocks.filter(b => b.type === 'text').map(b => b.text).join('\\n');\n  const clean = text.replace(/```json|```/g, '').trim();\n  const parsed = JSON.parse(clean);\n  if (['pass', 'revise', 'escalate'].includes(parsed.verdict)) {\n    verdict = parsed;\n  }\n} catch (e) {\n  // fall through to the fail-safe escalate above\n}\n\nconst pct = Math.round((verdict.confidence || 0) * 100);\nlet message_text = '';\n\nif (verdict.verdict === 'pass') {\n  message_text = `PASS  ${repo}\\n${verdict.summary} (${pct}%)`;\n} else if (verdict.verdict === 'revise') {\n  message_text = `REVISE  ${repo}\\n${verdict.summary}\\n\\n` +\n    `Why: ${(verdict.reasons || []).join('; ')}\\n\\n` +\n    `Fix prompt (queued for next session):\\n${verdict.fix_prompt || '(missing)'}`;\n} else {\n  const b = verdict.decision_brief || {};\n  message_text = `NEEDS YOU  ${repo}\\n\\n` +\n    `Attempted: ${b.attempted || verdict.summary}\\n` +\n    `Uncertain: ${b.uncertain || ''}\\n\\n` +\n    `${(b.options || []).join('\\n')}\\n\\n` +\n    `Recommendation: ${b.recommendation || ''}\\n\\nReply with a letter.`;\n}\n\nreturn [{ json: { ...verdict, repo, message_text } }];"
+      }
+    },
+    {
+      "id": "switch-verdict-1",
+      "name": "Route verdict",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        880,
+        0
+      ],
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "typeValidation": "strict"
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.verdict }}",
+                    "rightValue": "pass",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "pass"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "typeValidation": "strict"
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.verdict }}",
+                    "rightValue": "revise",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "revise"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "typeValidation": "strict"
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.verdict }}",
+                    "rightValue": "escalate",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "escalate"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": 2
+        }
+      }
+    },
+    {
+      "id": "tg-pass-1",
+      "name": "Telegram pass",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1120,
+        -140
+      ],
+      "parameters": {
+        "chatId": "REPLACE_WITH_YOUR_CHAT_ID",
+        "text": "={{ $json.message_text }}",
+        "additionalFields": {
+          "disable_notification": true
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_WITH_CREDENTIAL_ID",
+          "name": "Telegram bot"
+        }
+      }
+    },
+    {
+      "id": "tg-revise-1",
+      "name": "Telegram revise",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1120,
+        0
+      ],
+      "parameters": {
+        "chatId": "REPLACE_WITH_YOUR_CHAT_ID",
+        "text": "={{ $json.message_text }}",
+        "additionalFields": {}
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_WITH_CREDENTIAL_ID",
+          "name": "Telegram bot"
+        }
+      }
+    },
+    {
+      "id": "tg-escalate-1",
+      "name": "Telegram escalate",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1120,
+        140
+      ],
+      "parameters": {
+        "chatId": "REPLACE_WITH_YOUR_CHAT_ID",
+        "text": "={{ $json.message_text }}",
+        "additionalFields": {}
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_WITH_CREDENTIAL_ID",
+          "name": "Telegram bot"
+        }
+      }
+    },
+    {
+      "id": "ledger-get-1",
+      "name": "Ledger get",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -240,
+        432
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "url": "https://api.github.com/repos/REPLACE_WITH_OWNER/REPLACE_WITH_REPO/contents/reviewer/verdicts.jsonl?ref=main",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            },
+            {
+              "name": "X-GitHub-Api-Version",
+              "value": "2022-11-28"
+            },
+            {
+              "name": "User-Agent",
+              "value": "legwork-review-pipeline"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_CREDENTIAL_ID",
+          "name": "GitHub legwork contents"
+        }
+      }
+    },
+    {
+      "id": "ledger-append-1",
+      "name": "Ledger append",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -16,
+        432
+      ],
+      "parameters": {
+        "jsCode": "// Append one line per verdict to reviewer/verdicts.jsonl on the remote.\n// The pass authority decision (silent passes) gets made on this record\n// instead of memory. Append-only. A rare concurrent-write sha race loses\n// one line, which is acceptable for calibration evidence.\nconst v = $('Parse verdict').first().json;\nconst evidence = ($('Build review request').first().json || {}).evidence || {};\nconst gh = $json;\nconst exists = gh && typeof gh.content === 'string' && gh.sha;\nconst raw = exists ? Buffer.from(String(gh.content).replace(/\\s/g, ''), 'base64').toString('utf8') : '';\nconst line = JSON.stringify({\n  ts: new Date().toISOString(),\n  date: new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/London' }),\n  repo: v.repo || 'unknown',\n  verdict: v.verdict,\n  confidence: v.confidence,\n  summary: v.summary,\n  end_reason: evidence.end_reason || '',\n  source: evidence.source || '',\n  session_id: evidence.session_id || ''\n});\nconst content = (raw ? raw.replace(/\\n*$/, '\\n') : '') + line + '\\n';\nconst body = {\n  message: 'reviewer: ledger ' + (v.verdict || '?') + ' ' + (v.repo || 'unknown'),\n  content: Buffer.from(content, 'utf8').toString('base64'),\n  branch: 'main'\n};\nif (exists) body.sha = gh.sha;\nreturn [{ json: { body: JSON.stringify(body) } }];"
+      }
+    },
+    {
+      "id": "ledger-put-1",
+      "name": "Ledger put",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        208,
+        432
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "PUT",
+        "url": "https://api.github.com/repos/REPLACE_WITH_OWNER/REPLACE_WITH_REPO/contents/reviewer/verdicts.jsonl",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            },
+            {
+              "name": "X-GitHub-Api-Version",
+              "value": "2022-11-28"
+            },
+            {
+              "name": "User-Agent",
+              "value": "legwork-review-pipeline"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.body }}",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_CREDENTIAL_ID",
+          "name": "GitHub legwork contents"
+        }
+      }
+    },
+    {
+      "id": "escalate-get-1",
+      "name": "Escalate get project",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        224,
+        288
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "url": "=https://api.github.com/repos/REPLACE_WITH_OWNER/REPLACE_WITH_REPO/contents/projects/{{ $json.repo }}.md?ref=main",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            },
+            {
+              "name": "X-GitHub-Api-Version",
+              "value": "2022-11-28"
+            },
+            {
+              "name": "User-Agent",
+              "value": "legwork-review-pipeline"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_CREDENTIAL_ID",
+          "name": "GitHub legwork contents"
+        }
+      }
+    },
+    {
+      "id": "escalate-flip-1",
+      "name": "Escalate flip status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        288
+      ],
+      "parameters": {
+        "jsCode": "// The reviewer said escalate; make the project file say so too. Until\n// this write lands an escalation exists only as a Telegram letter and the\n// dashboard keeps showing the stale status (the stale-status case). Only\n// in-flight states flip; done and icebox are never resurrected, and an\n// untracked repo (no project file) is skipped.\nconst v = $('Parse verdict').first().json;\nconst gh = $json;\nconst exists = gh && typeof gh.content === 'string' && gh.sha;\nif (!exists) {\n  return [{ json: { writable: false, reason: 'no tracker file for ' + (v.repo || 'unknown') } }];\n}\nconst raw = Buffer.from(String(gh.content).replace(/\\s/g, ''), 'base64').toString('utf8');\nif (!/^status:[ \\t]*(queued|running|review)[ \\t]*$/m.test(raw)) {\n  return [{ json: { writable: false, reason: 'status already escalated or terminal' } }];\n}\nconst date = new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/London' });\nlet edited = raw.replace(/^status:[ \\t]*(queued|running|review)[ \\t]*$/m, 'status: escalated');\nedited = edited.replace(/^updated:.*$/m, 'updated: ' + date);\nconst logLine = '- ' + date + ': Reviewer escalated: ' + String(v.summary || '').slice(0, 180).replace(/\\n/g, ' ');\nlet withLog = edited.replace(/(##[ \\t]*Log[^\\n]*\\n+)/, function (m) { return m + logLine + '\\n'; });\nif (withLog === edited) withLog = edited.replace(/\\s+$/, '') + '\\n\\n## Log\\n\\n' + logLine + '\\n';\nconst body = {\n  message: 'reviewer: escalate ' + (v.repo || 'unknown'),\n  content: Buffer.from(withLog, 'utf8').toString('base64'),\n  sha: gh.sha,\n  branch: 'main'\n};\nreturn [{ json: { writable: true, body: JSON.stringify(body), repo: v.repo } }];"
+      }
+    },
+    {
+      "id": "escalate-writable-1",
+      "name": "Escalate writable",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        672,
+        288
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "cond-escwritable",
+              "leftValue": "={{ $json.writable }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "escalate-put-1",
+      "name": "Escalate put project",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        896,
+        288
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "PUT",
+        "url": "=https://api.github.com/repos/REPLACE_WITH_OWNER/REPLACE_WITH_REPO/contents/projects/{{ $json.repo }}.md",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            },
+            {
+              "name": "X-GitHub-Api-Version",
+              "value": "2022-11-28"
+            },
+            {
+              "name": "User-Agent",
+              "value": "legwork-review-pipeline"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.body }}",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_CREDENTIAL_ID",
+          "name": "GitHub legwork contents"
+        }
+      }
+    },
+    {
+      "id": "wb-pass-get-project",
+      "name": "Pass get project",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        224,
+        -288
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "url": "=https://api.github.com/repos/REPLACE_WITH_OWNER/REPLACE_WITH_REPO/contents/projects/{{ $json.repo }}.md?ref=main",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            },
+            {
+              "name": "X-GitHub-Api-Version",
+              "value": "2022-11-28"
+            },
+            {
+              "name": "User-Agent",
+              "value": "legwork-review-pipeline"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_CREDENTIAL_ID",
+          "name": "GitHub legwork contents"
+        }
+      }
+    },
+    {
+      "id": "wb-pass-flip-status",
+      "name": "Pass flip status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        -288
+      ],
+      "parameters": {
+        "jsCode": "// A pass verdict means the wrapped prompt is good to run again. Flip\n// review to queued on the remote so the runner can fire the project\n// without a human reply. Only review flips: running means a session is\n// still in flight, escalated waits on a human letter, done and icebox\n// are never resurrected, and an untracked repo (no project file) is\n// skipped. The Next prompt block is kept exactly as wrapped.\nconst v = $('Parse verdict').first().json;\nconst gh = $json;\nconst exists = gh && typeof gh.content === 'string' && gh.sha;\nif (!exists) {\n  return [{ json: { writable: false, reason: 'no tracker file for ' + (v.repo || 'unknown') } }];\n}\nconst raw = Buffer.from(String(gh.content).replace(/\\s/g, ''), 'base64').toString('utf8');\nif (!/^status:[ \\t]*review[ \\t]*$/m.test(raw)) {\n  return [{ json: { writable: false, reason: 'status is not review' } }];\n}\nconst date = new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/London' });\nlet edited = raw.replace(/^status:[ \\t]*review[ \\t]*$/m, 'status: queued');\nedited = edited.replace(/^updated:.*$/m, 'updated: ' + date);\nconst logLine = '- ' + date + ': Reviewer passed: ' +\n  String(v.summary || '').slice(0, 180).replace(/\\n/g, ' ') +\n  ' Requeued with the wrapped prompt.';\nlet withLog = edited.replace(/(##[ \\t]*Log[^\\n]*\\n+)/, function (m) { return m + logLine + '\\n'; });\nif (withLog === edited) withLog = edited.replace(/\\s+$/, '') + '\\n\\n## Log\\n\\n' + logLine + '\\n';\nconst body = {\n  message: 'reviewer: pass ' + (v.repo || 'unknown'),\n  content: Buffer.from(withLog, 'utf8').toString('base64'),\n  sha: gh.sha,\n  branch: 'main'\n};\nreturn [{ json: { writable: true, body: JSON.stringify(body), repo: v.repo } }];"
+      }
+    },
+    {
+      "id": "wb-pass-writable",
+      "name": "Pass writable",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        672,
+        -288
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "cond-passwritable",
+              "leftValue": "={{ $json.writable }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "wb-pass-put-project",
+      "name": "Pass put project",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        896,
+        -288
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "PUT",
+        "url": "=https://api.github.com/repos/REPLACE_WITH_OWNER/REPLACE_WITH_REPO/contents/projects/{{ $json.repo }}.md",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            },
+            {
+              "name": "X-GitHub-Api-Version",
+              "value": "2022-11-28"
+            },
+            {
+              "name": "User-Agent",
+              "value": "legwork-review-pipeline"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.body }}",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_CREDENTIAL_ID",
+          "name": "GitHub legwork contents"
+        }
+      }
+    },
+    {
+      "id": "wb-revise-get-project",
+      "name": "Revise get project",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        224,
+        576
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "url": "=https://api.github.com/repos/REPLACE_WITH_OWNER/REPLACE_WITH_REPO/contents/projects/{{ $json.repo }}.md?ref=main",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            },
+            {
+              "name": "X-GitHub-Api-Version",
+              "value": "2022-11-28"
+            },
+            {
+              "name": "User-Agent",
+              "value": "legwork-review-pipeline"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_CREDENTIAL_ID",
+          "name": "GitHub legwork contents"
+        }
+      }
+    },
+    {
+      "id": "wb-revise-flip-status",
+      "name": "Revise flip status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        576
+      ],
+      "parameters": {
+        "jsCode": "// A revise verdict carries a fix prompt. Install it as the Next prompt\n// and flip review to queued so the runner fires the fix without a human\n// reply. Only review flips, untracked repos are skipped, and a revise\n// with no readable fix prompt writes nothing: the Telegram letter still\n// goes out and reply capture can install the prompt from the letter.\nconst v = $('Parse verdict').first().json;\nconst gh = $json;\nconst exists = gh && typeof gh.content === 'string' && gh.sha;\nif (!exists) {\n  return [{ json: { writable: false, reason: 'no tracker file for ' + (v.repo || 'unknown') } }];\n}\nconst fix = String(v.fix_prompt || '').replace(/```[a-zA-Z]*\\n?/g, '').replace(/```/g, '').trim();\nif (!fix) {\n  return [{ json: { writable: false, reason: 'revise verdict without a readable fix prompt' } }];\n}\nconst raw = Buffer.from(String(gh.content).replace(/\\s/g, ''), 'base64').toString('utf8');\nif (!/^status:[ \\t]*review[ \\t]*$/m.test(raw)) {\n  return [{ json: { writable: false, reason: 'status is not review' } }];\n}\nconst date = new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/London' });\nlet edited = raw.replace(/^status:[ \\t]*review[ \\t]*$/m, 'status: queued');\nedited = edited.replace(/^updated:.*$/m, 'updated: ' + date);\nconst promptBlock = '```text\\n' + fix + '\\n```';\nlet withPrompt = edited.replace(/(##[ \\t]*Next prompt[ \\t]*\\n+)```[\\s\\S]*?```/,\n  function (m, p1) { return p1 + promptBlock; });\nif (withPrompt === edited) {\n  withPrompt = edited.replace(/\\s+$/, '') + '\\n\\n## Next prompt\\n\\n' + promptBlock + '\\n';\n}\nconst logLine = '- ' + date + ': Reviewer revise: ' +\n  String(v.summary || '').slice(0, 180).replace(/\\n/g, ' ') +\n  ' Fix prompt installed and requeued.';\nlet withLog = withPrompt.replace(/(##[ \\t]*Log[^\\n]*\\n+)/, function (m) { return m + logLine + '\\n'; });\nif (withLog === withPrompt) withLog = withPrompt.replace(/\\s+$/, '') + '\\n\\n## Log\\n\\n' + logLine + '\\n';\nconst body = {\n  message: 'reviewer: revise ' + (v.repo || 'unknown'),\n  content: Buffer.from(withLog, 'utf8').toString('base64'),\n  sha: gh.sha,\n  branch: 'main'\n};\nreturn [{ json: { writable: true, body: JSON.stringify(body), repo: v.repo } }];"
+      }
+    },
+    {
+      "id": "wb-revise-writable",
+      "name": "Revise writable",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        672,
+        576
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "cond-revisewritable",
+              "leftValue": "={{ $json.writable }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "wb-revise-put-project",
+      "name": "Revise put project",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        896,
+        576
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "PUT",
+        "url": "=https://api.github.com/repos/REPLACE_WITH_OWNER/REPLACE_WITH_REPO/contents/projects/{{ $json.repo }}.md",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            },
+            {
+              "name": "X-GitHub-Api-Version",
+              "value": "2022-11-28"
+            },
+            {
+              "name": "User-Agent",
+              "value": "legwork-review-pipeline"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.body }}",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_CREDENTIAL_ID",
+          "name": "GitHub legwork contents"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Session end webhook": {
+      "main": [
+        [
+          {
+            "node": "Build review request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build review request": {
+      "main": [
+        [
+          {
+            "node": "Call reviewer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call reviewer": {
+      "main": [
+        [
+          {
+            "node": "Parse verdict",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse verdict": {
+      "main": [
+        [
+          {
+            "node": "Route verdict",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Ledger get",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route verdict": {
+      "main": [
+        [
+          {
+            "node": "Telegram pass",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Pass get project",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Telegram revise",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Revise get project",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Telegram escalate",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Escalate get project",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ledger get": {
+      "main": [
+        [
+          {
+            "node": "Ledger append",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ledger append": {
+      "main": [
+        [
+          {
+            "node": "Ledger put",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Escalate get project": {
+      "main": [
+        [
+          {
+            "node": "Escalate flip status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Escalate flip status": {
+      "main": [
+        [
+          {
+            "node": "Escalate writable",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Escalate writable": {
+      "main": [
+        [
+          {
+            "node": "Escalate put project",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pass get project": {
+      "main": [
+        [
+          {
+            "node": "Pass flip status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pass flip status": {
+      "main": [
+        [
+          {
+            "node": "Pass writable",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pass writable": {
+      "main": [
+        [
+          {
+            "node": "Pass put project",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Revise get project": {
+      "main": [
+        [
+          {
+            "node": "Revise flip status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Revise flip status": {
+      "main": [
+        [
+          {
+            "node": "Revise writable",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Revise writable": {
+      "main": [
+        [
+          {
+            "node": "Revise put project",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

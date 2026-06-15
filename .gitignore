@@ -1,0 +1,40 @@
+# macOS
+.DS_Store
+
+# Python bytecode from running scripts/
+__pycache__/
+
+# Local config: your private copy of config.example, read by the runner.
+# Never commit it (it can hold webhook URLs). config.example is tracked.
+/config
+
+# Your real project data and the generated dashboard; the engine creates
+# both at runtime. Track your own projects in a private repo, not here.
+# Root-anchored so examples/projects/ stays tracked. (Drop these two lines
+# if you fork this to run your own queue.)
+/projects/
+/dashboard/index.html
+
+# Legwork runtime state: local, per-machine, not version controlled.
+# .session-heads/ holds per-session HEAD markers the SessionEnd hook consumes.
+# hook.log is this machine's audit trail of hook firings and skips.
+# .claude/settings.local.json is per-machine permission state. It is also
+# covered by the user's global ~/.config/git/ignore, but listing it here
+# keeps the protection with the repo once it is pushed to a remote.
+# .legwork/ holds the verification summary /wrap writes for the reviewer's
+# test evidence channel. It is per-session runtime state in every repo,
+# including this one when legwork is the repo under work.
+.session-heads/
+hook.log
+.claude/settings.local.json
+.legwork/
+
+# Runner state: runner.log is this machine's audit of autonomous fires,
+# .runner-logs/ holds session transcripts, .runner.lock is the in-flight
+# lock, .runner-pause is the kill switch you touch to stop all firing,
+# .runner-state.json carries stall-alert and heartbeat state between ticks.
+runner.log
+.runner-logs/
+.runner.lock
+.runner-pause
+.runner-state.json

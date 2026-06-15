@@ -1,0 +1,1206 @@
+#!/usr/bin/env python3
+"""Fire queued legwork prompts as headless Claude Code sessions.
+
+Zero dependencies, like everything in scripts/. Run by launchd every five
+minutes (com.legwork.runner), or by hand:
+
+    python3 scripts/legwork_runner.py            one tick
+    python3 scripts/legwork_runner.py --dry-run  show eligibility, change nothing
+
+One tick fires every eligible project at once, one session in flight per
+project: target-repo sessions run fully parallel in worker threads, while
+every legwork-repo write (claim, repair, dashboard rebuild, audit window)
+serialises behind an in-process lock and ends pushed, so parallel wraps and
+n8n remote commits cannot race the runner. A claimed project reads
+status: running, so later ticks skip it while its session is in flight.
+Two projects sharing one repo never fire in the same window; the oldest
+claim wins. A lock file still makes overlapping ticks exit quietly.
+
+A project is eligible only when ALL of these hold:
+  - status: queued
+  - autonomy: loop in the frontmatter (explicit human opt-in, set via /vision)
+  - the file has a ## Vision section (the standing brief that stands in for
+    the human; autonomy without a vision is refused)
+  - EXCEPTION: fire_once in the frontmatter (set only by the human, via the
+    Telegram /fire command) stands in for both of the above for exactly one
+    session. It is the human hand-firing the minted prompt; the claim that
+    flips queued to running consumes the key. Every other guard still holds.
+  - repo: points at an existing git repository with a clean tree
+  - the Next prompt is a real prompt, not a Human action / DECISION NEEDED /
+    PROMPT NEEDED marker
+  - fewer than DAILY_CAP fires for this project today (runner.log is counted)
+
+Permissions: sessions run headless with acceptEdits (file edits auto-accept
+in the project repo and the legwork repo) plus an allowlist of git, mkdir
+and the dashboard rebuild, which is just enough to work, commit and /wrap.
+Anything more (test runners, builds, deploys) is granted per repo by the
+human, in that repo's own .claude/settings.json allow rules; everything else
+is denied and the session is expected to say so and wrap honestly. No
+permission checks are bypassed.
+
+Accounts: when CLAUDE_CONFIG_DIR is set, sessions fire under that config dir
+so an autonomous run never inherits whatever account your interactive shell
+defaults to; leave it unset to use the default config. A project may name an
+account in its frontmatter (account: <name>), which maps to
+CLAUDE_CONFIG_DIR_<NAME> for a dedicated config dir. If a session's
+SessionEnd hook did not fire (for instance an account whose config carries
+no hooks), the runner posts the review request itself; the loop closes
+either way.
+
+Safety valves: touch .runner-pause in the legwork repo to stop all firing;
+delete it to resume. The tracked twin .runner-pause-remote does the same and
+exists so the Telegram /pause and /resume commands can commit and delete it
+through the Contents API; it is checked again right after the pull so a fresh
+pause lands on the very next tick. runner.log is the audit trail. Sessions
+that exit without wrapping are flipped to review, and the reviewer webhook
+is told; the exception is a session that died on a transient API error
+(529 overloaded, rate limit, 5xx) with zero turns and zero cost, which is
+re-queued quietly so a later tick retries it, still bounded by DAILY_CAP.
+A re-queued project then waits out an escalating backoff (TRANSIENT_BASE,
+doubling per consecutive transient crash up to TRANSIENT_CAP) before it
+fires again, so a cloud outage is not hammered every five minutes; a clean
+fire clears the count. A session killed by a usage limit defers its whole
+account until the named reset (or USAGE_BLOCK_DEFAULT when none is given),
+so sibling projects on that account do not fire straight into the same wall.
+This backoff and usage state lives in .runner-state.json.
+
+Observability: the runner posts plain text to the alerts webhook
+(LEGWORK_ALERT_URL, a small n8n workflow that forwards to Telegram) when
+ticking has been blocked for more than STALL_ALERT_AFTER seconds, and once a
+day after HEARTBEAT_HOUR it sends a heartbeat: last fire, eligibility per
+autonomy project, stale running projects, escalated count. Runtime state
+lives in .runner-state.json (gitignored). After every fire it audits the
+legwork repo: commits in the session window that touch anything outside
+projects/ or dashboard/ raise an alert, because the legwork repo is the
+control plane and quiet edits to it are how autonomy goes wrong. Sessions
+run with --output-format stream-json, so .runner-logs/ holds real
+transcripts and runner.log records cost per fire.
+
+Prompt directives: a minted prompt may carry "Model: haiku|sonnet|opus"
+and "Effort: low|medium|high|xhigh|max" lines. The runner strips them from
+the prompt and passes --model / --effort, so each task runs on the right
+tier. A project with blocked_on in its frontmatter is never fired; clear the
+key when the blocker lifts. Ticking proceeds over untracked files in the
+legwork repo. Uncommitted tracked changes would break the pull and could be
+swept into commits, so they block firing, with one exception: a tracker-only
+edit (everything dirty is under projects/, the shape a manual work-account
+wrap leaves behind with no hook to commit it) is committed by the runner
+itself and the tick proceeds. Any dirty path outside projects/ still blocks
+until a human commits or reverts.
+
+Config: LEGWORK_DIR, the webhook URLs, CLAUDE_CONFIG_DIR and
+LEGWORK_DAILY_CAP are read from the environment, and from a `config` file
+beside the repo root when one is present (real environment variables win),
+so launchd and manual runs share one source of truth. See config.example.
+The review pipeline is optional: with neither LEGWORK_WEBHOOK_URL nor
+LEGWORK_ALERT_URL set, the runner still fires sessions and they still wrap,
+it just skips the review post and the Telegram alerts.
+"""
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import threading
+import time
+import urllib.request
+from datetime import date, datetime, timedelta
+from pathlib import Path
+
+
+def load_config():
+    """Load KEY=VALUE lines from a config file into the environment, so
+    launchd (which does not read your shell profile), cron and manual runs
+    share one source of truth. Real environment variables always win over the
+    file. The file is looked for at $LEGWORK_CONFIG, else a `config` file
+    beside the repo root; a missing file is fine. $VARS and ~ are expanded so
+    the file stays machine-agnostic. See config.example for the template."""
+    candidates = []
+    env_path = os.environ.get("LEGWORK_CONFIG")
+    if env_path:
+        candidates.append(Path(env_path))
+    candidates.append(Path(__file__).resolve().parent.parent / "config")
+    for path in candidates:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            value = os.path.expanduser(os.path.expandvars(
+                value.strip().strip('"').strip("'")))
+            os.environ.setdefault(key.strip(), value)
+        break
+
+
+load_config()
+
+LEGWORK_DIR = Path(os.environ.get("LEGWORK_DIR", Path.home() / "legwork"))
+PROJECTS_DIR = LEGWORK_DIR / "projects"
+RUNNER_LOG = LEGWORK_DIR / "runner.log"
+TRANSCRIPTS = LEGWORK_DIR / ".runner-logs"
+LOCK_FILE = LEGWORK_DIR / ".runner.lock"
+PAUSE_FILE = LEGWORK_DIR / ".runner-pause"
+# Tracked twin of the pause file, committed and deleted by the Telegram
+# /pause and /resume commands through the GitHub Contents API.
+REMOTE_PAUSE_FILE = LEGWORK_DIR / ".runner-pause-remote"
+
+# Review pipeline endpoints. Both OPTIONAL: leave unset to run the queue with
+# no reviewer. With no LEGWORK_WEBHOOK_URL the runner still fires and wraps,
+# it just skips the review post; with no LEGWORK_ALERT_URL it skips the
+# Telegram alerts and heartbeat. Set them via the environment or config.
+WEBHOOK_URL = os.environ.get("LEGWORK_WEBHOOK_URL", "")
+ALERT_URL = os.environ.get("LEGWORK_ALERT_URL", "")
+STATE_FILE = LEGWORK_DIR / ".runner-state.json"
+# Default Claude config dir for autonomous sessions. Empty means inherit the
+# default config. A project's account: <name> maps to CLAUDE_CONFIG_DIR_<NAME>
+# (uppercased); see account_config_dir().
+DEFAULT_CONFIG_DIR = os.environ.get("CLAUDE_CONFIG_DIR", "")
+CLAUDE_FALLBACKS = [
+    Path.home() / ".local/bin/claude",
+    Path("/opt/homebrew/bin/claude"),
+    Path("/usr/local/bin/claude"),
+]
+
+DAILY_CAP = int(os.environ.get("LEGWORK_DAILY_CAP", "8"))  # fires per project per day
+SESSION_TIMEOUT = 3600   # seconds before a session is terminated
+GRACE = 60               # seconds between SIGTERM and SIGKILL
+HOOK_GRACE = 10          # seconds for the async SessionEnd hook to land
+STALL_ALERT_AFTER = 1800 # seconds of blocked ticks before one Telegram alert
+HEARTBEAT_HOUR = 8       # daily pulse goes out on the first tick after this
+# After a transient cloud crash a project waits before it fires again, so a
+# 529 storm is not hammered every five minutes. The wait doubles per
+# consecutive transient crash (15 min, 30, 60, ...) up to the cap, and a
+# clean fire clears the count.
+TRANSIENT_BASE = 900     # first backoff after a transient crash (15 min)
+TRANSIENT_CAP = 7200     # ceiling on the transient backoff (2 h)
+# When a session dies on a usage limit, the whole account is deferred until
+# the named reset; if no reset clock can be read, this default block applies.
+USAGE_BLOCK_DEFAULT = 1800  # 30 min
+
+PROMPT_RE = re.compile(r"##\s*Next prompt.*?```[a-zA-Z]*\n(.*?)```", re.S)
+VISION_RE = re.compile(r"^##\s*Vision\s*$", re.M)
+NOT_A_PROMPT = ("Human action", "DECISION NEEDED", "PROMPT NEEDED")
+MODEL_RE = re.compile(r"^[ \t]*Model:[ \t]*(\S+)[ \t]*$", re.M | re.I)
+EFFORT_RE = re.compile(r"^[ \t]*Effort:[ \t]*(\S+)[ \t]*$", re.M | re.I)
+MODELS = {"haiku": "haiku", "sonnet": "sonnet", "opus": "opus"}
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+# A session window may write these legwork paths; anything else is audited.
+TRACKER_SURFACE = ("projects/", "dashboard/")
+# Transient cloud failures worth a quiet retry rather than a review cycle:
+# overload, rate limiting and 5xx/connection faults from the API or harness.
+TRANSIENT_RE = re.compile(
+    r"overloaded|rate limit|api error|529|503|500\b|"
+    r"internal server error|connection (?:error|reset)|service unavailable",
+    re.I,
+)
+# A usage-limit cutoff is its own thing: not a per-project fault but an
+# account that cannot fire productively until it resets.
+USAGE_RE = re.compile(
+    r"usage limit|out of (?:extra )?usage|limit reached|quota", re.I
+)
+# "resets 6:40pm", "resets at 18:40", "reset 6pm" -> the reset clock time.
+RESET_RE = re.compile(
+    r"reset[s]?(?:\s+at)?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", re.I
+)
+
+# Sessions run parallel, but the legwork repo is shared state: every write
+# section (claim, repair, dashboard rebuild, audit window) takes this lock
+# and pushes before releasing it, so concurrent fires never race the index
+# or sweep each other's commits. Not reentrant; never nest the sections.
+WRITE_LOCK = threading.Lock()
+LOG_LOCK = threading.Lock()
+
+PREAMBLE = """Autonomous legwork session. No human is present; never wait for input.
+Project file: {project_file}. Read it fully before working. {brief_line}
+If you hit a decision the brief does not cover, or anything touching money,
+production deploys, credentials, sending things to people, or deleting data,
+do not guess: stop and wrap with status escalated and a DECISION NEEDED brief.
+Work inside this repo only and commit completed work with honest messages.
+
+{prompt}"""
+VISION_BRIEF = ("Its Vision\nsection is the standing brief and stands in "
+                "for the human: serve it.")
+ONESHOT_BRIEF = ("The human fired\nthis single session by hand; the Next "
+                 "prompt below is the whole brief.")
+
+
+def log(message):
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with LOG_LOCK:
+        with open(RUNNER_LOG, "a", encoding="utf-8") as fh:
+            fh.write(f"{stamp}  {message}\n")
+
+
+def run_git(args, cwd):
+    return subprocess.run(
+        ["git", *args], cwd=cwd, capture_output=True, text=True, timeout=120
+    )
+
+
+def porcelain_path(line):
+    """The path from a `git status --porcelain` line (cols 0-1 status, 2
+    space, 3+ path). For a rename/copy ('orig -> dest') return the dest, and
+    strip git's quoting so the prefix test sees the real path."""
+    path = line[3:]
+    if " -> " in path:
+        path = path.split(" -> ", 1)[1]
+    return path.strip().strip('"')
+
+
+def push_with_rebase(cwd, attempts=3):
+    """Push, rebasing over whatever moved the remote first (n8n write-back,
+    a parallel session's wrap). Returns True when the push landed."""
+    for attempt in range(attempts):
+        if attempt:
+            run_git(["pull", "--rebase"], cwd)
+        if run_git(["push"], cwd).returncode == 0:
+            return True
+    return False
+
+
+def load_state():
+    try:
+        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(state):
+    try:
+        STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def backoff_seconds(count):
+    """Escalating wait after `count` consecutive transient crashes: 15 min,
+    30, 60, ... capped at TRANSIENT_CAP."""
+    return min(TRANSIENT_BASE * (2 ** max(0, count - 1)), TRANSIENT_CAP)
+
+
+def transient_cooldown_remaining(state, name, now):
+    """Seconds a project must still wait after recent transient crashes, 0
+    when it is clear to fire."""
+    entry = state.get("transient", {}).get(name)
+    if not entry:
+        return 0
+    try:
+        since = datetime.fromisoformat(entry["since"])
+    except (ValueError, KeyError, TypeError):
+        return 0
+    remaining = backoff_seconds(entry.get("count", 1)) - (now - since).total_seconds()
+    return max(0, int(remaining))
+
+
+def usage_block_remaining(state, account, now):
+    """Seconds the account is deferred for a usage limit, 0 when clear."""
+    until = state.get("usage_block", {}).get(account)
+    if not until:
+        return 0
+    try:
+        return max(0, int((datetime.fromisoformat(until) - now).total_seconds()))
+    except (ValueError, TypeError):
+        return 0
+
+
+def update_cooldowns(state, outcomes, now):
+    """Fold the tick's fire outcomes into the cooldown state: a transient
+    crash starts or lengthens that project's backoff, a usage limit defers
+    the whole account until its reset, and any clean fire clears the
+    project's transient count. Pruned of expired usage blocks so state stays
+    small. Saved before returning."""
+    transient = state.setdefault("transient", {})
+    usage = state.setdefault("usage_block", {})
+    for outcome in outcomes:
+        if not outcome:
+            continue
+        name = outcome["name"]
+        if outcome.get("limited"):
+            usage[outcome["account"]] = outcome.get("reset") or (
+                now + timedelta(seconds=USAGE_BLOCK_DEFAULT)
+            ).isoformat(timespec="seconds")
+            transient.pop(name, None)
+        elif outcome.get("transient"):
+            count = transient.get(name, {}).get("count", 0) + 1
+            transient[name] = {"since": now.isoformat(timespec="seconds"),
+                               "count": count}
+        else:
+            transient.pop(name, None)
+    for account in list(usage):
+        if usage_block_remaining(state, account, now) == 0:
+            del usage[account]
+    save_state(state)
+
+
+def send_alert(text):
+    """Telegram via the alerts webhook. Fails quietly: alerting must never
+    block the runner itself. A no-op when LEGWORK_ALERT_URL is unset, so the
+    alerts/heartbeat are simply off when no pipeline is wired."""
+    if not ALERT_URL:
+        return False
+    payload = json.dumps({"text": text}).encode("utf-8")
+    request = urllib.request.Request(
+        ALERT_URL, data=payload, headers={"Content-Type": "application/json"}
+    )
+    try:
+        urllib.request.urlopen(request, timeout=15)
+        return True
+    except OSError:
+        return False
+
+
+def extract_directives(prompt):
+    """Pull optional Model: and Effort: lines out of a minted prompt.
+    Returns (clean_prompt, model, effort, ignored) where ignored lists any
+    unrecognised values, so a typo never blocks a fire but stays visible."""
+    model = effort = None
+    ignored = []
+    m = MODEL_RE.search(prompt)
+    if m:
+        name = m.group(1).lower()
+        model = MODELS.get(name)
+        if model is None:
+            ignored.append(f"model={name}")
+        prompt = MODEL_RE.sub("", prompt, count=1)
+    e = EFFORT_RE.search(prompt)
+    if e:
+        name = e.group(1).lower()
+        if name in EFFORTS:
+            effort = name
+        else:
+            ignored.append(f"effort={name}")
+        prompt = EFFORT_RE.sub("", prompt, count=1)
+    return prompt.strip(), model, effort, ignored
+
+
+def days_since(value):
+    try:
+        y, m, d = (int(x) for x in value[:10].split("-"))
+        return (date.today() - date(y, m, d)).days
+    except (ValueError, AttributeError):
+        return None
+
+
+def parse_frontmatter(text):
+    meta = {}
+    parts = text.split("---")
+    if len(parts) < 3:
+        return meta
+    for line in parts[1].strip().splitlines():
+        if ":" in line:
+            key, _, value = line.partition(":")
+            meta[key.strip()] = value.strip()
+    return meta
+
+
+def fires_today(fname):
+    if not RUNNER_LOG.exists():
+        return 0
+    today = date.today().isoformat()
+    needle = f"fired {fname}"
+    count = 0
+    with open(RUNNER_LOG, encoding="utf-8") as fh:
+        for line in fh:
+            if line.startswith(today) and needle in line:
+                count += 1
+    return count
+
+
+def assess(path):
+    """Return (eligible, reason, details) for one project file."""
+    text = path.read_text(encoding="utf-8")
+    meta = parse_frontmatter(text)
+    name = meta.get("name", path.stem)
+
+    if meta.get("status", "").lower() != "queued":
+        return False, f"status is {meta.get('status', 'missing')}", None
+    # fire_once is the human hand-firing one session from the phone: it
+    # stands in for the autonomy opt-in and the Vision section, once, and
+    # nothing else. claim() consumes the key.
+    fire_once = bool(meta.get("fire_once", ""))
+    has_vision = bool(VISION_RE.search(text))
+    if not fire_once:
+        if meta.get("autonomy", "").lower() != "loop":
+            return False, "no autonomy opt-in", None
+        if not has_vision:
+            return False, "autonomy set but no Vision section", None
+
+    repo_value = meta.get("repo", "")
+    if not repo_value or repo_value == "none":
+        return False, "no repo", None
+    repo_path = Path(repo_value).expanduser()
+    if not (repo_path / ".git").exists():
+        return False, f"repo {repo_path} is not a git repository", None
+
+    blocked = meta.get("blocked_on", "")
+    if blocked:
+        return False, f"blocked_on: {blocked[:48]}", None
+
+    match = PROMPT_RE.search(text)
+    prompt = match.group(1).strip() if match else ""
+    if not prompt:
+        return False, "no next prompt", None
+    if prompt.startswith(NOT_A_PROMPT):
+        return False, f"prompt is a marker ({prompt.split('.')[0][:40]})", None
+    prompt, model, effort, ignored = extract_directives(prompt)
+
+    used = fires_today(path.name)
+    if used >= DAILY_CAP:
+        return False, f"daily cap reached ({used}/{DAILY_CAP})", None
+
+    dirty = run_git(["status", "--porcelain"], repo_path)
+    if dirty.returncode != 0:
+        return False, f"git status failed in {repo_path}", None
+    if dirty.stdout.strip():
+        return False, f"target repo dirty ({repo_path})", None
+
+    reason = "eligible"
+    extras = (["fire_once"] if fire_once else []) \
+        + ([f"model={model}"] if model else []) \
+        + ([f"effort={effort}"] if effort else []) \
+        + [f"{x} unknown, ignored" for x in ignored]
+    if extras:
+        reason = f"eligible ({', '.join(extras)})"
+
+    return True, reason, {
+        "file": path,
+        "name": name,
+        "updated": meta.get("updated", ""),
+        "repo_path": repo_path,
+        "prompt": prompt,
+        "model": model,
+        "effort": effort,
+        "account": meta.get("account", "personal").lower(),
+        "has_vision": has_vision,
+    }
+
+
+def find_claude():
+    found = shutil.which("claude")
+    if found:
+        return found
+    for candidate in CLAUDE_FALLBACKS:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
+
+def account_config_dir(account):
+    """The Claude config dir for a project's account, or "" to inherit the
+    default config. A project's frontmatter account: <name> maps to the
+    CLAUDE_CONFIG_DIR_<NAME> env var (uppercased); everything else falls back
+    to CLAUDE_CONFIG_DIR. With neither set, sessions use the inherited config."""
+    specific = os.environ.get(f"CLAUDE_CONFIG_DIR_{account.upper()}")
+    return specific or DEFAULT_CONFIG_DIR
+
+
+def child_env(claude_path, account):
+    env = dict(os.environ)
+    config_dir = account_config_dir(account)
+    if config_dir:
+        env["CLAUDE_CONFIG_DIR"] = config_dir
+    if WEBHOOK_URL:
+        env["LEGWORK_WEBHOOK_URL"] = WEBHOOK_URL
+    env["LEGWORK_DIR"] = str(LEGWORK_DIR)
+    extra = f"{Path(claude_path).parent}:/usr/local/bin:/opt/homebrew/bin"
+    env["PATH"] = f"{extra}:{env.get('PATH', '/usr/bin:/bin')}"
+    return env
+
+
+def claim(project):
+    """Flip queued -> running on the remote so the fire is visible. Returns
+    the post-claim HEAD sha, which anchors the session-window audit, or None
+    when the claim could not be published. The pull re-reads the file after
+    eligibility was assessed: if n8n or a parallel wrap moved the status off
+    queued in the meantime, the flip is a no-op and the claim is dropped."""
+    with WRITE_LOCK:
+        path = project["file"]
+        run_git(["pull", "--rebase"], LEGWORK_DIR)
+        text = path.read_text(encoding="utf-8")
+        flipped = re.sub(r"^status:[ \t]*queued[ \t]*$", "status: running",
+                         text, count=1, flags=re.M)
+        if flipped == text:
+            log(f"claim dropped for {path.name}: no longer queued")
+            return None
+        # A fire_once key is one session's consent: consume it with the
+        # claim so the project cannot fire again without the human.
+        flipped = re.sub(r"^fire_once:[^\n]*\n", "", flipped, count=1,
+                         flags=re.M)
+        path.write_text(flipped, encoding="utf-8")
+        run_git(["add", str(path)], LEGWORK_DIR)
+        run_git(["commit", "-m", f"legwork: runner fires {path.stem}"],
+                LEGWORK_DIR)
+        if push_with_rebase(LEGWORK_DIR):
+            head = run_git(["rev-parse", "HEAD"], LEGWORK_DIR)
+            return head.stdout.strip() or None
+        # Could not publish the claim: drop it and let a later tick retry.
+        run_git(["reset", "--hard", "origin/main"], LEGWORK_DIR)
+        log(f"claim push failed for {path.name}, claim dropped")
+        return None
+
+
+def notify_reviewer(project, detail):
+    # A no-op when LEGWORK_WEBHOOK_URL is unset: with no review pipeline the
+    # runner's fallback post is simply skipped.
+    if not WEBHOOK_URL:
+        return False
+    # repo carries the project file stem, not the repo folder name: the
+    # review letter's first line and the reply capture's file lookup both
+    # key on it, and the SessionEnd hook resolves to the same stem.
+    payload = json.dumps({
+        "source": "legwork-runner",
+        "repo": project["file"].stem,
+        "branch": "unknown",
+        "last_commit": "none",
+        "diff_stat": "",
+        "session_commits": "",
+        "uncommitted_files": "0",
+        "uncommitted_list": "",
+        "test_output": f"RUNNER: {detail}",
+        "tracker_entry": project["file"].read_text(encoding="utf-8")[:4500],
+        "session_id": "",
+        "end_reason": "runner-recovery",
+    }).encode("utf-8")
+    request = urllib.request.Request(
+        WEBHOOK_URL, data=payload, headers={"Content-Type": "application/json"}
+    )
+    try:
+        urllib.request.urlopen(request, timeout=15)
+        return True
+    except OSError:
+        return False
+
+
+def last_fire_line():
+    """The most recent 'fired' entry in runner.log, shortened for Telegram."""
+    if not RUNNER_LOG.exists():
+        return ""
+    last = ""
+    with open(RUNNER_LOG, encoding="utf-8") as fh:
+        for line in fh:
+            if "  fired " in line:
+                last = line.strip()
+    if not last:
+        return ""
+    stamp = last[:16]
+    name = last.split("  fired ", 1)[1].split(" in ", 1)[0]
+    return f"{name} at {stamp}"
+
+
+def build_heartbeat(paused=None):
+    """One Telegram message a day that proves the loop is alive and surfaces
+    what is silently stuck: ineligible autonomy projects, stale running
+    states, waiting escalations. paused carries the pause note when a pause
+    flag is set, so the heartbeat says which flag and how to lift it."""
+    lines = ["Legwork heartbeat"]
+    if paused:
+        lines.append(f"Runner PAUSED ({paused}).")
+    fired = last_fire_line()
+    lines.append(f"Last fire: {fired}" if fired else "Last fire: none recorded")
+
+    queued = escalated = 0
+    stale_running = []
+    auto_lines = []
+    for path in sorted(PROJECTS_DIR.glob("*.md")):
+        if path.name.startswith("_"):
+            continue
+        try:
+            meta = parse_frontmatter(path.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        status = meta.get("status", "").lower()
+        if status == "queued":
+            queued += 1
+        elif status == "escalated":
+            escalated += 1
+        elif status == "running":
+            quiet = days_since(meta.get("updated", ""))
+            if quiet is not None and quiet >= 2:
+                stale_running.append(f"{path.stem} ({quiet}d)")
+        if meta.get("autonomy", "").lower() == "loop":
+            ok, reason, _ = assess(path)
+            auto_lines.append(f"  {path.stem}: {'ready' if ok else reason}")
+
+    lines.append(f"Queued {queued}, escalated {escalated}.")
+    if auto_lines:
+        lines.append("Autonomy projects:")
+        lines.extend(auto_lines)
+    else:
+        lines.append("No projects opted into autonomy.")
+    if stale_running:
+        lines.append(f"Running but quiet 2d+: {', '.join(stale_running)}")
+    return "\n".join(lines)
+
+
+def maybe_heartbeat(state, paused=None):
+    today = date.today().isoformat()
+    if datetime.now().hour < HEARTBEAT_HOUR or state.get("last_heartbeat") == today:
+        return
+    state["last_heartbeat"] = today
+    save_state(state)
+    sent = send_alert(build_heartbeat(paused))
+    log(f"heartbeat {'sent' if sent else 'send FAILED'}")
+
+
+def note_blocked(state, reason):
+    """A tick could not proceed. Alert once when the blockage outlives
+    STALL_ALERT_AFTER, because a silently stalled runner looks identical to
+    a quiet day until something was supposed to fire."""
+    now = datetime.now()
+    since = state.get("blocked_since")
+    if not since:
+        state["blocked_since"] = now.isoformat(timespec="seconds")
+        save_state(state)
+        return
+    try:
+        started = datetime.fromisoformat(since)
+    except ValueError:
+        state["blocked_since"] = now.isoformat(timespec="seconds")
+        save_state(state)
+        return
+    blocked_for = (now - started).total_seconds()
+    if blocked_for >= STALL_ALERT_AFTER and not state.get("stall_alerted"):
+        minutes = int(blocked_for // 60)
+        sent = send_alert(
+            f"Legwork runner blocked for {minutes} min: {reason}. "
+            "No autonomous sessions will fire until the legwork tree is "
+            "clean and pulling."
+        )
+        log(f"stall alert {'sent' if sent else 'send FAILED'} "
+            f"({minutes} min: {reason})")
+        state["stall_alerted"] = True
+        save_state(state)
+
+
+def clear_blocked(state):
+    if "blocked_since" in state or "stall_alerted" in state:
+        state.pop("blocked_since", None)
+        state.pop("stall_alerted", None)
+        save_state(state)
+        log("tick unblocked")
+
+
+def hook_fired_since(repo_name, since):
+    hook_log = LEGWORK_DIR / "hook.log"
+    if not hook_log.exists():
+        return False
+    needle = f"{repo_name}  sent:"
+    for line in hook_log.read_text(encoding="utf-8").splitlines():
+        if needle not in line:
+            continue
+        try:
+            stamp = datetime.strptime(line[:19], "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            continue
+        if stamp >= since:
+            return True
+    return False
+
+
+def session_wrapped(path, claim_head):
+    """True when the claim_head..HEAD window holds a commit the session made
+    itself (not a runner commit) that touched this project's tracker file:
+    the /wrap landed even if the session left the status on running. Lets the
+    repair tell a real crash from a wrap that just forgot the status flip,
+    instead of logging 'exited without wrapping' over work that did wrap."""
+    if not claim_head:
+        return False
+    res = run_git(["log", "--format=%s", f"{claim_head}..HEAD", "--",
+                   f"projects/{path.name}"], LEGWORK_DIR)
+    if res.returncode != 0:
+        return False
+    return any(line.strip() and not line.startswith("legwork: runner")
+               for line in res.stdout.splitlines())
+
+
+def repair_unwrapped(project, exit_code, minutes, claim_head=None,
+                     transient=False):
+    """A session left status on running: surface it instead of leaving a
+    stale status. Re-queue when the crash was transient and a later tick
+    should retry (bounded by DAILY_CAP); move a session that did wrap (it
+    committed a tracker edit but forgot the status flip) to review without
+    crying crash; otherwise flag it as exited without wrapping and move it to
+    review. Returns the repair detail, or None when status was not running."""
+    with WRITE_LOCK:
+        path = project["file"]
+        run_git(["pull", "--rebase"], LEGWORK_DIR)
+        text = path.read_text(encoding="utf-8")
+        meta = parse_frontmatter(text)
+        if meta.get("status") != "running":
+            return None  # the session set its own status, nothing to repair
+        today = date.today().isoformat()
+        if transient:
+            new_status = "status: queued"
+            detail = (f"session died on a transient API error before doing "
+                      f"any work (exit {exit_code} after {minutes} min); "
+                      f"re-queued for retry")
+            subject = f"legwork: runner re-queues {path.stem} after API error"
+        elif session_wrapped(path, claim_head):
+            new_status = "status: review"
+            detail = (f"session wrapped but left status running; runner moved "
+                      f"it to review (exit {exit_code} after {minutes} min)")
+            subject = f"legwork: runner moves wrapped {path.stem} to review"
+        else:
+            new_status = "status: review"
+            detail = (f"autonomous session exited without wrapping "
+                      f"(exit {exit_code} after {minutes} min)")
+            subject = f"legwork: runner flags unwrapped session on {path.stem}"
+        text = re.sub(r"^status:[ \t]*running[ \t]*$", new_status,
+                      text, count=1, flags=re.M)
+        text = re.sub(r"(##[ \t]*Log[^\n]*\n+)",
+                      lambda m: m.group(1) + f"- {today}: Runner: {detail}. "
+                      f"Transcript in .runner-logs/.\n", text, count=1)
+        path.write_text(text, encoding="utf-8")
+        run_git(["add", str(path)], LEGWORK_DIR)
+        run_git(["commit", "-m", subject], LEGWORK_DIR)
+        if not push_with_rebase(LEGWORK_DIR):
+            log(f"repair push failed for {path.name}")
+        return detail
+
+
+def transcript_result(transcript):
+    """The stream-json transcript ends with a result object carrying cost,
+    turn count and the final text. Returns it, or None."""
+    try:
+        lines = transcript.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if obj.get("type") == "result":
+            return obj
+    return None
+
+
+def transcript_summary(transcript):
+    """Short cost/turns suffix for the completed log line."""
+    obj = transcript_result(transcript)
+    if not obj:
+        return ""
+    parts = []
+    cost = obj.get("total_cost_usd")
+    if isinstance(cost, (int, float)):
+        parts.append(f"${cost:.2f}")
+    turns = obj.get("num_turns")
+    if turns:
+        parts.append(f"{turns} turns")
+    if obj.get("is_error"):
+        parts.append("is_error")
+    return f", {', '.join(parts)}" if parts else ""
+
+
+def did_work(result_obj):
+    """True when the session got past its first turn or spent anything.
+    Zero turns and zero cost mean nothing was attempted, so the crash can be
+    retried without losing work; anything else has output worth a review."""
+    if not result_obj:
+        return False
+    return bool(result_obj.get("num_turns", 0) > 1
+                or (result_obj.get("total_cost_usd") or 0))
+
+
+def is_transient_crash(result_obj):
+    """True when the session died on its very first API call with an
+    error that retrying plainly fixes (529 overloaded, rate limit, 5xx,
+    connection faults). Zero work attempted means a quiet re-queue beats a
+    review cycle and a Telegram letter. Anything that did real work before
+    failing is a genuine failure and goes to review. Usage limits are not
+    transient in this sense; usage_limit_reset handles them."""
+    if not result_obj or not result_obj.get("is_error"):
+        return False
+    if did_work(result_obj):
+        return False
+    text = str(result_obj.get("result", ""))
+    if USAGE_RE.search(text):
+        return False
+    return bool(TRANSIENT_RE.search(text))
+
+
+def usage_limit_reset(result_obj, now):
+    """Classify a usage-limit cutoff. Returns (limited, reset_iso):
+    (False, None) when the session was not usage-limited; (True, None) when
+    it was but named no reset clock; (True, iso) when a reset time was read,
+    rolled to tomorrow if it has already passed today. The account, not the
+    project, is what a usage limit blocks, so this is independent of whether
+    the session did any work."""
+    if not result_obj or not result_obj.get("is_error"):
+        return False, None
+    text = str(result_obj.get("result", ""))
+    if not USAGE_RE.search(text):
+        return False, None
+    m = RESET_RE.search(text)
+    if not m:
+        return True, None
+    hour = int(m.group(1))
+    minute = int(m.group(2) or 0)
+    ampm = (m.group(3) or "").lower()
+    if ampm == "pm" and hour != 12:
+        hour += 12
+    elif ampm == "am" and hour == 12:
+        hour = 0
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return True, None
+    reset = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if reset <= now:
+        reset += timedelta(days=1)
+    return True, reset.isoformat(timespec="seconds")
+
+
+def audit_session_window(project, claim_head):
+    """Everything a session window wrote to the legwork repo outside the
+    tracker surface (projects/, dashboard/) gets a Telegram alert. The
+    legwork repo is the control plane: a worker session quietly editing the
+    runner, hooks or reviewer is exactly the failure this catches. Human
+    commits in the window can trip it too; the alert says to ignore those."""
+    with WRITE_LOCK:
+        names = run_git(["diff", "--name-only", f"{claim_head}..HEAD"],
+                        LEGWORK_DIR)
+        if names.returncode != 0:
+            return
+        offending = [f for f in names.stdout.splitlines()
+                     if f.strip() and not f.startswith(TRACKER_SURFACE)]
+        if not offending:
+            return
+        commits = run_git(["log", "--oneline", f"{claim_head}..HEAD"],
+                          LEGWORK_DIR).stdout.strip()
+    detail = (f"legwork repo touched outside projects/ and dashboard/ "
+              f"during the {project['file'].stem} session window: "
+              f"{', '.join(offending[:6])}")
+    log(f"AUDIT: {detail}")
+    send_alert(
+        f"Legwork audit: {detail}\n\nCommits in the window:\n{commits[:600]}\n\n"
+        "If these commits are yours, ignore this. If not, read them now."
+    )
+
+
+def fire(project):
+    claude_path = find_claude()
+    if not claude_path:
+        log("ERROR: claude binary not found, cannot fire")
+        return
+
+    claim_head = claim(project)
+    if not claim_head:
+        return
+
+    TRANSCRIPTS.mkdir(exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    transcript = TRANSCRIPTS / f"{stamp}-{project['file'].stem}.jsonl"
+    prompt = PREAMBLE.format(
+        project_file=str(project["file"]),
+        brief_line=VISION_BRIEF if project.get("has_vision") else ONESHOT_BRIEF,
+        prompt=project["prompt"],
+    )
+
+    chosen = "".join(
+        f" {k}={v}" for k, v in
+        (("model", project["model"]), ("effort", project["effort"])) if v
+    )
+    log(f"fired {project['file'].name} in {project['repo_path']}"
+        f"{chosen} (transcript {transcript.name})")
+    started = datetime.now()
+    argv = [
+        claude_path, "-p", prompt,
+        "--output-format", "stream-json", "--verbose",
+        "--permission-mode", "acceptEdits",
+        "--add-dir", str(LEGWORK_DIR),
+        "--allowedTools",
+        "Bash(git:*)", "Bash(mkdir:*)",
+        "Bash(python3 scripts/build_dashboard.py:*)",
+        f"Bash(python3 {LEGWORK_DIR}/scripts/build_dashboard.py:*)",
+    ]
+    if project["model"]:
+        argv += ["--model", project["model"]]
+    if project["effort"]:
+        argv += ["--effort", project["effort"]]
+    with open(transcript, "w", encoding="utf-8") as out:
+        proc = subprocess.Popen(
+            argv,
+            cwd=project["repo_path"], env=child_env(claude_path, project["account"]),
+            stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+        )
+        try:
+            exit_code = proc.wait(timeout=SESSION_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            proc.terminate()
+            try:
+                exit_code = proc.wait(timeout=GRACE)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                exit_code = proc.wait()
+            log(f"timeout: {project['file'].name} terminated after "
+                f"{SESSION_TIMEOUT // 60} min")
+
+    minutes = max(1, int((datetime.now() - started).total_seconds() // 60))
+    log(f"completed {project['file'].name}: exit {exit_code}, {minutes} min"
+        f"{transcript_summary(transcript)}")
+    result_obj = transcript_result(transcript)
+    limited, reset_iso = usage_limit_reset(result_obj, datetime.now())
+    transient = (not limited) and is_transient_crash(result_obj)
+    # A zero-work crash (transient or a usage limit before anything ran) is
+    # re-queued quietly; a usage limit that hit mid-work still has output to
+    # review. The account-level usage block, set by the caller, is what
+    # actually paces firing through the reset.
+    requeue = transient or (limited and not did_work(result_obj))
+    detail = repair_unwrapped(project, exit_code, minutes,
+                              claim_head=claim_head, transient=requeue)
+    if limited:
+        log(f"usage limit hit on {project['file'].name} "
+            f"(account {project['account']}, reset {reset_iso or 'unknown'}); "
+            f"account deferred")
+    if detail and requeue:
+        # No salvageable work and the project is queued again: a later tick
+        # retries quietly, so the reviewer has nothing to look at.
+        log(f"zero-work crash, re-queued {project['file'].name}")
+    elif WEBHOOK_URL:
+        time.sleep(HOOK_GRACE)
+        # The hook logs the resolved project stem, not the folder name.
+        if not hook_fired_since(project["file"].stem, started):
+            reason = detail or (
+                f"session wrapped but no SessionEnd hook fired "
+                f"(account {project['account']}, exit {exit_code}, {minutes} min)"
+            )
+            sent = notify_reviewer(project, reason)
+            log(f"reviewer notified directly for {project['file'].name}: "
+                f"{'ok' if sent else 'FAILED'}")
+    rebuild_dashboard()
+    audit_session_window(project, claim_head)
+    return {
+        "name": project["file"].stem,
+        "account": project["account"],
+        "transient": transient,
+        "limited": limited,
+        "reset": reset_iso,
+    }
+
+
+def fire_thread(project):
+    """fire() with a crash net: one project blowing up must not take the
+    other in-flight sessions down with it. Returns fire()'s outcome dict, or
+    None when the session never fired or the worker crashed."""
+    try:
+        return fire(project)
+    except Exception as exc:  # noqa: BLE001 - the net is the point
+        log(f"ERROR: fire {project['file'].name} crashed: {exc}")
+        return None
+
+
+def fire_all(projects):
+    """One worker thread per project: target-repo sessions run fully
+    parallel, legwork-repo writes serialise behind WRITE_LOCK. Returns the
+    list of fire outcomes so the caller can update cooldown state."""
+    if len(projects) == 1:
+        return [fire_thread(projects[0])]
+    outcomes = [None] * len(projects)
+
+    def run(index, project):
+        outcomes[index] = fire_thread(project)
+
+    threads = [
+        threading.Thread(target=run, args=(i, p), name=p["file"].stem)
+        for i, p in enumerate(projects)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    return outcomes
+
+
+def rebuild_dashboard():
+    """Safety net: the session's own wrap may lack permission to rebuild."""
+    with WRITE_LOCK:
+        subprocess.run(
+            [sys.executable, str(LEGWORK_DIR / "scripts" / "build_dashboard.py")],
+            cwd=LEGWORK_DIR, capture_output=True, timeout=60,
+        )
+        changed = run_git(["status", "--porcelain", "dashboard"], LEGWORK_DIR)
+        if changed.stdout.strip():
+            run_git(["add", "dashboard"], LEGWORK_DIR)
+            run_git(["commit", "-m", "legwork: runner rebuilds dashboard"],
+                    LEGWORK_DIR)
+            if not push_with_rebase(LEGWORK_DIR):
+                log("dashboard rebuild push failed")
+
+
+def acquire_lock():
+    try:
+        fd = os.open(LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+        return True
+    except FileExistsError:
+        try:
+            pid = int(LOCK_FILE.read_text().strip())
+            os.kill(pid, 0)
+            return False  # holder is alive
+        except (ValueError, ProcessLookupError):
+            LOCK_FILE.unlink(missing_ok=True)  # stale lock from a dead run
+            return acquire_lock()
+        except PermissionError:
+            return False
+
+
+def tick(dry_run=False):
+    pause_note = None
+    if PAUSE_FILE.exists():
+        pause_note = ".runner-pause exists; delete it to resume"
+    elif REMOTE_PAUSE_FILE.exists():
+        pause_note = ".runner-pause-remote is committed; send /resume in Telegram"
+    if pause_note:
+        if dry_run:
+            print(f"Paused: {pause_note}.")
+        else:
+            # Pausing is deliberate, but forgetting the pause is not: the
+            # daily heartbeat still goes out and says so.
+            maybe_heartbeat(load_state(), paused=pause_note)
+        return
+
+    if not dry_run:
+        state = load_state()
+        blocked = None
+        dirty = run_git(["status", "--porcelain"], LEGWORK_DIR)
+        if dirty.returncode != 0:
+            blocked = "git status failed in the legwork repo"
+        else:
+            # Untracked files are safe to tick over: the pull rebases past
+            # them and every runner commit is path-scoped. Uncommitted
+            # tracked changes block the pull and could leak into commits.
+            # The one exception is a tracker-only edit (everything under
+            # projects/): a manual work-account wrap leaves projects/<x>.md
+            # dirty with no hook to commit it, which would stall firing
+            # forever. The runner commits those itself and proceeds. Any
+            # dirty path outside projects/ still blocks until a human acts.
+            tracked = [l for l in dirty.stdout.splitlines()
+                       if l.strip() and not l.startswith("??")]
+            if tracked and all(porcelain_path(l).startswith("projects/")
+                               for l in tracked):
+                run_git(["add", "projects"], LEGWORK_DIR)
+                committed = run_git(
+                    ["commit", "-m",
+                     "legwork: runner auto-commits tracker edits"],
+                    LEGWORK_DIR)
+                if committed.returncode == 0:
+                    push_with_rebase(LEGWORK_DIR)
+                    names = ", ".join(sorted(
+                        {porcelain_path(l) for l in tracked}))
+                    log(f"auto-committed tracker edits ({len(tracked)} "
+                        f"files): {names}")
+                    tracked = []
+            if tracked:
+                outside = sorted({porcelain_path(l) for l in tracked
+                                  if not porcelain_path(l).startswith("projects/")})
+                blocked = (f"uncommitted tracked changes in the legwork "
+                           f"repo ({len(tracked)} files"
+                           + (f": {', '.join(outside)}" if outside else "")
+                           + ")")
+        if blocked is None:
+            pull = run_git(["pull", "--rebase"], LEGWORK_DIR)
+            if pull.returncode != 0:
+                blocked = f"pull failed ({pull.stderr.strip()[:120]})"
+        if blocked:
+            log(f"skipped tick: {blocked}")
+            note_blocked(state, blocked)
+            return
+        clear_blocked(state)
+        if REMOTE_PAUSE_FILE.exists():
+            # The pull may have just delivered a /pause commit; honor it on
+            # this tick instead of firing one last window.
+            maybe_heartbeat(state, paused=".runner-pause-remote is committed; "
+                                          "send /resume in Telegram")
+            return
+        maybe_heartbeat(state)
+
+    eligible = []
+    for path in sorted(PROJECTS_DIR.glob("*.md")):
+        if path.name.startswith("_"):
+            continue
+        ok, reason, details = assess(path)
+        if dry_run:
+            print(f"{path.name:28} {'FIRE' if ok else 'skip'}  {reason}")
+        if ok:
+            eligible.append(details)
+
+    if not eligible:
+        return
+
+    # Defer projects still cooling down from a transient crash, and whole
+    # accounts deferred by a recent usage limit, so a 529 storm or a hit
+    # quota is not fired into every five minutes. Backoff and usage state
+    # both live in .runner-state.json; dry-run reads it without changing it.
+    cooldown_state = state if not dry_run else load_state()
+    now = datetime.now()
+    ready = []
+    for project in eligible:
+        blocked_for = usage_block_remaining(cooldown_state, project["account"], now)
+        if blocked_for:
+            note = (f"{project['file'].name} deferred: {project['account']} "
+                    f"account usage-limited, ~{blocked_for // 60} min left")
+            print(f"deferred: {note}") if dry_run else log(f"deferred: {note}")
+            continue
+        cooling = transient_cooldown_remaining(cooldown_state, project["file"].stem, now)
+        if cooling:
+            note = (f"{project['file'].name} deferred: transient-crash backoff, "
+                    f"~{cooling // 60} min left")
+            print(f"deferred: {note}") if dry_run else log(f"deferred: {note}")
+            continue
+        ready.append(project)
+    eligible = ready
+    if not eligible:
+        return
+
+    # Every eligible project fires, one session each. Oldest updated first
+    # decides who wins when two projects point at the same repo: sessions
+    # sharing a working tree would collide, so only the oldest fires and
+    # the other waits for a later tick.
+    eligible.sort(key=lambda p: p["updated"])
+    seen_repos = set()
+    firing = []
+    for project in eligible:
+        repo_key = str(project["repo_path"].resolve())
+        if repo_key in seen_repos:
+            note = (f"{project['file'].name} shares {repo_key} with an "
+                    f"already-firing project, deferred to a later tick")
+            if dry_run:
+                print(f"deferred: {note}")
+            else:
+                log(f"deferred: {note}")
+            continue
+        seen_repos.add(repo_key)
+        firing.append(project)
+
+    if dry_run:
+        names = ", ".join(p["file"].name for p in firing)
+        print(f"\nWould fire: {names}")
+        return
+    outcomes = fire_all(firing)
+    update_cooldowns(state, outcomes, datetime.now())
+
+
+def main():
+    dry_run = "--dry-run" in sys.argv
+    if dry_run:
+        tick(dry_run=True)
+        return
+    if not acquire_lock():
+        return
+    try:
+        tick()
+    finally:
+        LOCK_FILE.unlink(missing_ok=True)
+
+
+if __name__ == "__main__":
+    main()
