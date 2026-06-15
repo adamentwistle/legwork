@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Template launchd agent for the legwork runner.
+  Replace the placeholders, then install:
+    __LEGWORK_DIR__  absolute path to your legwork repo, e.g. /Users/you/legwork
+    __PYTHON__        python3 interpreter, e.g. /usr/bin/python3
+  For example:
+    sed -e 's#__LEGWORK_DIR__#'"$HOME"'/legwork#g' \
+        -e 's#__PYTHON__#/usr/bin/python3#g' \
+        scripts/com.legwork.runner.plist > ~/Library/LaunchAgents/com.legwork.runner.plist
+    launchctl load ~/Library/LaunchAgents/com.legwork.runner.plist
+  StartInterval is in seconds (300 = every 5 minutes); change it to taste.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.legwork.runner</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__PYTHON__</string>
+        <string>__LEGWORK_DIR__/scripts/legwork_runner.py</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>300</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>__LEGWORK_DIR__/.runner-logs/launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LEGWORK_DIR__/.runner-logs/launchd.log</string>
+</dict>
+</plist>

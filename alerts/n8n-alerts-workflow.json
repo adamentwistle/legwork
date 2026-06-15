@@ -1,0 +1,58 @@
+{
+  "name": "Legwork runner alerts",
+  "active": false,
+  "nodes": [
+    {
+      "id": "alert-webhook-1",
+      "name": "Alert webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "legwork-alert",
+        "options": {}
+      }
+    },
+    {
+      "id": "alert-telegram-1",
+      "name": "Telegram alert",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        224,
+        0
+      ],
+      "parameters": {
+        "chatId": "REPLACE_WITH_CHAT_ID",
+        "text": "={{ ($json.body || $json).text || 'Legwork alert (no text)' }}",
+        "additionalFields": {}
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_WITH_CREDENTIAL_ID",
+          "name": "Telegram bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Alert webhook": {
+      "main": [
+        [
+          {
+            "node": "Telegram alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
