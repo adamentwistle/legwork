@@ -212,7 +212,7 @@ the project file format, the status set, the Vision shape, the prompt-minting
 rules, and the wrap procedure. It is what mints and updates project files at
 the end of every session. The commands under `.claude/commands/` are the
 verbs: `/add` (start a project), `/log` (update without a work session),
-`/resume` (reload context), `/shelve` (icebox), `/vision` (capture the standing
+`/pickup` (reload context), `/shelve` (icebox), `/vision` (capture the standing
 brief and optionally grant autonomy), and `/wrap` (close out a session and mint
 the next prompt). `/vision` is the single gate into autonomy: it captures the
 Vision and is the only place `autonomy: loop` is set.

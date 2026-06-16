@@ -1,6 +1,6 @@
 ---
 name: legwork-tracker
-description: Manage the legwork project queue across its full lifecycle. Use whenever the user runs /wrap, /add, /log, /shelve, /resume or /vision, says "wrap up", "close out", "log this", "shelve", "reopen", "add a project", "change the status" or "tweak the prompt", or is clearly finishing, starting, updating or retiring work on any project. Every session that produced real work must end with a tracker update.
+description: Manage the legwork project queue across its full lifecycle. Use whenever the user runs /wrap, /add, /log, /shelve, /pickup or /vision, says "wrap up", "close out", "log this", "shelve", "reopen", "add a project", "change the status" or "tweak the prompt", or is clearly finishing, starting, updating or retiring work on any project. Every session that produced real work must end with a tracker update.
 ---
 
 # Legwork tracker
@@ -124,7 +124,7 @@ lets a cold session, possibly a headless one, resume without the user
 reloading context. Rules:
 
 - Assume a cold start. The prompt must point at standing context first:
-  "Read PROJECT.md and the last three log entries in
+  "Read the repo's README or PROJECT.md and the last three log entries in
   legwork/projects/<file>."
 - One task only, small enough to finish in a single sitting. If the obvious
   next step is big, cut it down and put the rest in the log as a note.
