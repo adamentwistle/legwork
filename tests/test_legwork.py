@@ -763,7 +763,10 @@ class TestDashboard(unittest.TestCase):
         pills = build_dashboard.pills(parsed)
         self.assertIn("blocked", pills)
         card = build_dashboard.card(parsed)
-        self.assertIn("Blocked on: ICO registered", card)
+        # The blocked-on reason renders on the card (the label is bolded, so
+        # the label and reason are not one contiguous run of text).
+        self.assertIn("Blocked on:", card)
+        self.assertIn("ICO registered", card)
 
     def test_unknown_status_treated_as_queued(self):
         path = write_project("t-badstatus.md", status="paused")
@@ -776,7 +779,8 @@ class TestDashboard(unittest.TestCase):
         p2 = build_dashboard.parse_project(write_project(
             "t-cl2.md", log_lines=["- 2026-06-02: beta moved."]))
         html_out = build_dashboard.changelog_html([p1, p2])
-        self.assertEqual(html_out.count("Tue 02 Jun 2026"), 1)
+        # Both entries share one day, so the date heads a single timeline group.
+        self.assertEqual(html_out.count("2026-06-02"), 1)
         self.assertIn("alpha moved.", html_out)
         self.assertIn("beta moved.", html_out)
 
