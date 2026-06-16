@@ -38,7 +38,12 @@ Each project is a markdown file with frontmatter, an optional `## Vision` brief,
 
 The dashboard is a single static HTML file built from `projects/*.md` by `scripts/build_dashboard.py`, which uses the Python standard library only and rewrites `dashboard/index.html` wholesale on each run. It is a build artifact, gitignored, and read straight from disk in a browser. It shows each project as a card with its status, energy, description, blocker, and staleness, so the queue is visible at a glance with no server.
 
-![legwork dashboard](docs/dashboard.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/dashboard-dark.png" />
+  <img alt="The legwork dashboard: a queue ribbon, a needs-you zone, status-spined project cards, and a changelog timeline" src="docs/dashboard-light.png" />
+</picture>
+
+<sub>Light and dark both ship in <code>docs/</code>; the image above follows your GitHub theme.</sub>
 
 ## Quickstart
 
