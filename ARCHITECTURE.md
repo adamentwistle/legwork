@@ -112,7 +112,7 @@ Stdlib only. It reads simple frontmatter, the first fenced block under
 `## Next prompt`, and the bullets under `## Log` from every project file, then
 writes `dashboard/index.html`. Every run replaces the file wholesale: all
 styling lives in the `TEMPLATE` constant, and project data never lives in the
-script. The build groups projects by status, surfaces a "Needs me" section for
+script. The build groups projects by status, surfaces a "Needs you" section for
 escalated projects, computes a freshness pill from the newest of the
 frontmatter date and the latest log entry, and renders a changelog of every
 dated log line. The html is a build artifact and is gitignored.
@@ -124,6 +124,7 @@ The runner. Run by launchd or cron every five minutes, or by hand:
 ```
 python3 scripts/legwork_runner.py            one tick
 python3 scripts/legwork_runner.py --dry-run  show eligibility, change nothing
+python3 scripts/legwork_runner.py --doctor   preflight checklist, change nothing
 ```
 
 Zero dependencies. It reads config at startup via `load_config()`, which loads
@@ -262,8 +263,11 @@ One tick fires every eligible project at once, one session in flight per
 project. Target-repo sessions run fully parallel in worker threads. The
 legwork repo is shared state, so every write section (claim, repair, dashboard
 rebuild, audit window) takes an in-process write lock and pushes before
-releasing it. Concurrent fires never race the index or sweep each other's
-commits, and a parallel wrap or an n8n remote commit cannot race the runner.
+releasing it. The lock only serialises the runner's own worker threads against
+each other, so concurrent fires never race the index or sweep each other's
+commits. It does not reach cross-process writers: a session's own `/wrap` or an
+n8n remote commit lands independently, and `push_with_rebase`'s rebase-and-retry
+reconciles those by pulling and replaying on conflict, not the lock.
 
 Two projects that point at the same target repo never fire in the same window,
 because sessions sharing one working tree would collide. The oldest claim wins
@@ -279,6 +283,14 @@ and wrap. Everything else (test runners, builds, deploys) is denied unless the
 target repo's own `.claude/settings.json` allow rules grant it. The per-repo
 allowlist is the consent mechanism, and the runner never widens it. No
 permission checks are bypassed.
+
+Because `--add-dir <LEGWORK_DIR>` lets a session edit the legwork repo, the
+runner also passes a `--settings` file with Edit/Write deny rules on the
+control plane under `LEGWORK_DIR` (`scripts/**`, `reviewer/**`,
+`reply-capture/**`, `alerts/**`, and the hook scripts). This blocks a worker
+session from rewriting the runner, hooks, or reviewer at the tool layer,
+independent of any webhook. `audit_session_window()` remains a second,
+post-hoc layer over the same control plane (see below).
 
 ### Crashes (repair status)
 
@@ -316,11 +328,18 @@ same wall. The backoff and usage state live in `.runner-state.json`.
 The runner reads config at startup via `load_config()`. A `.runner-pause` flag
 (or its tracked twin `.runner-pause-remote`, which the Telegram `/pause` and
 `/resume` commands commit and delete) stops all firing. The per-session timeout
-(`SESSION_TIMEOUT`) terminates a stuck session. After every fire the runner
-audits the session window: any commit that touched the legwork repo outside
+(`SESSION_TIMEOUT`) terminates a stuck session. An optional spend guard,
+`LEGWORK_DAILY_COST_CAP` (dollars; unset or `0` means no cap), sums today's
+per-fire costs from `runner.log` and stops firing for the day once the cap is
+reached, alerting once like the stall alert. After every fire the runner audits
+the session window: any commit that touched the legwork repo outside
 `projects/` or `dashboard/` raises an alert, because the legwork repo is the
-control plane. A minted prompt may carry `Model:` and `Effort:` lines, which
-the runner strips and passes through as `--model` and `--effort`.
+control plane. `audit_session_window()` always writes an `AUDIT` line to
+`runner.log`, even with no alert webhook set. A minted prompt may carry
+`Model:` and `Effort:` lines, which the runner strips and passes through as
+`--model` and `--effort`. `--doctor` runs a preflight checklist (and, like
+`--dry-run`, surfaces frontmatter validation warnings) without changing
+anything; the validation is warnings only and never blocks a fire.
 
 ## Invariants
 
@@ -349,10 +368,15 @@ pieces rely on.
 - The runner audits its own control plane. Any commit in a session window that
   touches the legwork repo outside `projects/` and `dashboard/` raises an
   alert.
-- The reviewer always escalates self-modification of the pipeline: when the
-  repo under review is the legwork repo and the diff touches its hooks,
-  reviewer rubric, n8n workflow, or dashboard build script, the verdict is
-  escalate regardless of confidence.
+- Self-modification of the control plane is blocked locally at the tool layer.
+  The runner passes `--settings` deny rules on `scripts/**`, `reviewer/**`,
+  `reply-capture/**`, `alerts/**`, and the hook scripts under `LEGWORK_DIR`, so
+  a worker session cannot rewrite the runner, hooks, or reviewer regardless of
+  any webhook, and `audit_session_window()` records any control-plane touch in
+  `runner.log` after the fact. When the optional reviewer is wired, it
+  additionally escalates self-modification: a diff of the legwork repo that
+  touches its hooks, reviewer rubric, n8n workflow, or dashboard build script
+  is escalate regardless of confidence.
 
 ## Design choices
 
