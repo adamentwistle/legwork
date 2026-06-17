@@ -429,6 +429,134 @@ class TestHelpers(unittest.TestCase):
             "projects/new.md")
 
 
+class TestAuditedFixes(unittest.TestCase):
+    """Coverage for the behaviours changed in the audit pass: combined
+    directive lines, the reset-date guard, prefix-safe fire counting, the
+    cost cap data, frontmatter validation, the rebase tripwire, the
+    classify_outcome decision tail, and transient-cooldown pruning."""
+
+    def test_combined_directive_line(self):
+        prompt, model, effort, ignored = legwork_runner.extract_directives(
+            "Model: opus, Effort: max\n\nDo the task.")
+        self.assertEqual((model, effort), ("opus", "max"))
+        self.assertEqual(ignored, [])
+        self.assertEqual(prompt, "Do the task.")
+
+    def test_reset_date_not_misread_as_clock(self):
+        now = datetime(2026, 6, 17, 9, 0, 0)
+        limited, reset = legwork_runner.usage_limit_reset(
+            {"is_error": True, "result": "usage limit; resets 2026-06-18"}, now)
+        self.assertTrue(limited)
+        self.assertIsNone(reset, "a date must not parse into a clock time")
+        limited2, reset2 = legwork_runner.usage_limit_reset(
+            {"is_error": True, "result": "usage limit reached, resets 6:40pm"},
+            now)
+        self.assertTrue(limited2)
+        self.assertTrue(reset2.endswith("18:40:00"))
+
+    def test_fires_today_prefix_safety(self):
+        today = date.today().isoformat()
+        with open(legwork_runner.RUNNER_LOG, "w", encoding="utf-8") as fh:
+            fh.write(f"{today} 09:00:00  fired foo.md in /a\n")
+            fh.write(f"{today} 09:05:00  fired foo-bar.md in /b\n")
+        try:
+            self.assertEqual(legwork_runner.fires_today("foo.md"), 1)
+            self.assertEqual(legwork_runner.fires_today("foo-bar.md"), 1)
+        finally:
+            legwork_runner.RUNNER_LOG.unlink()
+
+    def test_cost_today_sums_today_only(self):
+        today = date.today().isoformat()
+        with open(legwork_runner.RUNNER_LOG, "w", encoding="utf-8") as fh:
+            fh.write(f"{today} 09:00:00  completed a.md: exit 0, 5 min, "
+                     f"$1.50, 12 turns\n")
+            fh.write(f"{today} 10:00:00  completed b.md: exit 0, 2 min, "
+                     f"$0.25, 3 turns\n")
+            fh.write("2020-01-01 09:00:00  completed c.md: exit 0, 1 min, "
+                     "$9.99, 1 turns\n")
+            fh.write(f"{today} 11:00:00  fired d.md in /x\n")
+        try:
+            self.assertAlmostEqual(legwork_runner.cost_today(), 1.75, places=2)
+        finally:
+            legwork_runner.RUNNER_LOG.unlink()
+
+    def test_validate_project_flags_typos(self):
+        d = Path(tempfile.mkdtemp(dir=str(TMP)))
+        f = d / "bad.md"
+        f.write_text("---\nname: Bad\nstatus: paused\nautonomy: yes\n"
+                     "wibble: nope\nrepo: none\nupdated: 2026-06-01\n---\n",
+                     encoding="utf-8")
+        joined = " ".join(legwork_runner.validate_project(f))
+        self.assertIn("unknown status 'paused'", joined)
+        self.assertIn("autonomy is 'yes'", joined)
+        self.assertIn("unknown frontmatter key 'wibble'", joined)
+
+    def test_validate_project_clean(self):
+        d = Path(tempfile.mkdtemp(dir=str(TMP)))
+        f = d / "ok.md"
+        f.write_text("---\nname: Ok\ncategory: personal\nstatus: queued\n"
+                     "energy: light\ndescription: fine\nrepo: none\n"
+                     "updated: 2026-06-01\nautonomy: loop\n---\n",
+                     encoding="utf-8")
+        self.assertEqual(legwork_runner.validate_project(f), [])
+
+    def test_rebase_in_progress(self):
+        d = Path(tempfile.mkdtemp(dir=str(TMP)))
+        (d / ".git").mkdir()
+        self.assertFalse(legwork_runner.rebase_in_progress(d))
+        (d / ".git" / "rebase-merge").mkdir()
+        self.assertTrue(legwork_runner.rebase_in_progress(d))
+
+    def test_classify_outcome_clean(self):
+        now = datetime(2026, 6, 17, 9, 0, 0)
+        out = legwork_runner.classify_outcome(
+            {"is_error": False, "num_turns": 8, "total_cost_usd": 0.4}, now)
+        self.assertEqual(
+            (out["transient"], out["limited"], out["requeue"]),
+            (False, False, False))
+
+    def test_classify_outcome_transient_requeues(self):
+        now = datetime(2026, 6, 17, 9, 0, 0)
+        out = legwork_runner.classify_outcome(
+            {"is_error": True, "num_turns": 1, "total_cost_usd": 0,
+             "result": "API Error: 529 overloaded"}, now)
+        self.assertTrue(out["transient"])
+        self.assertTrue(out["requeue"])
+        self.assertFalse(out["limited"])
+
+    def test_classify_outcome_usage_before_work_requeues(self):
+        now = datetime(2026, 6, 17, 9, 0, 0)
+        out = legwork_runner.classify_outcome(
+            {"is_error": True, "num_turns": 1, "total_cost_usd": 0,
+             "result": "usage limit reached, resets 6:40pm"}, now)
+        self.assertTrue(out["limited"])
+        self.assertTrue(out["requeue"])
+        self.assertFalse(out["transient"])
+        self.assertTrue(out["reset"].endswith("18:40:00"))
+
+    def test_classify_outcome_usage_mid_work_does_not_requeue(self):
+        # The composition the unit tests could not reach before fire()'s tail
+        # was extracted: a usage limit that hit after real work defers the
+        # account but keeps the output for review (requeue must be False).
+        now = datetime(2026, 6, 17, 9, 0, 0)
+        out = legwork_runner.classify_outcome(
+            {"is_error": True, "num_turns": 9, "total_cost_usd": 0.7,
+             "result": "usage limit reached"}, now)
+        self.assertTrue(out["limited"])
+        self.assertFalse(out["requeue"])
+        self.assertFalse(out["transient"])
+
+    def test_update_cooldowns_prunes_expired_transient(self):
+        now = datetime(2026, 6, 17, 9, 0, 0)
+        old = (now - timedelta(days=1)).isoformat()
+        state = {"transient": {"stale": {"since": old, "count": 1}}}
+        try:
+            legwork_runner.update_cooldowns(state, [], now)
+            self.assertNotIn("stale", state["transient"])
+        finally:
+            legwork_runner.STATE_FILE.unlink(missing_ok=True)
+
+
 class TestConcurrentRunner(unittest.TestCase):
     """Claim and wrap race paths: parallel claims serialise behind
     WRITE_LOCK, remote movement (n8n write-back, parallel wraps) is rebased
@@ -752,6 +880,49 @@ class TestConcurrentRunner(unittest.TestCase):
                          "repo-sharing project defers to a later tick")
 
 
+    def test_audit_alerts_on_control_plane_edit(self):
+        # The control-plane tripwire: a session window that commits outside
+        # projects/ and dashboard/ (editing the runner, hooks or reviewer)
+        # must raise an alert.
+        claim_head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=SANDBOX,
+            capture_output=True, text=True).stdout.strip()
+        calls = []
+        legwork_runner.send_alert = lambda text: calls.append(text) or True
+        evil = SANDBOX / "scripts" / "c-evil.py"
+        evil.parent.mkdir(exist_ok=True)
+        evil.write_text("# tampered\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=SANDBOX, check=True)
+        subprocess.run(["git", *GIT_ID, "commit", "-q", "-m", "evil edit"],
+                       cwd=SANDBOX, check=True)
+        try:
+            legwork_runner.audit_session_window(
+                {"file": SANDBOX / "projects" / "c-audit.md"}, claim_head)
+            self.assertTrue(calls, "control-plane edit should alert")
+            self.assertIn("scripts/c-evil.py", calls[0])
+        finally:
+            subprocess.run(["git", "reset", "-q", "--hard", claim_head],
+                           cwd=SANDBOX, check=True)
+
+    def test_audit_silent_on_tracker_only_edit(self):
+        claim_head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=SANDBOX,
+            capture_output=True, text=True).stdout.strip()
+        calls = []
+        legwork_runner.send_alert = lambda text: calls.append(text) or True
+        tracker = SANDBOX / "projects" / "c-audit-ok.md"
+        tracker.write_text("---\nname: ok\n---\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=SANDBOX, check=True)
+        subprocess.run(["git", *GIT_ID, "commit", "-q", "-m", "tracker edit"],
+                       cwd=SANDBOX, check=True)
+        try:
+            legwork_runner.audit_session_window({"file": tracker}, claim_head)
+            self.assertEqual(calls, [], "tracker-only edit must stay silent")
+        finally:
+            subprocess.run(["git", "reset", "-q", "--hard", claim_head],
+                           cwd=SANDBOX, check=True)
+
+
 class TestDashboard(unittest.TestCase):
     def test_parse_project_with_blocked_on(self):
         path = write_project(
@@ -839,6 +1010,42 @@ class TestHooks(unittest.TestCase):
         self.run_hook(self.END, payload, url=None)
         self.assertIn("LEGWORK_WEBHOOK_URL not set", self.hook_log_tail())
 
+    def test_end_logs_sent_on_2xx(self):
+        # The success path: a 2xx response logs "sent:", so the runner reads
+        # the review as delivered. (A failed POST -> "post-failed:", which
+        # keeps the runner's fallback alive; tested elsewhere.)
+        import http.server
+        import socketserver
+
+        class _OK(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+
+        srv = socketserver.TCPServer(("127.0.0.1", 0), _OK)
+        port = srv.server_address[1]
+        thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        thread.start()
+        try:
+            self.run_hook(self.START,
+                          f'{{"session_id":"hk-ok","cwd":"{self.work}"}}')
+            subprocess.run(["git", *GIT_ID, "commit", "-q", "--allow-empty",
+                            "-m", "work"], cwd=self.work, check=True)
+            self.run_hook(
+                self.END,
+                f'{{"session_id":"hk-ok","cwd":"{self.work}","reason":"exit"}}',
+                url=f"http://127.0.0.1:{port}/x")
+            tail = self.hook_log_tail()
+            self.assertIn("sent:", tail)
+            self.assertIn("http=200", tail)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
     def test_end_skips_on_clear(self):
         payload = f'{{"session_id":"hk-3","cwd":"{self.work}","reason":"clear"}}'
         self.run_hook(self.END, payload, url="http://127.0.0.1:9/x")
@@ -867,7 +1074,9 @@ class TestHooks(unittest.TestCase):
             f'{{"session_id":"hk-6","cwd":"{repo}","reason":"exit"}}',
             url="http://127.0.0.1:9/x")
         tail = self.hook_log_tail()
-        self.assertIn("t-renamed  sent:", tail)
+        # Dead port -> http=000 -> the failed POST logs "post-failed:", not
+        # "sent:"; the stem prefix is what this test pins.
+        self.assertIn("t-renamed  post-failed:", tail)
         self.assertNotIn("t-alias-repo", tail)
 
     def test_end_sends_and_consumes_marker(self):
@@ -879,7 +1088,10 @@ class TestHooks(unittest.TestCase):
                       f'{{"session_id":"hk-5","cwd":"{self.work}","reason":"exit"}}',
                       url="http://127.0.0.1:9/x")
         tail = self.hook_log_tail()
-        self.assertIn("sent:", tail)
+        # A failed POST (dead port -> http=000) logs "post-failed:", so the
+        # runner's hook_fired_since() stays False and its fallback fires; the
+        # marker is still consumed before the POST is attempted.
+        self.assertIn("post-failed:", tail)
         self.assertIn("http=000", tail)
         self.assertFalse((SANDBOX / ".session-heads" / "hk-5").exists(),
                          "consumed marker should be removed")
@@ -907,7 +1119,7 @@ class TestHooks(unittest.TestCase):
             f'{{"session_id":"hk-7","cwd":"{drift}","reason":"exit"}}',
             url="http://127.0.0.1:9/x")
         tail = self.hook_log_tail()
-        self.assertIn("t-drift  sent:", tail)
+        self.assertIn("t-drift  post-failed:", tail)
         self.assertNotIn("no changes this session", tail)
         self.assertNotIn("t-drift-elsewhere", tail)
 
