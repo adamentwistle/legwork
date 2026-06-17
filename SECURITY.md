@@ -35,6 +35,14 @@ model. The runner never widens them and bypasses no permission checks. A
 session that hits a wall is expected to say so and wrap honestly rather than
 work around it.
 
+Because `--add-dir <LEGWORK_DIR>` plus `acceptEdits` auto-accepts edits in the
+legwork repo too, a session could in principle edit legwork's own control-plane
+files. The runner mitigates this at the tool layer: it passes a `--settings`
+file with Edit/Write deny rules on `scripts/**`, `reviewer/**`,
+`reply-capture/**`, `alerts/**`, and the hook scripts under `LEGWORK_DIR`, so a
+worker session cannot rewrite the runner, hooks, or reviewer. The post-hoc audit
+below is a second layer over the same files.
+
 ## Autonomy is opt-in
 
 A project does not fire on its own. The runner only fires a project when a
@@ -105,7 +113,7 @@ window can trip it too, and the alert says to ignore those if they are yours.
 
 ## Safety valves
 
-Three independent limits bound a runaway loop:
+Four independent limits bound a runaway loop:
 
 - **Pause flag.** `touch .runner-pause` in the legwork repo and the runner
   fires nothing on the next tick; delete it to resume. A tracked twin,
@@ -114,8 +122,14 @@ Three independent limits bound a runaway loop:
   It is re-checked right after the pull, so a fresh pause lands on the very
   next tick.
 - **`LEGWORK_DAILY_CAP`.** Autonomous fires per project per calendar day,
-  default 8. Counted from `runner.log`. Once a project hits the cap it stops
-  firing until the next day, even on retries.
+  default 8. Counted from `runner.log`, so truncating or rotating that file
+  resets the day's count. Once a project hits the cap it stops firing until the
+  next day, even on retries.
+- **`LEGWORK_DAILY_COST_CAP`.** An additional spend bound in dollars across all
+  projects per calendar day; unset or `0` means no cap. Summed from the per-fire
+  costs on `runner.log` completed lines, so truncating or rotating that file
+  resets the day's count too. Once today's total reaches the cap the runner
+  stops firing for the day and alerts once.
 - **Per-session timeout.** `SESSION_TIMEOUT` (3600 seconds) terminates a
   stuck session: SIGTERM, then SIGKILL after a grace period.
 

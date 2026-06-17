@@ -46,7 +46,8 @@ environment or the config file.
 | Variable | Default | Required | What it does |
 | --- | --- | --- | --- |
 | `LEGWORK_DIR` | `$HOME/legwork` | optional | The legwork repo: where `projects/*.md`, `runner.log`, the dashboard and runner state live. Everything the runner reads and writes is under here. |
-| `LEGWORK_DAILY_CAP` | `8` | optional | Autonomous fires per project per calendar day. Counted from `runner.log`. When a project hits the cap it stops firing until the next day. |
+| `LEGWORK_DAILY_CAP` | `8` | optional | Autonomous fires per project per calendar day. Counted from `runner.log`, so truncating or rotating that file resets the day's count. When a project hits the cap it stops firing until the next day. |
+| `LEGWORK_DAILY_COST_CAP` | `0` | optional | Spend guard in dollars across all projects per calendar day. Unset or `0` means no cap. Summed from the per-fire costs on `runner.log` completed lines; once today's total reaches the cap the runner stops firing for the day and alerts once. Like `LEGWORK_DAILY_CAP`, truncating or rotating `runner.log` resets the day's count. |
 | `LEGWORK_WEBHOOK_URL` | unset | optional | The n8n webhook that receives session evidence for review. The SessionEnd hook posts to it; the runner posts to it directly if a session's hook did not fire. Unset means the review post is skipped. |
 | `LEGWORK_ALERT_URL` | unset | optional | The n8n webhook that receives runner stall alerts and the daily heartbeat. Unset means those alerts are skipped. |
 | `CLAUDE_CONFIG_DIR` | unset | optional | The Claude config dir autonomous sessions run under, so a run never inherits whatever account your interactive shell defaults to. Unset means inherit the default config. |
