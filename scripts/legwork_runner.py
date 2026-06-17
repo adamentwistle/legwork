@@ -992,11 +992,15 @@ def write_guard_settings():
     work and /wrap. Deny rules win over acceptEdits, so this holds even with no
     review webhook wired. The post-hoc audit_session_window() stays as a second
     layer. Best-effort: a write failure just falls back to that audit."""
-    base = str(LEGWORK_DIR)
+    # Claude Code permission rules read a single leading "/" as relative to
+    # the project root; an absolute filesystem path must be prefixed with "//"
+    # or the deny silently matches nothing (verified by firing a real session).
+    base = str(LEGWORK_DIR).lstrip("/")
     deny = []
     for sub in ("scripts", "reviewer", "reply-capture", "alerts"):
+        path = f"//{base}/{sub}/**"
         for tool in ("Edit", "Write", "MultiEdit"):
-            deny.append(f"{tool}({base}/{sub}/**)")
+            deny.append(f"{tool}({path})")
     try:
         GUARD_SETTINGS.write_text(
             json.dumps({"permissions": {"deny": deny}}), encoding="utf-8")

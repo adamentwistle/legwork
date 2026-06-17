@@ -556,6 +556,26 @@ class TestAuditedFixes(unittest.TestCase):
         finally:
             legwork_runner.STATE_FILE.unlink(missing_ok=True)
 
+    def test_guard_settings_use_absolute_deny_paths(self):
+        import json
+        legwork_runner.write_guard_settings()
+        try:
+            deny = json.loads(legwork_runner.GUARD_SETTINGS.read_text(
+                encoding="utf-8"))["permissions"]["deny"]
+        finally:
+            legwork_runner.GUARD_SETTINGS.unlink(missing_ok=True)
+        # Claude Code reads a single leading "/" as project-relative; an
+        # absolute deny must be "//" or it silently matches nothing. A real
+        # session confirmed "//" blocks a scripts/ write; pin it here so the
+        # format cannot regress unnoticed.
+        self.assertTrue(deny)
+        for rule in deny:
+            inside = rule.split("(", 1)[1].rstrip(")")
+            self.assertTrue(inside.startswith("//"),
+                            f"deny rule must be an absolute // path: {rule}")
+        self.assertTrue(any(r.startswith(("Edit(", "Write("))
+                            and "/scripts/**" in r for r in deny))
+
 
 class TestConcurrentRunner(unittest.TestCase):
     """Claim and wrap race paths: parallel claims serialise behind
