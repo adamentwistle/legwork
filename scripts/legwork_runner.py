@@ -6,6 +6,7 @@ minutes (com.legwork.runner), or by hand:
 
     python3 scripts/legwork_runner.py            one tick
     python3 scripts/legwork_runner.py --dry-run  show eligibility, change nothing
+    python3 scripts/legwork_runner.py --doctor   preflight checklist, change nothing
 
 One tick fires every eligible project at once, one session in flight per
 project: target-repo sessions run fully parallel in worker threads, while
@@ -36,7 +37,10 @@ and the dashboard rebuild, which is just enough to work, commit and /wrap.
 Anything more (test runners, builds, deploys) is granted per repo by the
 human, in that repo's own .claude/settings.json allow rules; everything else
 is denied and the session is expected to say so and wrap honestly. No
-permission checks are bypassed.
+permission checks are bypassed. A per-session --settings file denies edits to
+the legwork control plane (scripts/, reviewer/, the n8n pipelines), so a
+worker session does its work and wraps without rewriting the runner that
+governs it; audit_session_window stays as a second, post-hoc layer.
 
 Accounts: when CLAUDE_CONFIG_DIR is set, sessions fire under that config dir
 so an autonomous run never inherits whatever account your interactive shell
@@ -88,8 +92,9 @@ wrap leaves behind with no hook to commit it) is committed by the runner
 itself and the tick proceeds. Any dirty path outside projects/ still blocks
 until a human commits or reverts.
 
-Config: LEGWORK_DIR, the webhook URLs, CLAUDE_CONFIG_DIR and
-LEGWORK_DAILY_CAP are read from the environment, and from a `config` file
+Config: LEGWORK_DIR, the webhook URLs, CLAUDE_CONFIG_DIR, LEGWORK_DAILY_CAP
+and the optional spend guard LEGWORK_DAILY_COST_CAP (dollars; unset or 0 means
+no cap) are read from the environment, and from a `config` file
 beside the repo root when one is present (real environment variables win),
 so launchd and manual runs share one source of truth. See config.example.
 The review pipeline is optional: with neither LEGWORK_WEBHOOK_URL nor
@@ -103,11 +108,14 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.request
 from datetime import date, datetime, timedelta
 from pathlib import Path
+
+from legwork_common import PROMPT_RE, days_since, parse_frontmatter
 
 
 def load_config():
@@ -145,6 +153,11 @@ PROJECTS_DIR = LEGWORK_DIR / "projects"
 RUNNER_LOG = LEGWORK_DIR / "runner.log"
 TRANSCRIPTS = LEGWORK_DIR / ".runner-logs"
 LOCK_FILE = LEGWORK_DIR / ".runner.lock"
+# Per-session Claude settings the runner writes and passes with --settings:
+# deny rules that block a fired session from editing the control plane. Kept
+# in the temp dir, not the legwork repo, since it is ephemeral session config
+# regenerated every tick and should never show up in the repo's git status.
+GUARD_SETTINGS = Path(tempfile.gettempdir()) / "legwork-runner-guard.json"
 PAUSE_FILE = LEGWORK_DIR / ".runner-pause"
 # Tracked twin of the pause file, committed and deleted by the Telegram
 # /pause and /resume commands through the GitHub Contents API.
@@ -168,8 +181,16 @@ CLAUDE_FALLBACKS = [
 ]
 
 DAILY_CAP = int(os.environ.get("LEGWORK_DAILY_CAP", "8"))  # fires per project per day
+# Optional spend guard. Unset or 0 means no cost cap. When set, the runner
+# sums today's per-fire costs from runner.log (the $X.XX transcript_summary
+# logs) and stops firing for the rest of the day once the cap is reached.
+DAILY_COST_CAP = float(os.environ.get("LEGWORK_DAILY_COST_CAP", "0") or 0)
 SESSION_TIMEOUT = 3600   # seconds before a session is terminated
 GRACE = 60               # seconds between SIGTERM and SIGKILL
+# A single tick should never outlive one session. Past this a live-PID lock
+# means the runner itself is wedged (a hung git/network call or a deadlock),
+# so the lock is reclaimed and an alert is sent instead of stalling forever.
+LOCK_MAX_AGE = SESSION_TIMEOUT + GRACE + 300
 HOOK_GRACE = 10          # seconds for the async SessionEnd hook to land
 STALL_ALERT_AFTER = 1800 # seconds of blocked ticks before one Telegram alert
 HEARTBEAT_HOUR = 8       # daily pulse goes out on the first tick after this
@@ -183,15 +204,25 @@ TRANSIENT_CAP = 7200     # ceiling on the transient backoff (2 h)
 # the named reset; if no reset clock can be read, this default block applies.
 USAGE_BLOCK_DEFAULT = 1800  # 30 min
 
-PROMPT_RE = re.compile(r"##\s*Next prompt.*?```[a-zA-Z]*\n(.*?)```", re.S)
 VISION_RE = re.compile(r"^##\s*Vision\s*$", re.M)
 NOT_A_PROMPT = ("Human action", "DECISION NEEDED", "PROMPT NEEDED")
-MODEL_RE = re.compile(r"^[ \t]*Model:[ \t]*(\S+)[ \t]*$", re.M | re.I)
-EFFORT_RE = re.compile(r"^[ \t]*Effort:[ \t]*(\S+)[ \t]*$", re.M | re.I)
+# Directives may stand alone on their own line or be comma-joined
+# ("Model: opus, Effort: max"); capture the value token (up to a comma or
+# space) and let the sub strip it with any trailing separator, rather than
+# anchoring to end-of-line and silently leaking a combined line.
+MODEL_RE = re.compile(r"(?im)^[ \t]*Model:[ \t]*([^\s,]+)[ \t]*,?[ \t]*")
+EFFORT_RE = re.compile(r"(?im)^[ \t]*Effort:[ \t]*([^\s,]+)[ \t]*,?[ \t]*")
 MODELS = {"haiku": "haiku", "sonnet": "sonnet", "opus": "opus"}
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
+# Frontmatter sanity (validate_project): the fixed status set, and the keys
+# the runner and dashboard actually read. Anything else is a likely typo.
+VALID_STATUSES = {"queued", "running", "review", "escalated", "done", "icebox"}
+KNOWN_KEYS = {"name", "category", "status", "energy", "description", "repo",
+              "updated", "autonomy", "account", "blocked_on", "fire_once"}
 # A session window may write these legwork paths; anything else is audited.
 TRACKER_SURFACE = ("projects/", "dashboard/")
+# The per-fire dollar cost transcript_summary writes to each completed line.
+COST_RE = re.compile(r"\$(\d+(?:\.\d+)?)")
 # Transient cloud failures worth a quiet retry rather than a review cycle:
 # overload, rate limiting and 5xx/connection faults from the API or harness.
 TRANSIENT_RE = re.compile(
@@ -205,8 +236,10 @@ USAGE_RE = re.compile(
     r"usage limit|out of (?:extra )?usage|limit reached|quota", re.I
 )
 # "resets 6:40pm", "resets at 18:40", "reset 6pm" -> the reset clock time.
+# The trailing lookahead keeps a date ("resets 2026-06-17") from being
+# misread as an 8pm clock time.
 RESET_RE = re.compile(
-    r"reset[s]?(?:\s+at)?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", re.I
+    r"reset[s]?(?:\s+at)?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?![\d:-])", re.I
 )
 
 # Sessions run parallel, but the legwork repo is shared state: every write
@@ -243,6 +276,15 @@ def run_git(args, cwd):
     )
 
 
+def rebase_in_progress(cwd):
+    """True when a git rebase is half-applied in cwd (a .git/rebase-merge or
+    rebase-apply directory). The tick aborts such a state instead of treating
+    the conflict-marker files it leaves as ordinary tracker edits."""
+    git_dir = Path(cwd) / ".git"
+    return (git_dir / "rebase-merge").exists() or \
+        (git_dir / "rebase-apply").exists()
+
+
 def porcelain_path(line):
     """The path from a `git status --porcelain` line (cols 0-1 status, 2
     space, 3+ path). For a rename/copy ('orig -> dest') return the dest, and
@@ -255,10 +297,15 @@ def porcelain_path(line):
 
 def push_with_rebase(cwd, attempts=3):
     """Push, rebasing over whatever moved the remote first (n8n write-back,
-    a parallel session's wrap). Returns True when the push landed."""
+    a parallel session's wrap). Returns True when the push landed. A failed
+    rebase (a real same-line conflict on a tracker file) is aborted before
+    retrying or returning, so a transient conflict can never leave the
+    control-plane repo wedged mid-rebase and block every future tick."""
     for attempt in range(attempts):
         if attempt:
-            run_git(["pull", "--rebase"], cwd)
+            if run_git(["pull", "--rebase"], cwd).returncode != 0:
+                run_git(["rebase", "--abort"], cwd)
+                log(f"push_with_rebase: aborted a conflicted rebase in {cwd}")
         if run_git(["push"], cwd).returncode == 0:
             return True
     return False
@@ -335,6 +382,11 @@ def update_cooldowns(state, outcomes, now):
     for account in list(usage):
         if usage_block_remaining(state, account, now) == 0:
             del usage[account]
+    # Drop transient entries whose backoff has fully elapsed, so state does
+    # not accumulate one stale entry per project that ever crashed.
+    for name in list(transient):
+        if transient_cooldown_remaining(state, name, now) == 0:
+            del transient[name]
     save_state(state)
 
 
@@ -379,37 +431,39 @@ def extract_directives(prompt):
     return prompt.strip(), model, effort, ignored
 
 
-def days_since(value):
-    try:
-        y, m, d = (int(x) for x in value[:10].split("-"))
-        return (date.today() - date(y, m, d)).days
-    except (ValueError, AttributeError):
-        return None
-
-
-def parse_frontmatter(text):
-    meta = {}
-    parts = text.split("---")
-    if len(parts) < 3:
-        return meta
-    for line in parts[1].strip().splitlines():
-        if ":" in line:
-            key, _, value = line.partition(":")
-            meta[key.strip()] = value.strip()
-    return meta
-
-
 def fires_today(fname):
     if not RUNNER_LOG.exists():
         return 0
     today = date.today().isoformat()
-    needle = f"fired {fname}"
+    # Match the whole "fired <fname> in " token so one project filename that
+    # is a prefix of another (foo.md vs foo-bar.md) cannot over-count.
+    needle = f"fired {fname} in "
     count = 0
     with open(RUNNER_LOG, encoding="utf-8") as fh:
         for line in fh:
             if line.startswith(today) and needle in line:
                 count += 1
     return count
+
+
+def cost_today():
+    """Sum of today's per-fire costs from runner.log: the $X.XX that
+    transcript_summary writes on each `completed` line. 0.0 when the log is
+    absent or carries no costs today. The data behind LEGWORK_DAILY_COST_CAP."""
+    if not RUNNER_LOG.exists():
+        return 0.0
+    today = date.today().isoformat()
+    total = 0.0
+    try:
+        with open(RUNNER_LOG, encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith(today) and "  completed " in line:
+                    m = COST_RE.search(line)
+                    if m:
+                        total += float(m.group(1))
+    except OSError:
+        pass
+    return total
 
 
 def assess(path):
@@ -481,6 +535,36 @@ def assess(path):
     }
 
 
+def validate_project(path):
+    """Cheap frontmatter sanity check for --dry-run and --doctor. Returns a
+    list of human-readable warnings; never raises and never blocks firing, so
+    a typo (a misspelled key, a bad status, an account with no config dir)
+    surfaces instead of silently changing behaviour."""
+    warnings = []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [f"unreadable ({exc})"]
+    meta = parse_frontmatter(text)
+    if not meta:
+        return ["no frontmatter found"]
+    status = meta.get("status", "").lower()
+    if status and status not in VALID_STATUSES:
+        warnings.append(f"unknown status '{status}'")
+    autonomy = meta.get("autonomy", "")
+    if autonomy and autonomy.lower() != "loop":
+        warnings.append(f"autonomy is '{autonomy}', only 'loop' enables the runner")
+    account = meta.get("account", "")
+    if account and account.lower() != "personal" \
+            and not os.environ.get(f"CLAUDE_CONFIG_DIR_{account.upper()}"):
+        warnings.append(f"account '{account}' has no CLAUDE_CONFIG_DIR_"
+                        f"{account.upper()} set (will use the default config)")
+    for key in meta:
+        if key not in KNOWN_KEYS:
+            warnings.append(f"unknown frontmatter key '{key}'")
+    return warnings
+
+
 def find_claude():
     found = shutil.which("claude")
     if found:
@@ -540,7 +624,9 @@ def claim(project):
             head = run_git(["rev-parse", "HEAD"], LEGWORK_DIR)
             return head.stdout.strip() or None
         # Could not publish the claim: drop it and let a later tick retry.
-        run_git(["reset", "--hard", "origin/main"], LEGWORK_DIR)
+        # Reset to the tracked upstream (@{u}) rather than a hardcoded
+        # origin/main, so this works on master or any default branch.
+        run_git(["reset", "--hard", "@{u}"], LEGWORK_DIR)
         log(f"claim push failed for {path.name}, claim dropped")
         return None
 
@@ -858,6 +944,19 @@ def usage_limit_reset(result_obj, now):
     return True, reset.isoformat(timespec="seconds")
 
 
+def classify_outcome(result_obj, now):
+    """Classify a finished session's result object into the booleans the
+    runner acts on. Pure (no side effects), so the fire() decision tail is
+    unit-testable against transcript fixtures. requeue means nothing
+    salvageable ran, so a later tick should retry quietly rather than open a
+    review: a transient crash, or a usage limit hit before any work."""
+    limited, reset_iso = usage_limit_reset(result_obj, now)
+    transient = (not limited) and is_transient_crash(result_obj)
+    requeue = transient or (limited and not did_work(result_obj))
+    return {"transient": transient, "limited": limited,
+            "reset": reset_iso, "requeue": requeue}
+
+
 def audit_session_window(project, claim_head):
     """Everything a session window wrote to the legwork repo outside the
     tracker surface (projects/, dashboard/) gets a Telegram alert. The
@@ -883,6 +982,26 @@ def audit_session_window(project, claim_head):
         f"Legwork audit: {detail}\n\nCommits in the window:\n{commits[:600]}\n\n"
         "If these commits are yours, ignore this. If not, read them now."
     )
+
+
+def write_guard_settings():
+    """Write the per-session Claude settings file the runner passes with
+    --settings: deny rules that block a fired session from editing the legwork
+    control plane (the runner, hooks, reviewer and n8n pipelines). A session
+    may still freely edit the target repo, projects/ and dashboard/ to do its
+    work and /wrap. Deny rules win over acceptEdits, so this holds even with no
+    review webhook wired. The post-hoc audit_session_window() stays as a second
+    layer. Best-effort: a write failure just falls back to that audit."""
+    base = str(LEGWORK_DIR)
+    deny = []
+    for sub in ("scripts", "reviewer", "reply-capture", "alerts"):
+        for tool in ("Edit", "Write", "MultiEdit"):
+            deny.append(f"{tool}({base}/{sub}/**)")
+    try:
+        GUARD_SETTINGS.write_text(
+            json.dumps({"permissions": {"deny": deny}}), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def fire(project):
@@ -911,11 +1030,19 @@ def fire(project):
     log(f"fired {project['file'].name} in {project['repo_path']}"
         f"{chosen} (transcript {transcript.name})")
     started = datetime.now()
+    guard = str(GUARD_SETTINGS) if GUARD_SETTINGS.exists() else None
     argv = [
         claude_path, "-p", prompt,
         "--output-format", "stream-json", "--verbose",
         "--permission-mode", "acceptEdits",
         "--add-dir", str(LEGWORK_DIR),
+    ]
+    if guard:
+        # Deny edits to the legwork control plane (scripts/, reviewer/, the
+        # n8n pipelines): a worker session does its work and /wrap without
+        # being able to rewrite the runner that governs it.
+        argv += ["--settings", guard]
+    argv += [
         "--allowedTools",
         "Bash(git:*)", "Bash(mkdir:*)",
         "Bash(python3 scripts/build_dashboard.py:*)",
@@ -947,13 +1074,13 @@ def fire(project):
     log(f"completed {project['file'].name}: exit {exit_code}, {minutes} min"
         f"{transcript_summary(transcript)}")
     result_obj = transcript_result(transcript)
-    limited, reset_iso = usage_limit_reset(result_obj, datetime.now())
-    transient = (not limited) and is_transient_crash(result_obj)
     # A zero-work crash (transient or a usage limit before anything ran) is
     # re-queued quietly; a usage limit that hit mid-work still has output to
     # review. The account-level usage block, set by the caller, is what
     # actually paces firing through the reset.
-    requeue = transient or (limited and not did_work(result_obj))
+    outcome = classify_outcome(result_obj, datetime.now())
+    limited, reset_iso = outcome["limited"], outcome["reset"]
+    transient, requeue = outcome["transient"], outcome["requeue"]
     detail = repair_unwrapped(project, exit_code, minutes,
                               claim_head=claim_head, transient=requeue)
     if limited:
@@ -1038,19 +1165,35 @@ def rebuild_dashboard():
 def acquire_lock():
     try:
         fd = os.open(LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.write(fd, str(os.getpid()).encode())
+        os.write(fd, f"{os.getpid()} {time.time()}".encode())
         os.close(fd)
         return True
     except FileExistsError:
         try:
-            pid = int(LOCK_FILE.read_text().strip())
+            parts = LOCK_FILE.read_text().split()
+            pid = int(parts[0])
+            held = time.time() - float(parts[1]) if len(parts) > 1 else 0
+        except (ValueError, OSError, IndexError):
+            LOCK_FILE.unlink(missing_ok=True)  # unreadable/garbage lock
+            return acquire_lock()
+        try:
             os.kill(pid, 0)
-            return False  # holder is alive
-        except (ValueError, ProcessLookupError):
+        except ProcessLookupError:
             LOCK_FILE.unlink(missing_ok=True)  # stale lock from a dead run
             return acquire_lock()
         except PermissionError:
-            return False
+            return False  # alive and owned by another user
+        # Holder is alive. Within the time budget this is a normal long
+        # session; past LOCK_MAX_AGE the runner itself is wedged, so reclaim
+        # the lock and alert once rather than let the queue stall silently.
+        if held > LOCK_MAX_AGE:
+            send_alert(f"Legwork runner lock held by live PID {pid} for "
+                       f"{int(held // 60)} min — likely wedged; reclaiming.")
+            log(f"reclaimed stale live-PID lock (pid {pid}, "
+                f"held {int(held // 60)} min)")
+            LOCK_FILE.unlink(missing_ok=True)
+            return acquire_lock()
+        return False  # holder is alive and within the time budget
 
 
 def tick(dry_run=False):
@@ -1074,6 +1217,13 @@ def tick(dry_run=False):
         dirty = run_git(["status", "--porcelain"], LEGWORK_DIR)
         if dirty.returncode != 0:
             blocked = "git status failed in the legwork repo"
+        elif rebase_in_progress(LEGWORK_DIR):
+            # A half-applied rebase (from an interrupted pull) leaves conflict
+            # markers the auto-commit branch would otherwise sweep into a
+            # commit. Abort it and retry on a clean tree next tick.
+            run_git(["rebase", "--abort"], LEGWORK_DIR)
+            log("aborted an interrupted rebase in the legwork repo")
+            blocked = "recovered from an interrupted rebase; retrying next tick"
         else:
             # Untracked files are safe to tick over: the pull rebases past
             # them and every runner commit is path-scoped. Uncommitted
@@ -1109,6 +1259,9 @@ def tick(dry_run=False):
         if blocked is None:
             pull = run_git(["pull", "--rebase"], LEGWORK_DIR)
             if pull.returncode != 0:
+                # Abort any half-applied rebase so the tree is clean for the
+                # next tick instead of wedged with conflict markers.
+                run_git(["rebase", "--abort"], LEGWORK_DIR)
                 blocked = f"pull failed ({pull.stderr.strip()[:120]})"
         if blocked:
             log(f"skipped tick: {blocked}")
@@ -1130,6 +1283,8 @@ def tick(dry_run=False):
         ok, reason, details = assess(path)
         if dry_run:
             print(f"{path.name:28} {'FIRE' if ok else 'skip'}  {reason}")
+            for warning in validate_project(path):
+                print(f"{'':28} !  {warning}")
         if ok:
             eligible.append(details)
 
@@ -1161,6 +1316,25 @@ def tick(dry_run=False):
     if not eligible:
         return
 
+    # Optional spend guard: once today's cost crosses the cap, fire nothing
+    # more today. Alerts once a day, like the stall path, so the cap is
+    # visible rather than a silent stop.
+    if DAILY_COST_CAP:
+        spent = cost_today()
+        if spent >= DAILY_COST_CAP:
+            note = (f"daily cost cap reached "
+                    f"(${spent:.2f} >= ${DAILY_COST_CAP:.2f})")
+            if dry_run:
+                print(f"Cost cap: {note}; firing would be skipped")
+            else:
+                today = date.today().isoformat()
+                if state.get("cost_capped_date") != today:
+                    state["cost_capped_date"] = today
+                    save_state(state)
+                    send_alert(f"Legwork {note}; no more fires today.")
+                log(f"skipped firing: {note}")
+                return
+
     # Every eligible project fires, one session each. Oldest updated first
     # decides who wins when two projects point at the same repo: sessions
     # sharing a working tree would collide, so only the oldest fires and
@@ -1185,11 +1359,62 @@ def tick(dry_run=False):
         names = ", ".join(p["file"].name for p in firing)
         print(f"\nWould fire: {names}")
         return
+    write_guard_settings()
     outcomes = fire_all(firing)
     update_cooldowns(state, outcomes, datetime.now())
 
 
+def doctor():
+    """Preflight checklist printed to stdout; changes nothing. One line per
+    check so a misconfigured install (no claude binary, a non-git legwork
+    dir, a project with a bad status) is caught before launchd fires into it.
+    Optional pieces report their state without counting as failures."""
+    problems = [0]
+
+    def check(label, good, detail=""):
+        if not good:
+            problems[0] += 1
+        print(f"[{'OK  ' if good else 'FAIL'}] {label}"
+              + (f": {detail}" if detail else ""))
+
+    claude = find_claude()
+    check("claude binary on PATH", bool(claude), claude or "not found")
+    check("LEGWORK_DIR exists", LEGWORK_DIR.is_dir(), str(LEGWORK_DIR))
+    check("legwork repo is a git repo", (LEGWORK_DIR / ".git").exists())
+    check("projects/ exists", PROJECTS_DIR.is_dir(), str(PROJECTS_DIR))
+    check("dashboard builder present",
+          (LEGWORK_DIR / "scripts" / "build_dashboard.py").is_file())
+    if (LEGWORK_DIR / ".git").exists():
+        check("legwork git status readable",
+              run_git(["status", "--porcelain"], LEGWORK_DIR).returncode == 0)
+    print(f"[info] review webhook: "
+          f"{'configured' if WEBHOOK_URL else 'unset (review pipeline off)'}")
+    print(f"[info] alert webhook:  "
+          f"{'configured' if ALERT_URL else 'unset (alerts/heartbeat off)'}")
+    print(f"[info] default config: "
+          f"{DEFAULT_CONFIG_DIR or 'unset (inherits the interactive account)'}")
+    print(f"[info] daily cost cap: "
+          f"{('$%.2f' % DAILY_COST_CAP) if DAILY_COST_CAP else 'none'}")
+    warnings = []
+    if PROJECTS_DIR.is_dir():
+        for path in sorted(PROJECTS_DIR.glob("*.md")):
+            if path.name.startswith("_"):
+                continue
+            for warning in validate_project(path):
+                warnings.append(f"{path.name}: {warning}")
+    if warnings:
+        print("\nProject warnings:")
+        for warning in warnings:
+            print(f"  - {warning}")
+    print("\nDoctor:",
+          "all green" if not problems[0] else f"{problems[0]} problem(s) found")
+    return problems[0] == 0
+
+
 def main():
+    if "--doctor" in sys.argv:
+        doctor()
+        return
     dry_run = "--dry-run" in sys.argv
     if dry_run:
         tick(dry_run=True)
