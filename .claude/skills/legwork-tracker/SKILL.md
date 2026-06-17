@@ -94,8 +94,9 @@ local clone can be behind. Every tracker operation begins with `git pull
 or edit a project file; push after you commit.
 
 1. Pull first: `git pull --rebase` in the legwork repo.
-2. Identify the project file. If none exists, create one from
-   `projects/_template.md` using a short kebab-case filename.
+2. Identify the project file. If none exists, create a new
+   `projects/<kebab>.md` following the File format spec above (frontmatter,
+   `## Next prompt`, `## Log`).
 3. Prepend a log bullet: `- YYYY-MM-DD: what actually happened, one line.`
    Never rewrite or delete old log entries. The log is append-only history.
 4. Set `updated` to today.
@@ -159,8 +160,8 @@ When work is blocked on a decision only the user can make:
 
 The full set of verbs. Each one ends by rebuilding the dashboard.
 
-**Add** (/add). Copy `projects/_template.md` to a short kebab-case
-filename, fill the frontmatter, write one honest log line, and mint a
+**Add** (/add). Create `projects/<kebab>.md` from the File format spec
+above, fill the frontmatter, write one honest log line, and mint a
 real first prompt. Ask the user only for what you cannot infer.
 Parallel sessions are the point of this system, so there is no cap on
 active projects. Staleness pills on the dashboard are the health signal.
