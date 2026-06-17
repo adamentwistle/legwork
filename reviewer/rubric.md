@@ -56,7 +56,9 @@ never because the runner reported the exit.
 - Credentials, secrets, keys, or auth changes
 - Destructive or hard-to-reverse operations
 - The evidence contradicts the tracker entry's task
-- retry_count in the payload is 2 or higher
+- The project has already failed review repeatedly: the tracker entry's
+  Log shows two or more prior reviewer "revise" cycles. A task that keeps
+  failing review needs a human, not another automatic retry.
 - Self modification of the pipeline: the repo under review is legwork and
   the diff touches its own hooks, reviewer rubric, n8n workflow, or
   dashboard build script (scripts/ or reviewer/). Always escalates.
