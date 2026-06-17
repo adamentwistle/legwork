@@ -22,6 +22,8 @@ import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+from legwork_common import parse_frontmatter, PROMPT_RE, parse_date
+
 ROOT = Path(__file__).resolve().parent.parent
 PROJECTS_DIR = ROOT / "projects"
 OUT_FILE = ROOT / "dashboard" / "index.html"
@@ -39,22 +41,9 @@ SCODE = {
 }
 STALE_DAYS = 14
 
-PROMPT_RE = re.compile(r"##\s*Next prompt.*?```[a-zA-Z]*\n(.*?)```", re.S)
 LOG_RE = re.compile(r"##\s*Log\s*\n(.*?)(?:\n##|\Z)", re.S)
 DATED_LINE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}):\s*(.+)$", re.S)
 LOG_ROW_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2}):\s*(.*)$", re.S)
-
-
-def parse_frontmatter(text):
-    meta = {}
-    parts = text.split("---")
-    if len(parts) < 3:
-        return meta
-    for line in parts[1].strip().splitlines():
-        if ":" in line:
-            key, _, value = line.partition(":")
-            meta[key.strip()] = value.strip()
-    return meta
 
 
 def parse_project(path):
@@ -79,18 +68,11 @@ def parse_project(path):
         print(f"Warning: {path.name} has unknown status '{status}', treating as queued", file=sys.stderr)
         status = "queued"
 
-    def to_date(value):
-        try:
-            y, m, d = (int(x) for x in value[:10].split("-"))
-            return date(y, m, d)
-        except (ValueError, AttributeError):
-            return None
-
     # Freshness is the newest of the frontmatter date and the latest log
     # entry, so a forgotten `updated` bump cannot make a project look stale.
-    candidates = [to_date(meta.get("updated", ""))]
+    candidates = [parse_date(meta.get("updated", ""))]
     if log_lines:
-        candidates.append(to_date(log_lines[0]))
+        candidates.append(parse_date(log_lines[0]))
     dates = [c for c in candidates if c]
     days_quiet = (date.today() - max(dates)).days if dates else None
 
@@ -110,6 +92,46 @@ def parse_project(path):
         "log": log_lines[:3],
         "log_all": log_lines,
     }
+
+
+# A completed line looks like "... completed <fname>: exit 0, 7 min $1.23 ...";
+# the dollar cost is the runner's per-fire spend.
+COST_RE = re.compile(r"\$(\d+\.\d{2})")
+
+
+def runner_activity(files):
+    """Optional, defensive read of runner.log. Returns a (per_file, cost_today)
+    pair where per_file maps a project filename to its most recent fire time and
+    last cost, and cost_today is the summed cost of all 'completed' lines today.
+    A missing or unreadable log yields ({}, 0.0) and never raises — the runner
+    is not guaranteed to have run, and the tests build in a sandbox without it."""
+    per_file = {}
+    cost_today = 0.0
+    try:
+        log_path = ROOT / "runner.log"
+        if not log_path.is_file():
+            return per_file, cost_today
+        today = date.today().isoformat()
+        names = {f for f in files}
+        for line in log_path.read_text(encoding="utf-8").splitlines():
+            when = line[:16]
+            # the runner writes "<19-char stamp>  <message>"
+            rest = line[19:].lstrip()
+            if rest.startswith("fired "):
+                fname = rest[6:].split(" in ", 1)[0].strip()
+                if fname in names:
+                    per_file.setdefault(fname, {})["fired"] = when
+            elif rest.startswith("completed "):
+                fname = rest[10:].split(":", 1)[0].strip()
+                cost_match = COST_RE.search(rest)
+                cost = float(cost_match.group(1)) if cost_match else None
+                if fname in names and cost is not None:
+                    per_file.setdefault(fname, {})["cost"] = cost
+                if cost is not None and line.startswith(today):
+                    cost_today += cost
+    except Exception:
+        return {}, 0.0
+    return per_file, cost_today
 
 
 # ----------------------------------------------------------------------------
@@ -149,6 +171,19 @@ def _freshness_badge(p):
     label = "today" if d == 0 else f"{d}d quiet"
     cls = "badge fresh-stale" if d > STALE_DAYS else "badge"
     return f'<span class="{cls}">{label}</span>'
+
+
+def _fired_line(p):
+    """A 'last fired <when> $<cost>' line when the runner has touched this
+    project. Empty when there is no runner activity for it."""
+    act = p.get("activity") or {}
+    when = act.get("fired")
+    if not when:
+        return ""
+    cost = act.get("cost")
+    cost_part = f' &middot; ${cost:.2f}' if isinstance(cost, (int, float)) else ""
+    return (f'<div class="fired-line">{IC_AUTO}<span>last fired '
+            f'{html.escape(when)}{cost_part}</span></div>')
 
 
 def status_pill(p):
@@ -235,7 +270,7 @@ def card(p, hero=False):
         f'<p class="card-desc">{html.escape(p["description"])}</p></div>'
         f'{status_pill(p)}</div>'
         f'<div class="badges">{pills(p)}</div>'
-        f'{blocked_block}{recent_block}{exp_block}{foot_block}'
+        f'{_fired_line(p)}{blocked_block}{recent_block}{exp_block}{foot_block}'
         '</article>'
     )
 
@@ -259,11 +294,7 @@ def changelog_html(projects):
     today = date.today()
     sections = []
     for day in sorted(by_day, reverse=True):
-        try:
-            y, mo, d = (int(x) for x in day.split("-"))
-            dt = date(y, mo, d)
-        except ValueError:
-            dt = None
+        dt = parse_date(day)
         if dt:
             delta = (today - dt).days
             if delta == 0:
@@ -308,6 +339,12 @@ ALLCLEAR = (
 
 
 def build(projects):
+    # Optional runner activity — folded onto cards and the masthead. Stays
+    # ({}, 0.0) when runner.log is absent, so this is a no-op in the sandbox.
+    activity, cost_today = runner_activity({p["file"] for p in projects})
+    for p in projects:
+        p["activity"] = activity.get(p["file"])
+
     escalated = [p for p in projects if p["status"] == "escalated"]
     rest = sorted([p for p in projects if p["status"] != "escalated"], key=sort_key)
 
@@ -318,6 +355,13 @@ def build(projects):
 
     today_metric = date.today().strftime("%a %d %b").upper()
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    # Shown only when the runner has spent something today; absent otherwise.
+    cost_metric = (
+        f'<div class="metric"><span class="m-l">Cost today</span>'
+        f'<span class="m-v">${cost_today:.2f}</span></div>'
+        if cost_today > 0 else ""
+    )
 
     # queue ribbon
     ribbon_bar = "".join(
@@ -365,6 +409,7 @@ def build(projects):
       <div class="metric"><span class="m-l">Date</span><span class="m-v">{today_metric}</span></div>
       <div class="metric"><span class="m-l">Projects</span><span class="m-v">{total}</span></div>
       <div class="metric"><span class="m-l">Active</span><span class="m-v">{active}</span></div>
+      {cost_metric}
       <div class="metric needs"><span class="m-l">Needs you</span><span class="m-v">{len(escalated)}</span></div>
     </div>
     <div class="head-actions">
@@ -451,9 +496,6 @@ HEAD_OPEN = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta http-equiv="refresh" content="120" />
 <title>Legwork &mdash; project queue</title>
-<link rel="preconnect" href="https://fonts.googleapis.com" />
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
 <style>
 """
 
@@ -501,6 +543,11 @@ CSS = """
   --st-stale:oklch(0.66 0.14 60); --st-stale-bg:oklch(0.96 0.05 70);  --st-stale-fg:oklch(0.50 0.12 55);
 
   --shimmer:oklch(1 0 0 / 0.6);
+}
+
+/* legacy browsers without oklch/color-mix — keep the page legible */
+@supports not (color: oklch(0 0 0)){
+  body{ background:#fafafa; color:#3a3a42; }
 }
 
 @media (prefers-color-scheme: dark){
@@ -773,6 +820,12 @@ main{padding:var(--s8) 0 var(--s16);}
 .blocked-line svg{width:15px;height:15px;flex:0 0 auto;margin-top:2px;}
 .blocked-line b{font-weight:600;}
 
+.fired-line{
+  display:flex;align-items:center;gap:6px;margin-top:var(--s3);
+  font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--text-faint);
+}
+.fired-line svg{width:12px;height:12px;flex:0 0 auto;color:var(--st-rev-fg);}
+
 .log{display:flex;flex-direction:column;gap:var(--s2);margin-top:var(--s2);}
 .log-row{display:flex;gap:var(--s3);font-size:var(--fs-base);line-height:var(--lh-snug);}
 .log-date{font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--text-faint);flex:0 0 auto;width:42px;padding-top:1px;letter-spacing:-0.02em;}
@@ -892,10 +945,9 @@ SCRIPT = """
   /* ---- theme toggle (defaults to prefers-color-scheme) ---- */
   var KEY = "legwork-theme";
   var toggle = document.getElementById("themeToggle");
-  var label  = document.getElementById("themeLabel");
   function systemDark(){ return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches; }
   function effective(){ var a = root.getAttribute("data-theme"); return a ? a : (systemDark() ? "dark" : "light"); }
-  function syncLabel(){ var e = effective(); if(label) label.textContent = e === "dark" ? "Dark" : "Light"; if(toggle) toggle.setAttribute("aria-label", (e === "dark" ? "Dark" : "Light") + " theme — switch to " + (e === "dark" ? "light" : "dark")); }
+  function syncLabel(){ var e = effective(); if(toggle) toggle.setAttribute("aria-label", (e === "dark" ? "Dark" : "Light") + " theme — switch to " + (e === "dark" ? "light" : "dark")); }
   try{ var saved = localStorage.getItem(KEY); if(saved === "dark" || saved === "light"){ root.setAttribute("data-theme", saved); } }catch(e){}
   syncLabel();
   if(toggle){
@@ -954,6 +1006,7 @@ SCRIPT = """
     icebox: ["icebox"]
   };
   var curCat = "all", curState = "everything";
+  var CAT_KEY = "legwork-cat", STATE_KEY = "legwork-state", SCROLL_KEY = "legwork-scroll";
   var cards = Array.prototype.slice.call(document.querySelectorAll("#grid .card"));
   var heroCards = Array.prototype.slice.call(document.querySelectorAll("#needsZone .card"));
   var needsSec = document.getElementById("needs");
@@ -995,6 +1048,7 @@ SCRIPT = """
   if(catFilter) catFilter.addEventListener("click", function(e){
     var b = e.target.closest(".chip"); if(!b) return;
     curCat = b.getAttribute("data-cat");
+    try{ localStorage.setItem(CAT_KEY, curCat); }catch(e){}
     this.querySelectorAll(".chip").forEach(function(x){ x.setAttribute("aria-pressed", x===b ? "true":"false"); });
     apply();
   });
@@ -1002,11 +1056,45 @@ SCRIPT = """
   if(stateFilter) stateFilter.addEventListener("click", function(e){
     var b = e.target.closest(".seg"); if(!b) return;
     curState = b.getAttribute("data-state");
+    try{ localStorage.setItem(STATE_KEY, curState); }catch(e){}
     this.querySelectorAll(".seg").forEach(function(x){ x.setAttribute("aria-pressed", x===b ? "true":"false"); });
     apply();
   });
 
+  /* ---- restore UI state across the 120s auto-refresh ---- */
+  function press(group, attr, val){
+    if(!group) return;
+    group.querySelectorAll("[" + attr + "]").forEach(function(x){
+      x.setAttribute("aria-pressed", x.getAttribute(attr) === val ? "true" : "false");
+    });
+  }
+  try{
+    var savedCat = localStorage.getItem(CAT_KEY);
+    if(savedCat && catFilter && catFilter.querySelector('[data-cat="' + savedCat + '"]')){
+      curCat = savedCat; press(catFilter, "data-cat", curCat);
+    }
+    var savedState = localStorage.getItem(STATE_KEY);
+    if(savedState && STATES[savedState]){
+      curState = savedState; press(stateFilter, "data-state", curState);
+    }
+  }catch(e){}
+
   apply();
+
+  /* restore scroll last, after apply() has settled the layout */
+  try{
+    var y = parseInt(localStorage.getItem(SCROLL_KEY), 10);
+    if(!isNaN(y)) window.scrollTo(0, y);
+  }catch(e){}
+  var scrollTick = false;
+  window.addEventListener("scroll", function(){
+    if(scrollTick) return;
+    scrollTick = true;
+    setTimeout(function(){
+      scrollTick = false;
+      try{ localStorage.setItem(SCROLL_KEY, String(window.scrollY)); }catch(e){}
+    }, 200);
+  }, {passive:true});
 })();
 </script>
 </body>
