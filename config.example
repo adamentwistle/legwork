@@ -11,8 +11,14 @@
 # Where the legwork repo lives. Default: $HOME/legwork.
 LEGWORK_DIR=$HOME/legwork
 
-# Autonomous fires per project per calendar day. Default: 8.
+# Autonomous fires per project per calendar day. Default: 8. Counted from
+# runner.log, so truncating or rotating that file resets the day's count.
 LEGWORK_DAILY_CAP=8
+
+# Optional spend guard, in dollars. Unset or 0 means no cost cap. When set,
+# the runner sums today's per-fire costs from runner.log and stops firing for
+# the rest of the day once the cap is reached (alerting once, like a stall).
+# LEGWORK_DAILY_COST_CAP=10
 
 # --- Review pipeline (OPTIONAL) ---------------------------------------------
 # The n8n webhooks the SessionEnd hook and the runner post to. Leave BOTH unset
