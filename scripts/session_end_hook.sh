@@ -176,6 +176,13 @@ HTTP_CODE="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-t
   "$LEGWORK_WEBHOOK_URL" 2>/dev/null)"
 [ -z "$HTTP_CODE" ] && HTTP_CODE=000
 
-log "$REPO_NAME  sent: reason=${REASON:-manual} session=${SESSION_ID:-none} http=$HTTP_CODE"
+# Only log "sent:" on a 2xx response. The runner matches that token to decide
+# the review was delivered; on any non-2xx (404/500/000) log a different token
+# so hook_fired_since() stays False and the runner's notify_reviewer fallback
+# fires instead of silently dropping the review.
+case "$HTTP_CODE" in
+  2*) log "$REPO_NAME  sent: reason=${REASON:-manual} session=${SESSION_ID:-none} http=$HTTP_CODE" ;;
+  *)  log "$REPO_NAME  post-failed: reason=${REASON:-manual} session=${SESSION_ID:-none} http=$HTTP_CODE" ;;
+esac
 
 exit 0
