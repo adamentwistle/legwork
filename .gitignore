@@ -28,6 +28,9 @@ __pycache__/
 hook.log
 .claude/settings.local.json
 .legwork/
+# legwork is tracked as a project in the dispatch queue; the dispatch
+# SessionEnd hook writes its test evidence here.
+.dispatch/
 
 # Runner state: runner.log is this machine's audit of autonomous fires,
 # .runner-logs/ holds session transcripts, .runner.lock is the in-flight
