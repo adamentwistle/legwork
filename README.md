@@ -1,5 +1,7 @@
 # legwork
 
+[![CI](https://github.com/adamentwistle/legwork/actions/workflows/ci.yml/badge.svg)](https://github.com/adamentwistle/legwork/actions/workflows/ci.yml)
+
 legwork is an autonomous project queue for Claude Code. Each project is one markdown file. A runner fires queued prompts as headless Claude Code sessions; an optional LLM reviewer triages the output and escalates to a human only when a decision is actually needed.
 
 The idea worth stealing is reviewer-by-exception. An LLM reviewer reads every autonomous session and only escalates to a human when a human decision is genuinely required: money, deploys, credentials, sending things to people, deleting data, or work that contradicts the stated intent. Everything else passes or is sent back for another pass. You stay in the loop by exception, not by babysitting.

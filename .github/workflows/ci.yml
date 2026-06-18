@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# Cancel an in-flight run when a newer commit lands on the same ref.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Read-only token: this workflow never writes to the repo or calls any service.
+permissions:
+  contents: read
+
+jobs:
+  # The gate. Dependency-free, no secrets, no network: just the stdlib suite
+  # across the supported Python range. Keep it green.
+  tests:
+    name: tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # The suite shells out to git (hooks, the runner's commits). A fresh
+      # runner has no global identity or default branch, so set the same ones
+      # a dev box already carries. No network, no secrets.
+      - name: Configure git
+        run: |
+          git config --global user.email "ci@legwork.invalid"
+          git config --global user.name "legwork ci"
+          git config --global init.defaultBranch main
+
+      - name: Run the stdlib test suite
+        run: python3 -m unittest discover -s tests
+
+  # Dev-only, advisory. continue-on-error keeps it off the critical path: it
+  # surfaces lint and byte-compile signal without ever blocking the gate above.
+  quality:
+    name: quality (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Byte-compile everything: a cheap, dependency-free syntax gate that
+      # catches breakage the test discovery might not import.
+      - name: Byte-compile
+        run: python3 -m py_compile scripts/*.py tests/*.py
+
+      # ruff is the one dev tool we reach for. It is not a runtime dependency
+      # of legwork and never runs in the gate above.
+      - name: Ruff (advisory)
+        run: |
+          python3 -m pip install --quiet "ruff==0.6.9"
+          ruff check --output-format=github .
