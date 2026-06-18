@@ -85,6 +85,13 @@ still fires sessions and they still wrap. The review post and the Telegram
 alerts are simply skipped. You can run the queue, runner and dashboard with no
 n8n at all.
 
+There is a third option between the n8n pipeline and no review at all: the
+local reviewer. Set `LEGWORK_LOCAL_REVIEW` (with no webhook) and the runner
+runs the same triage itself, in-process, with a `claude -p` call, and writes
+the verdict straight back to the project file. The reviewer-by-exception loop
+then runs with no n8n, no Telegram and no GitHub PAT. See "Local reviewer"
+below.
+
 ## Components
 
 ### Projects (`projects/*.md`)
@@ -177,6 +184,33 @@ confidence: anything touching money, anything deployed or sent or
 public-facing, credentials or auth, destructive or hard-to-reverse operations,
 evidence that contradicts the stated task, and self-modification of the
 pipeline.
+
+### Local reviewer (`scripts/legwork_review.py`)
+
+The zero-dependency, no-n8n equivalent of the reviewer pipeline, enabled with
+`LEGWORK_LOCAL_REVIEW`. It carries the same rubric (a verbatim copy of the one
+in `reviewer/n8n-build-node.js`, kept in sync) and reads the same evidence
+shape, so it triages identically; the difference is only where it runs. After
+a finished session the runner builds the evidence itself (the session-scoped
+diff and commits from the target repo's pre-fire HEAD, the project's tracker
+entry, and any `.legwork/last_test_output.txt`), calls `claude -p` once for the
+verdict, and writes the result back to the project file under the same write
+lock the rest of the runner uses:
+
+- `pass` requeues the project with the prompt the session already wrapped.
+- `revise` installs the reviewer's fix prompt as the Next prompt and requeues.
+- `escalate` flips the project to `escalated` and writes the DECISION NEEDED
+  brief into the Next prompt block. (The n8n path carries that brief to
+  Telegram and lets reply-capture mint the next prompt; with no Telegram
+  locally, writing the brief into the file is what surfaces the decision on the
+  dashboard's Needs-you zone.)
+
+The module is deliberately side-effect-light: everything except the one
+`claude` call is pure text-in, text-out, so the verdict-to-file logic is unit
+tested against fixtures. A failed or unparseable reviewer call parks the
+project at `review` for a human rather than risking a refire loop. When
+`LEGWORK_ALERT_URL` is also set, the verdict letter is sent to Telegram too;
+otherwise the dashboard is the surface.
 
 ### Reply-capture pipeline (`reply-capture/`)
 

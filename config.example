@@ -29,6 +29,18 @@ LEGWORK_DAILY_CAP=8
 # LEGWORK_WEBHOOK_URL=https://your-n8n-host/webhook/legwork-review
 # LEGWORK_ALERT_URL=https://your-n8n-host/webhook/legwork-alert
 
+# Local reviewer: the no-n8n alternative to LEGWORK_WEBHOOK_URL. When set (and
+# no webhook is configured), the runner triages each finished session in-process
+# with a `claude -p` call and writes the pass/revise/escalate verdict straight
+# back to the project file, so reviewer-by-exception runs without n8n. The
+# webhook wins if both are set. See scripts/legwork_review.py.
+# LEGWORK_LOCAL_REVIEW=1
+
+# The model the reviewer call uses, for BOTH the local reviewer (read by the
+# runner) and the n8n pipeline (read by reviewer/n8n-build-node.js). A full id
+# or a short alias. Default: claude-sonnet-4-6.
+# REVIEWER_MODEL=claude-sonnet-4-6
+
 # --- Claude config dirs (OPTIONAL) ------------------------------------------
 # Run autonomous sessions under a dedicated Claude config dir, so they never
 # inherit whatever account your interactive shell defaults to. Leave unset to
@@ -39,10 +51,5 @@ LEGWORK_DAILY_CAP=8
 # CLAUDE_CONFIG_DIR_WORK=$HOME/.claude-legwork-work
 
 # --- Applied outside the runner (documented here so config lives in one place)
-# REVIEWER_MODEL is read by reviewer/n8n-build-node.js (the model the reviewer
-# call uses). Set it there, or wherever you paste that node. Default:
-# claude-sonnet-4-6.
-# REVIEWER_MODEL=claude-sonnet-4-6
-#
 # The launchd tick interval lives in scripts/com.legwork.runner.plist
 # (StartInterval, seconds). Default: 300 (every 5 minutes).
