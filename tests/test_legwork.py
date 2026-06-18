@@ -28,6 +28,7 @@ os.environ["LEGWORK_DIR"] = str(SANDBOX)
 sys.path.insert(0, str(REPO / "scripts"))
 
 import build_dashboard  # noqa: E402
+import legwork_install  # noqa: E402
 import legwork_review  # noqa: E402
 import legwork_runner  # noqa: E402
 
@@ -1559,6 +1560,152 @@ class TestHooks(unittest.TestCase):
         self.assertIn("t-drift  post-failed:", tail)
         self.assertNotIn("no changes this session", tail)
         self.assertNotIn("t-drift-elsewhere", tail)
+
+
+class TestInstaller(unittest.TestCase):
+    """The installer's pure builders: file contents and validation only, no
+    launchctl/crontab/settings.json side effects (those are confirm-gated and
+    run only under a real tty)."""
+
+    def test_cron_schedule(self):
+        self.assertEqual(legwork_install.cron_schedule(5), "*/5 * * * *")
+        self.assertEqual(legwork_install.cron_schedule(15), "*/15 * * * *")
+        self.assertEqual(legwork_install.cron_schedule(60), "0 */1 * * *")
+        self.assertEqual(legwork_install.cron_schedule(120), "0 */2 * * *")
+        self.assertEqual(legwork_install.cron_schedule(1440), "0 0 * * *")
+        # Never emits the invalid */60 on the minute field.
+        self.assertNotIn("*/60", legwork_install.cron_schedule(60))
+
+    def test_render_plist_substitutes_and_retargets_interval(self):
+        template = legwork_install.PLIST_TEMPLATE.read_text(encoding="utf-8")
+        out = legwork_install.render_plist(
+            template, "/Users/me/legwork", "/usr/bin/python3", 600)
+        self.assertNotIn("__LEGWORK_DIR__", out)
+        self.assertNotIn("__PYTHON__", out)
+        self.assertIn("/Users/me/legwork/scripts/legwork_runner.py", out)
+        self.assertIn("/usr/bin/python3", out)
+        self.assertIn("<integer>600</integer>", out)
+        self.assertNotIn("<integer>300</integer>", out)
+
+    def test_render_crontab_line_has_marker_and_schedule(self):
+        line = legwork_install.render_crontab_line(
+            "/Users/me/legwork", "/usr/bin/python3", "*/5 * * * *")
+        self.assertTrue(line.startswith("*/5 * * * *"))
+        self.assertIn("legwork_runner.py", line)
+        self.assertIn(legwork_install.CRON_MARKER, line)
+        self.assertIn(".runner-logs/cron.log", line)
+
+    def test_render_config_local_mode(self):
+        cfg = legwork_install.render_config({
+            "legwork_dir": "$HOME/legwork", "daily_cap": 8,
+            "daily_cost_cap": 0, "review_mode": "local",
+            "reviewer_model": "claude-sonnet-4-6"})
+        self.assertIn("LEGWORK_DIR=$HOME/legwork", cfg)
+        self.assertIn("LEGWORK_DAILY_CAP=8", cfg)
+        self.assertIn("LEGWORK_LOCAL_REVIEW=1", cfg)
+        # No webhook in local mode; cost cap stays commented when zero.
+        self.assertNotIn("LEGWORK_WEBHOOK_URL=", cfg)
+        active = [ln for ln in cfg.splitlines()
+                  if ln and not ln.startswith("#")]
+        self.assertFalse(any(ln.startswith("LEGWORK_DAILY_COST_CAP=")
+                             for ln in active))
+
+    def test_render_config_n8n_mode(self):
+        cfg = legwork_install.render_config({
+            "legwork_dir": "$HOME/legwork", "daily_cap": 8,
+            "daily_cost_cap": 10, "review_mode": "n8n",
+            "webhook_url": "https://n8n.example/webhook/legwork-review",
+            "alert_url": "https://n8n.example/webhook/legwork-alert",
+            "reviewer_model": "claude-opus-4-8"})
+        self.assertIn("LEGWORK_WEBHOOK_URL=https://n8n.example/webhook/"
+                      "legwork-review", cfg)
+        self.assertIn("LEGWORK_ALERT_URL=https://n8n.example/webhook/"
+                      "legwork-alert", cfg)
+        self.assertIn("LEGWORK_DAILY_COST_CAP=10", cfg)
+        self.assertNotIn("LEGWORK_LOCAL_REVIEW=1", cfg)
+        # A non-default reviewer model is emitted active, not commented.
+        self.assertIn("REVIEWER_MODEL=claude-opus-4-8", cfg)
+
+    def test_render_config_off_mode(self):
+        cfg = legwork_install.render_config({
+            "legwork_dir": "$HOME/legwork", "daily_cap": 8,
+            "daily_cost_cap": 0, "review_mode": "off",
+            "claude_config_dir": "$HOME/.claude-legwork"})
+        active = [ln for ln in cfg.splitlines()
+                  if ln and not ln.startswith("#")]
+        # Off mode activates no reviewer line (the strings appear only in the
+        # commented guidance).
+        self.assertFalse(any(ln.startswith("LEGWORK_LOCAL_REVIEW")
+                             for ln in active))
+        self.assertFalse(any(ln.startswith("LEGWORK_WEBHOOK_URL")
+                             for ln in active))
+        self.assertIn("CLAUDE_CONFIG_DIR=$HOME/.claude-legwork", active)
+
+    def test_render_config_round_trips_through_parse(self):
+        # Whatever the installer writes, a re-run must be able to read back.
+        cfg = legwork_install.render_config({
+            "legwork_dir": "/srv/legwork", "daily_cap": 12,
+            "daily_cost_cap": 25, "review_mode": "local",
+            "reviewer_model": "claude-sonnet-4-6"})
+        parsed = legwork_install.parse_config_text(cfg)
+        self.assertEqual(parsed["LEGWORK_DIR"], "/srv/legwork")
+        self.assertEqual(parsed["LEGWORK_DAILY_CAP"], "12")
+        self.assertEqual(parsed["LEGWORK_DAILY_COST_CAP"], "25")
+        self.assertEqual(parsed["LEGWORK_LOCAL_REVIEW"], "1")
+
+    def test_parse_config_text_ignores_comments_and_strips_quotes(self):
+        parsed = legwork_install.parse_config_text(
+            '# a comment\n\nLEGWORK_DIR="/q/legwork"\nbad line no equals\n'
+            "LEGWORK_DAILY_CAP=8\n")
+        self.assertEqual(parsed["LEGWORK_DIR"], "/q/legwork")
+        self.assertEqual(parsed["LEGWORK_DAILY_CAP"], "8")
+        self.assertNotIn("bad line no equals", parsed)
+
+    def test_merge_hooks_adds_both_events_from_empty(self):
+        merged = legwork_install.merge_hooks({}, "/Users/me/legwork")
+        start = merged["hooks"]["SessionStart"]
+        end = merged["hooks"]["SessionEnd"]
+        self.assertEqual(len(start), 1)
+        self.assertEqual(len(end), 1)
+        self.assertEqual(
+            start[0]["hooks"][0]["command"],
+            "/Users/me/legwork/scripts/session_start_hook.sh")
+        self.assertEqual(
+            end[0]["hooks"][0]["command"],
+            "/Users/me/legwork/scripts/session_end_hook.sh")
+
+    def test_merge_hooks_is_idempotent_and_preserves_others(self):
+        base = {"model": "opus", "hooks": {"SessionStart": [
+            {"hooks": [{"type": "command", "command": "/other/x.sh"}]}]}}
+        once = legwork_install.merge_hooks(base, "/Users/me/legwork")
+        twice = legwork_install.merge_hooks(once, "/Users/me/legwork")
+        # The unrelated hook survives; ours is added exactly once.
+        self.assertEqual(len(twice["hooks"]["SessionStart"]), 2)
+        self.assertEqual(len(twice["hooks"]["SessionEnd"]), 1)
+        self.assertEqual(twice["model"], "opus")
+
+    def test_validators(self):
+        self.assertEqual(legwork_install.validate_int("8")[1], 8)
+        self.assertFalse(legwork_install.validate_int("nope")[0])
+        self.assertFalse(legwork_install.validate_int("0", low=1)[0])
+        self.assertEqual(legwork_install.validate_cost("12.5")[1], 12.5)
+        self.assertFalse(legwork_install.validate_cost("-1")[0])
+        self.assertTrue(
+            legwork_install.validate_url("https://h/x")[0])
+        self.assertFalse(legwork_install.validate_url("ftp://h/x")[0])
+        self.assertFalse(legwork_install.validate_minutes("0")[0])
+        self.assertTrue(legwork_install.validate_minutes("5")[0])
+
+    def test_wordmark_alignment_and_ascii_fallback(self):
+        ascii_ui = legwork_install.UI(color=False, unicode=False)
+        rows = legwork_install.wordmark("LEGWORK", ascii_ui)
+        self.assertEqual(len(rows), 5)
+        # Every row is the same width, so the columns never drift.
+        self.assertEqual(len({len(r) for r in rows}), 1)
+        # ASCII/no-color mode emits no ANSI escapes.
+        head = legwork_install.masthead(ascii_ui)
+        self.assertNotIn("\033", head)
+        self.assertIn("+", head)
 
 
 def tearDownModule():
