@@ -254,8 +254,9 @@ Vision and is the only place `autonomy: loop` is set.
 
 ### Tests (`tests/test_legwork.py`)
 
-A stdlib test suite, 69 tests, covering the runner, the dashboard builder and
-the hooks. The hook tests run the real shell scripts as subprocesses against
+A stdlib test suite, 127 tests, covering the runner, the local reviewer, the
+installer, the dashboard builder and the hooks. The hook tests run the real
+shell scripts as subprocesses against
 throwaway git repos; nothing touches the real legwork repo, the webhook, or
 the network. Run:
 

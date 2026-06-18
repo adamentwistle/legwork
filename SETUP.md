@@ -7,6 +7,31 @@ and (optionally) the n8n review pipeline.
 Read it in order. Steps 1 through 4 give you a working queue, runner and
 dashboard with no n8n at all. Step 5 is the optional review pipeline.
 
+## The one-command install
+
+Most people should just run the wizard. From the cloned repo:
+
+```
+./install.sh
+```
+
+`./install.sh` is a thin wrapper around `scripts/legwork_install.py`, a
+standard-library-only interactive installer. It walks the same ground as
+steps 1 through 4 below: it prompts for every config value, writes `config`,
+creates `projects/` and `.runner-logs/`, installs and loads the launchd agent
+(macOS) or a crontab line (Linux), and registers the SessionStart/SessionEnd
+hooks in your Claude `settings.json`. It asks before every action that touches
+anything outside the repo, so you can decline any piece and do it by hand.
+
+Flags: `--yes` accepts every default without prompting, `--no-color` prints
+plainly. Re-running is safe: it reads your existing `config` to pre-fill the
+prompts and never duplicates a launchd agent, crontab line or hook entry.
+
+The rest of this guide is the manual path. Follow it if you skipped a piece of
+the wizard, want to understand exactly what it did, or are wiring the optional
+n8n review pipeline (step 5), which the wizard does not automate because it
+lives in your n8n instance, not on this machine.
+
 ## Requirements
 
 - `python3`. Version 3.9 or newer is fine. Everything in `scripts/` is
@@ -219,7 +244,7 @@ Run these from your legwork repo to confirm the install:
 python3 -m unittest discover -s tests
 ```
 
-The full stdlib test suite (69 tests) should pass.
+The full stdlib test suite (127 tests) should pass.
 
 ```
 python3 scripts/build_dashboard.py

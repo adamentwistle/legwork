@@ -51,38 +51,21 @@ Requirements: `python3`, the Claude Code CLI, and `git`.
 
 legwork is the legwork repo: the runner, the dashboard builder, the config file and your project files all live inside one checkout.
 
-1. Clone this repo into the legwork directory. The default location is `$HOME/legwork`; put it anywhere else and point `LEGWORK_DIR` at it in step 3.
+```
+git clone https://github.com/your-github-user/your-repo.git "$HOME/legwork"
+cd "$HOME/legwork"
+./install.sh
+```
 
-   ```
-   git clone https://github.com/your-github-user/your-repo.git "$HOME/legwork"
-   cd "$HOME/legwork"
-   ```
+`./install.sh` is an interactive, dependency-free wizard. It asks for every value legwork can be configured with (the legwork dir, the daily fire and cost caps, the review mode and reviewer model, an optional dedicated Claude config dir, the tick interval), shows you the `config` it will write, then offers to activate the pieces that live outside the repo, asking before each one:
 
-2. Create the `projects/` directory inside the checkout. This is the source of truth, one markdown file per project. It is gitignored, so your real project data never gets committed to legwork itself. Keep your own project files in a private repo if you want them tracked.
+- write `config` and create `projects/` and `.runner-logs/`
+- install and load the launchd agent (macOS) or a crontab line (Linux)
+- register the SessionStart/SessionEnd hooks in your Claude `settings.json`
 
-   ```
-   mkdir -p projects
-   ```
+Then fill the queue: add projects with the `/add` skill and grant autonomy per project with `/vision`. Verify any time with `python3 scripts/legwork_runner.py --doctor`.
 
-3. Copy `config.example` to `config` and edit it. `config` is gitignored. The review pipeline is optional: leave `LEGWORK_WEBHOOK_URL` and `LEGWORK_ALERT_URL` unset to run the queue with no n8n at all.
-
-   ```
-   cp config.example config
-   ```
-
-4. Build the dashboard from your project files. With an empty `projects/` this builds an empty dashboard; copy a sample from `examples/projects/` into `projects/` first if you want to see populated cards.
-
-   ```
-   python3 scripts/build_dashboard.py
-   ```
-
-5. See what the runner would do, changing nothing.
-
-   ```
-   python3 scripts/legwork_runner.py --dry-run
-   ```
-
-For the launchd/cron install and the optional n8n review, reply-capture, and alerts pipelines, see [SETUP.md](SETUP.md).
+Prefer to do it by hand, or want the optional n8n review, reply-capture, and alerts pipelines? See [SETUP.md](SETUP.md); every step the wizard automates is also written out there.
 
 ## What this is not
 
