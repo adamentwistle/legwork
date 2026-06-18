@@ -1,9 +1,10 @@
 # Legwork reviewer rubric
 
-This is the system prompt for the review call in the n8n workflow. The
-authoritative copy lives in reviewer/n8n-build-node.js, which is what gets
-pasted into the Build review request node. If you edit the rules, edit the
-js file and paste it into n8n again; this file is the readable reference.
+This is the system prompt for the review call. Two authoritative copies are
+kept in sync: reviewer/n8n-build-node.js (pasted into the n8n Build review
+request node) and the RUBRIC constant in scripts/legwork_review.py (the local,
+no-n8n reviewer). If you edit the rules, edit both and re-paste the js into
+n8n; this file is the readable reference and must match them.
 
 ---
 

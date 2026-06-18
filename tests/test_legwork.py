@@ -28,6 +28,7 @@ os.environ["LEGWORK_DIR"] = str(SANDBOX)
 sys.path.insert(0, str(REPO / "scripts"))
 
 import build_dashboard  # noqa: E402
+import legwork_review  # noqa: E402
 import legwork_runner  # noqa: E402
 
 (SANDBOX / "projects").mkdir(parents=True)
@@ -577,6 +578,275 @@ class TestAuditedFixes(unittest.TestCase):
                             and "/scripts/**" in r for r in deny))
 
 
+class TestLocalReview(unittest.TestCase):
+    """The pure pieces of the local reviewer: verdict parsing, the file
+    write-back for each verdict, the decision-brief rendering and the alert
+    formats. No git, no network: apply_verdict is text in, text out."""
+
+    NOW = datetime(2026, 6, 18, 10, 0, 0)
+
+    def project_text(self, status="review", prompt="Read PROJECT.md.\n\n"
+                     "Task: the original task.\n\nDone when: done.\n\n"
+                     "Final step: run /wrap to update the tracker and mint "
+                     "the next prompt."):
+        return ("---\nname: demo\ncategory: personal\n"
+                f"status: {status}\nenergy: light\ndescription: test\n"
+                "repo: none\nupdated: 2026-06-01\nautonomy: loop\n---\n\n"
+                "## Vision\n\n- North star: a thing.\n\n"
+                "## Next prompt\n\n```text\n" + prompt + "\n```\n\n"
+                "## Log\n\n- 2026-06-01: created.\n")
+
+    def test_parse_verdict_plain_json(self):
+        v = legwork_review.parse_verdict(
+            '{"verdict":"pass","confidence":0.9,"summary":"looks good"}')
+        self.assertEqual(v["verdict"], "pass")
+        self.assertEqual(v["summary"], "looks good")
+
+    def test_parse_verdict_strips_fences(self):
+        v = legwork_review.parse_verdict(
+            'Sure:\n```json\n{"verdict":"revise","summary":"x"}\n```\n')
+        self.assertEqual(v["verdict"], "revise")
+
+    def test_parse_verdict_recovers_from_prose(self):
+        v = legwork_review.parse_verdict(
+            'Here is my review. {"verdict":"escalate","summary":"y"} Done.')
+        self.assertEqual(v["verdict"], "escalate")
+
+    def test_parse_verdict_rejects_garbage(self):
+        self.assertIsNone(legwork_review.parse_verdict("not json at all"))
+        self.assertIsNone(legwork_review.parse_verdict(
+            '{"verdict":"banana"}'))
+        self.assertIsNone(legwork_review.parse_verdict(""))
+
+    def test_build_evidence_text_shape(self):
+        text = legwork_review.build_evidence_text({
+            "repo": "demo", "end_reason": "normal",
+            "tracker_entry": "the prompt"})
+        self.assertIn("repo: demo", text)
+        self.assertIn("end_reason: normal", text)
+        self.assertIn("the prompt", text)
+        # Missing fields fall back to the n8n placeholders, not blanks.
+        self.assertIn("(none recorded)", text)
+        self.assertIn("(empty)", text)
+
+    def test_apply_pass_requeues_and_keeps_prompt(self):
+        out = legwork_review.apply_verdict(
+            self.project_text(), {"verdict": "pass", "summary": "all good"},
+            self.NOW)
+        text, status, detail = out
+        self.assertEqual(status, "queued")
+        self.assertIn("status: queued", text)
+        self.assertIn("the original task", text, "pass keeps the wrapped prompt")
+        self.assertIn("Reviewer passed: all good", text)
+        self.assertIn("updated: 2026-06-18", text)
+
+    def test_apply_revise_installs_fix_prompt(self):
+        out = legwork_review.apply_verdict(
+            self.project_text(),
+            {"verdict": "revise", "summary": "off by one",
+             "fix_prompt": "Read PROJECT.md.\n\nTask: fix the off-by-one.\n\n"
+                           "Done when: tests pass.\n\nFinal step: run /wrap."},
+            self.NOW)
+        text, status, _ = out
+        self.assertEqual(status, "queued")
+        self.assertIn("fix the off-by-one", text)
+        self.assertNotIn("the original task", text,
+                         "revise replaces the wrapped prompt")
+        self.assertIn("Reviewer revise: off by one", text)
+
+    def test_apply_revise_strips_fences_from_fix_prompt(self):
+        out = legwork_review.apply_verdict(
+            self.project_text(),
+            {"verdict": "revise", "summary": "s",
+             "fix_prompt": "```text\nTask: do it.\n```"}, self.NOW)
+        text, _, _ = out
+        # The fix prompt's own fence must not nest inside the Next prompt fence.
+        self.assertIn("Task: do it.", text)
+        self.assertNotIn("```text\nTask: do it.\n```\n```", text)
+
+    def test_apply_escalate_writes_brief_and_flips_status(self):
+        out = legwork_review.apply_verdict(
+            self.project_text(),
+            {"verdict": "escalate", "summary": "needs a call",
+             "decision_brief": {
+                 "attempted": "tried X", "uncertain": "whether Y",
+                 "options": ["A. do Y", "B. skip Y"],
+                 "recommendation": "A"}}, self.NOW)
+        text, status, _ = out
+        self.assertEqual(status, "escalated")
+        self.assertIn("status: escalated", text)
+        self.assertIn("DECISION NEEDED", text)
+        self.assertIn("A. do Y", text)
+        self.assertIn("Reviewer escalated: needs a call", text)
+        # The written prompt is a not-a-prompt marker, so even if the status
+        # were later flipped to queued the runner would refuse to fire it.
+        prompt = PROMPT_FROM(text)
+        self.assertTrue(prompt.startswith(legwork_runner.NOT_A_PROMPT))
+
+    def test_apply_skips_terminal_status(self):
+        for status in ("done", "icebox"):
+            self.assertIsNone(legwork_review.apply_verdict(
+                self.project_text(status=status),
+                {"verdict": "pass", "summary": "x"}, self.NOW),
+                f"{status} must not be resurrected")
+
+    def test_apply_rejects_unknown_verdict(self):
+        self.assertIsNone(legwork_review.apply_verdict(
+            self.project_text(), {"verdict": "maybe"}, self.NOW))
+
+    def test_render_decision_brief_format(self):
+        rendered = legwork_review.render_decision_brief(
+            {"attempted": "a", "uncertain": "u",
+             "options": ["A. one", "B. two"], "recommendation": "B"})
+        self.assertTrue(rendered.startswith("DECISION NEEDED"))
+        self.assertIn("Attempted: a", rendered)
+        self.assertIn("Uncertain: u", rendered)
+        self.assertIn("A. one", rendered)
+        self.assertIn("Recommendation: B", rendered)
+
+    def test_verdict_alert_formats(self):
+        self.assertIn("PASS  demo", legwork_review.verdict_alert(
+            {"verdict": "pass", "summary": "s", "confidence": 0.9}, "demo"))
+        revise = legwork_review.verdict_alert(
+            {"verdict": "revise", "summary": "s", "reasons": ["r1", "r2"],
+             "fix_prompt": "do it"}, "demo")
+        self.assertIn("REVISE  demo", revise)
+        self.assertIn("Why: r1; r2", revise)
+        self.assertIn("Fix prompt", revise)
+        esc = legwork_review.verdict_alert(
+            {"verdict": "escalate", "summary": "s", "decision_brief": {
+                "attempted": "a", "options": ["A. x"], "recommendation": "A"}},
+            "demo")
+        self.assertIn("NEEDS YOU  demo", esc)
+        self.assertIn("Reply with a letter.", esc)
+
+    def test_review_orchestration_with_stubbed_call(self):
+        original = legwork_review.call_claude
+        legwork_review.call_claude = lambda *a, **k: \
+            '{"verdict":"pass","summary":"fine"}'
+        try:
+            v = legwork_review.review({"repo": "demo"}, "sonnet", "claude")
+        finally:
+            legwork_review.call_claude = original
+        self.assertEqual(v["verdict"], "pass")
+
+    def test_review_returns_none_when_call_fails(self):
+        original = legwork_review.call_claude
+        legwork_review.call_claude = lambda *a, **k: None
+        try:
+            self.assertIsNone(
+                legwork_review.review({"repo": "demo"}, "sonnet", "claude"))
+        finally:
+            legwork_review.call_claude = original
+
+    def test_revise_without_fix_prompt_is_refused(self):
+        # A revise with no usable fix prompt must NOT overwrite the wrapped
+        # prompt with an empty block (which would strand the project); it is
+        # refused so the runner parks it for a human.
+        for fp in ("", "   ", "```text\n```", None):
+            v = {"verdict": "revise", "summary": "s", "fix_prompt": fp}
+            self.assertFalse(legwork_review.is_actionable(v), repr(fp))
+            self.assertIsNone(
+                legwork_review.apply_verdict(self.project_text(), v, self.NOW),
+                repr(fp))
+        # A real fix prompt is actionable and applies.
+        good = {"verdict": "revise", "summary": "s", "fix_prompt": "Task: go."}
+        self.assertTrue(legwork_review.is_actionable(good))
+        self.assertIsNotNone(
+            legwork_review.apply_verdict(self.project_text(), good, self.NOW))
+
+    def test_pass_and_escalate_always_actionable(self):
+        self.assertTrue(legwork_review.is_actionable({"verdict": "pass"}))
+        self.assertTrue(legwork_review.is_actionable(
+            {"verdict": "escalate", "decision_brief": {}}))
+
+    def test_revise_fix_prompt_with_embedded_fence_does_not_truncate(self):
+        # A fix prompt that itself contains a fenced code block must flatten,
+        # not nest inside the ```text wrapper and truncate on read-back.
+        fix = ("Read PROJECT.md.\n\nTask: make the signature:\n\n"
+               "```python\ndef parse(row):\n    ...\n```\n\n"
+               "Done when: tests pass.\n\nFinal step: run /wrap.")
+        text, _, _ = legwork_review.apply_verdict(
+            self.project_text(), {"verdict": "revise", "summary": "s",
+                                  "fix_prompt": fix}, self.NOW)
+        readback = PROMPT_FROM(text)
+        # The whole prompt survives the round-trip: the tail (Done when / wrap)
+        # is not lost, and no stray fence remains to break the block.
+        self.assertIn("Done when: tests pass.", readback)
+        self.assertIn("Final step: run /wrap.", readback)
+        self.assertNotIn("```", readback)
+
+    def test_escalate_brief_with_embedded_fence_does_not_truncate(self):
+        text, _, _ = legwork_review.apply_verdict(
+            self.project_text(),
+            {"verdict": "escalate", "summary": "s", "decision_brief": {
+                "attempted": "ran ```sh\nrm -rf x\n``` by mistake",
+                "uncertain": "u", "options": ["A. x", "B. y"],
+                "recommendation": "A"}}, self.NOW)
+        readback = PROMPT_FROM(text)
+        self.assertIn("DECISION NEEDED", readback)
+        self.assertIn("Recommendation: A", readback)
+        self.assertNotIn("```", readback)
+
+    def test_apply_appends_next_prompt_when_section_missing(self):
+        # _replace_next_prompt's append branch: a file with no ## Next prompt.
+        text = ("---\nname: d\nstatus: review\nupdated: 2026-06-01\n---\n\n"
+                "## Log\n\n- 2026-06-01: x.\n")
+        out = legwork_review.apply_verdict(
+            text, {"verdict": "revise", "summary": "s",
+                   "fix_prompt": "Task: do it."}, self.NOW)
+        self.assertIsNotNone(out)
+        self.assertIn("## Next prompt", out[0])
+        self.assertIn("Task: do it.", PROMPT_FROM(out[0]))
+
+    def test_build_evidence_text_populated_and_ordered(self):
+        text = legwork_review.build_evidence_text({
+            "repo": "demo", "branch": "main", "last_commit": "abc x",
+            "diff_stat": " a | 2 +-", "session_commits": "abc x",
+            "uncommitted_files": "0", "uncommitted_list": "",
+            "test_output": "RUNNER: re-queued after API error",
+            "tracker_entry": "Task: t.", "end_reason": "runner-recovery"})
+        self.assertIn("end_reason: runner-recovery", text)
+        self.assertIn("RUNNER: re-queued after API error", text)
+        # Order: repo header precedes the diff which precedes the tracker entry.
+        self.assertLess(text.index("repo: demo"), text.index("diff_stat:"))
+        self.assertLess(text.index("diff_stat:"), text.index("Task: t."))
+
+    def test_call_claude_envelope_parsing(self):
+        import types
+        orig = legwork_review.subprocess.run
+
+        def stub(stdout, returncode=0):
+            return lambda argv, **kw: types.SimpleNamespace(
+                returncode=returncode, stdout=stdout, stderr="")
+        cases = [
+            ('{"result":"THE VERDICT","is_error":false}', 0, "THE VERDICT"),
+            ('{"result":"x","is_error":true}', 0, None),
+            ('anything', 1, None),                 # non-zero exit
+            ('not json at all', 0, "not json at all"),  # raw fallback
+        ]
+        try:
+            for out, rc, expected in cases:
+                legwork_review.subprocess.run = stub(out, rc)
+                self.assertEqual(
+                    legwork_review.call_claude("p", "m", "claude"), expected,
+                    f"{out!r} rc={rc}")
+            # A subprocess failure (e.g. binary missing) yields None.
+            def boom(*a, **k):
+                raise OSError("no claude")
+            legwork_review.subprocess.run = boom
+            self.assertIsNone(legwork_review.call_claude("p", "m", "claude"))
+        finally:
+            legwork_review.subprocess.run = orig
+
+
+def PROMPT_FROM(text):
+    """The first fenced block under ## Next prompt, via the shared regex."""
+    import legwork_common
+    m = legwork_common.PROMPT_RE.search(text)
+    return m.group(1).strip() if m else ""
+
+
 class TestConcurrentRunner(unittest.TestCase):
     """Claim and wrap race paths: parallel claims serialise behind
     WRITE_LOCK, remote movement (n8n write-back, parallel wraps) is rebased
@@ -941,6 +1211,153 @@ class TestConcurrentRunner(unittest.TestCase):
         finally:
             subprocess.run(["git", "reset", "-q", "--hard", claim_head],
                            cwd=SANDBOX, check=True)
+
+    def _stub_review(self, verdict):
+        """Stub the claude call and the reviewer so run_local_review exercises
+        the runner's git write-back without touching the model or the network.
+        Returns a restore() to undo the stubs."""
+        orig_find = legwork_runner.find_claude
+        orig_review = legwork_review.review
+        legwork_runner.find_claude = lambda: "claude"
+        legwork_review.review = lambda payload, model, claude: verdict
+        return lambda: (setattr(legwork_runner, "find_claude", orig_find),
+                        setattr(legwork_review, "review", orig_review))
+
+    def test_local_review_applies_verdict_and_pushes(self):
+        repo = make_git_repo("c-review-repo")
+        path = write_project("c-review.md", status="review", repo=str(repo))
+        self.commit_and_push("add local-review project")
+        restore = self._stub_review(
+            {"verdict": "pass", "summary": "looks done", "confidence": 0.95})
+        try:
+            legwork_runner.run_local_review(
+                {"file": path, "repo_path": repo}, pre_head=None, detail=None)
+        finally:
+            restore()
+        published = self.origin_file("projects/c-review.md")
+        self.assertIn("status: queued", published, "pass requeues on the remote")
+        self.assertIn("Reviewer passed: looks done", published)
+
+    def test_local_review_escalate_flips_and_writes_brief(self):
+        repo = make_git_repo("c-review-esc-repo")
+        path = write_project("c-review-esc.md", status="review", repo=str(repo))
+        self.commit_and_push("add escalate project")
+        restore = self._stub_review(
+            {"verdict": "escalate", "summary": "needs a human",
+             "decision_brief": {"attempted": "a", "uncertain": "u",
+                                "options": ["A. x", "B. y"],
+                                "recommendation": "A"}})
+        try:
+            legwork_runner.run_local_review(
+                {"file": path, "repo_path": repo}, pre_head=None, detail=None)
+        finally:
+            restore()
+        published = self.origin_file("projects/c-review-esc.md")
+        self.assertIn("status: escalated", published)
+        self.assertIn("DECISION NEEDED", published)
+        # An escalated project is never eligible to fire.
+        ok, reason, _ = legwork_runner.assess(path)
+        self.assertFalse(ok)
+        self.assertIn("status is escalated", reason)
+
+    def test_local_review_parks_when_call_fails(self):
+        repo = make_git_repo("c-review-fail-repo")
+        path = write_project("c-review-fail.md", status="queued", repo=str(repo))
+        self.commit_and_push("add review-fail project")
+        restore = self._stub_review(None)  # reviewer returned no verdict
+        try:
+            legwork_runner.run_local_review(
+                {"file": path, "repo_path": repo}, pre_head=None, detail=None)
+        finally:
+            restore()
+        published = self.origin_file("projects/c-review-fail.md")
+        self.assertIn("status: review", published,
+                      "a failed reviewer call parks the project for a human")
+        self.assertIn("parked for human pickup", published)
+
+    def test_local_review_skips_terminal_status(self):
+        repo = make_git_repo("c-review-done-repo")
+        path = write_project("c-review-done.md", status="done", repo=str(repo))
+        self.commit_and_push("add done project")
+        restore = self._stub_review({"verdict": "pass", "summary": "x"})
+        try:
+            legwork_runner.run_local_review(
+                {"file": path, "repo_path": repo}, pre_head=None, detail=None)
+        finally:
+            restore()
+        published = self.origin_file("projects/c-review-done.md")
+        self.assertIn("status: done", published, "done must not be resurrected")
+        self.assertNotIn("Reviewer passed", published)
+
+    def test_local_review_revise_installs_fix_on_remote(self):
+        repo = make_git_repo("c-review-rev-repo")
+        path = write_project("c-review-rev.md", status="review", repo=str(repo))
+        self.commit_and_push("add revise project")
+        restore = self._stub_review(
+            {"verdict": "revise", "summary": "off by one",
+             "fix_prompt": "Read PROJECT.md.\n\nTask: fix the off-by-one.\n\n"
+                           "Done when: tests pass.\n\nFinal step: run /wrap."})
+        try:
+            legwork_runner.run_local_review(
+                {"file": path, "repo_path": repo}, pre_head=None, detail=None)
+        finally:
+            restore()
+        published = self.origin_file("projects/c-review-rev.md")
+        self.assertIn("status: queued", published)
+        self.assertIn("fix the off-by-one", published)
+        self.assertIn("Reviewer revise: off by one", published)
+
+    def test_local_review_parks_unactionable_revise(self):
+        repo = make_git_repo("c-review-noop-repo")
+        path = write_project("c-review-noop.md", status="queued", repo=str(repo))
+        self.commit_and_push("add unactionable revise project")
+        # A revise with no fix prompt must NOT blow away the wrapped prompt;
+        # the project is parked at review for a human instead.
+        restore = self._stub_review(
+            {"verdict": "revise", "summary": "vague", "fix_prompt": ""})
+        try:
+            legwork_runner.run_local_review(
+                {"file": path, "repo_path": repo}, pre_head=None, detail=None)
+        finally:
+            restore()
+        published = self.origin_file("projects/c-review-noop.md")
+        self.assertIn("status: review", published)
+        self.assertIn("Task: do one thing.", published,
+                      "the wrapped prompt must survive an unactionable revise")
+        self.assertIn("parked for human pickup", published)
+
+    def test_park_for_review_skips_non_inflight(self):
+        repo = make_git_repo("c-park-skip-repo")
+        path = write_project("c-park-skip.md", status="escalated", repo=str(repo))
+        self.commit_and_push("add already-escalated project")
+        legwork_runner.park_for_review({"file": path})
+        published = self.origin_file("projects/c-park-skip.md")
+        self.assertIn("status: escalated", published,
+                      "park must not touch a project that is not in flight")
+        self.assertNotIn("parked for human pickup", published)
+
+    def test_local_review_payload_scopes_to_session(self):
+        repo = make_git_repo("c-payload-repo")
+        subprocess.run(["git", *GIT_ID, "commit", "-q", "--allow-empty",
+                        "-m", "base"], cwd=repo, check=True)
+        pre = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                             capture_output=True, text=True).stdout.strip()
+        subprocess.run(["git", *GIT_ID, "commit", "-q", "--allow-empty",
+                        "-m", "session work"], cwd=repo, check=True)
+        path = write_project("c-payload.md", status="review", repo=str(repo))
+        self.commit_and_push("add payload project")
+        payload = legwork_runner.local_review_payload(
+            {"file": path, "repo_path": repo}, pre, detail=None)
+        self.assertEqual(payload["repo"], "c-payload")
+        self.assertEqual(payload["end_reason"], "normal")
+        self.assertIn("session work", payload["session_commits"])
+        self.assertNotIn("base", payload["session_commits"],
+                         "evidence is scoped to the session, not the repo")
+        self.assertIn("c-payload", payload["tracker_entry"])
+        # A repair detail flips end_reason so the rubric treats it as recovery.
+        recovered = legwork_runner.local_review_payload(
+            {"file": path, "repo_path": repo}, pre, detail="exited")
+        self.assertEqual(recovered["end_reason"], "runner-recovery")
 
 
 class TestDashboard(unittest.TestCase):

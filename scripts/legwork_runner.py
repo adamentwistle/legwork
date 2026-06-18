@@ -99,7 +99,11 @@ beside the repo root when one is present (real environment variables win),
 so launchd and manual runs share one source of truth. See config.example.
 The review pipeline is optional: with neither LEGWORK_WEBHOOK_URL nor
 LEGWORK_ALERT_URL set, the runner still fires sessions and they still wrap,
-it just skips the review post and the Telegram alerts.
+it just skips the review post and the Telegram alerts. As an alternative to
+the n8n webhook, set LEGWORK_LOCAL_REVIEW to triage each session in-process
+with a `claude -p` call (REVIEWER_MODEL, default claude-sonnet-4-6) and write
+the pass/revise/escalate verdict straight back to the project file, so the
+reviewer-by-exception loop runs with no n8n; see scripts/legwork_review.py.
 """
 
 import json
@@ -115,6 +119,7 @@ import urllib.request
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+import legwork_review
 from legwork_common import PROMPT_RE, days_since, parse_frontmatter
 
 
@@ -169,6 +174,16 @@ REMOTE_PAUSE_FILE = LEGWORK_DIR / ".runner-pause-remote"
 # Telegram alerts and heartbeat. Set them via the environment or config.
 WEBHOOK_URL = os.environ.get("LEGWORK_WEBHOOK_URL", "")
 ALERT_URL = os.environ.get("LEGWORK_ALERT_URL", "")
+# Local reviewer: the zero-dependency equivalent of the n8n review pipeline.
+# Opt in with LEGWORK_LOCAL_REVIEW; it runs only when no LEGWORK_WEBHOOK_URL is
+# set, so n8n stays the path when wired and local is the no-n8n alternative.
+# After a real-work session the runner triages it with a `claude -p` call and
+# writes the verdict (pass/revise/escalate) straight back to the project file.
+LOCAL_REVIEW = os.environ.get("LEGWORK_LOCAL_REVIEW", "").strip().lower() \
+    in ("1", "true", "yes", "on")
+# Reviewer model for both the n8n pipeline (read by n8n-build-node.js) and the
+# local reviewer. A full id or a short alias; default matches the n8n copy.
+REVIEWER_MODEL = os.environ.get("REVIEWER_MODEL", "claude-sonnet-4-6")
 STATE_FILE = LEGWORK_DIR / ".runner-state.json"
 # Default Claude config dir for autonomous sessions. Empty means inherit the
 # default config. A project's account: <name> maps to CLAUDE_CONFIG_DIR_<NAME>
@@ -663,6 +678,133 @@ def notify_reviewer(project, detail):
         return False
 
 
+def local_review_payload(project, pre_head, detail):
+    """Assemble the same evidence shape the SessionEnd hook posts, but built
+    by the runner so local review works with no hook and no webhook. The diff
+    and commit list are scoped to this session via the pre-fire HEAD; the
+    tracker entry carries intent; end_reason mirrors how the runner closed
+    out (runner-recovery when it had to repair an unwrapped session)."""
+    repo = project["repo_path"]
+    branch = run_git(["rev-parse", "--abbrev-ref", "HEAD"], repo).stdout.strip()
+    last = run_git(["log", "-1", "--oneline"], repo).stdout.strip()
+    if pre_head:
+        diff = run_git(["diff", "--stat", f"{pre_head}..HEAD"], repo).stdout.strip()
+        commits = run_git(["log", "--oneline", f"{pre_head}..HEAD"], repo).stdout.strip()
+    else:
+        diff = run_git(["diff", "--stat", "HEAD~1..HEAD"], repo).stdout.strip()
+        commits = ""
+    porcelain = run_git(["status", "--porcelain"], repo).stdout.splitlines()
+    test_output = ""
+    try:
+        test_output = "\n".join((repo / ".legwork" / "last_test_output.txt")
+                                .read_text(encoding="utf-8").splitlines()[-40:])
+    except OSError:
+        pass
+    # The tracker file lives in the legwork repo, which parallel workers and a
+    # pull can rewrite; read it under the same lock so the evidence cannot be
+    # a torn mid-write file.
+    with WRITE_LOCK:
+        tracker_entry = project["file"].read_text(encoding="utf-8")[:4500]
+    return {
+        "repo": project["file"].stem,
+        "branch": branch or "none",
+        "last_commit": last or "none",
+        "diff_stat": diff,
+        "session_commits": commits,
+        "uncommitted_files": str(len(porcelain)),
+        "uncommitted_list": "\n".join(porcelain[:15]),
+        "test_output": test_output,
+        "tracker_entry": tracker_entry,
+        "session_id": "",
+        "end_reason": "runner-recovery" if detail else "normal",
+    }
+
+
+def apply_local_review(project, verdict):
+    """Write a reviewer verdict back to the project file. Mirrors
+    repair_unwrapped's shape: take WRITE_LOCK, pull so a parallel wrap is not
+    clobbered, let legwork_review decide the new text, commit and push.
+    Returns True when the verdict was applied, False when it was a no-op (a
+    terminal status the reviewer must not resurrect)."""
+    with WRITE_LOCK:
+        path = project["file"]
+        run_git(["pull", "--rebase"], LEGWORK_DIR)
+        text = path.read_text(encoding="utf-8")
+        applied = legwork_review.apply_verdict(text, verdict, datetime.now())
+        if not applied:
+            return False
+        new_text, _new_status, _detail = applied
+        path.write_text(new_text, encoding="utf-8")
+        run_git(["add", str(path)], LEGWORK_DIR)
+        run_git(["commit", "-m",
+                 f"legwork: reviewer {verdict['verdict']} {path.stem}"],
+                LEGWORK_DIR)
+        if not push_with_rebase(LEGWORK_DIR):
+            log(f"local review push failed for {path.name}")
+        return True
+
+
+def park_for_review(project, reason="local review could not produce an "
+                     "actionable verdict"):
+    """The reviewer call failed or returned nothing usable. Park the project
+    at status review so the dashboard surfaces it for a human and the runner
+    does not refire-and-retriage it in a loop. A no-op unless the project is
+    still in flight (queued or running)."""
+    with WRITE_LOCK:
+        path = project["file"]
+        run_git(["pull", "--rebase"], LEGWORK_DIR)
+        text = path.read_text(encoding="utf-8")
+        if parse_frontmatter(text).get("status", "").lower() \
+                not in ("queued", "running"):
+            return
+        today = date.today().isoformat()
+        text = re.sub(r"^status:[ \t]*(?:queued|running)[ \t]*$",
+                      "status: review", text, count=1, flags=re.M)
+        bullet = f"- {today}: Runner: {reason}; parked for human pickup.\n"
+        new = re.sub(r"(##[ \t]*Log[^\n]*\n+)",
+                     lambda m: m.group(1) + bullet, text, count=1)
+        if new == text:  # no ## Log section to prepend under
+            new = text.rstrip() + "\n\n## Log\n\n" + bullet
+        text = new
+        path.write_text(text, encoding="utf-8")
+        run_git(["add", str(path)], LEGWORK_DIR)
+        run_git(["commit", "-m",
+                 f"legwork: park {path.stem} for review (reviewer call failed)"],
+                LEGWORK_DIR)
+        if not push_with_rebase(LEGWORK_DIR):
+            log(f"park push failed for {path.name}")
+
+
+def run_local_review(project, pre_head, detail):
+    """The local review pipeline: build evidence, triage with a claude call,
+    write the verdict back, and alert if a webhook is wired. A failed call
+    parks the project for a human instead of risking a refire loop."""
+    claude_path = find_claude()
+    if not claude_path:
+        log("local review skipped: claude binary not found")
+        return
+    stem = project["file"].stem
+    payload = local_review_payload(project, pre_head, detail)
+    verdict = legwork_review.review(payload, REVIEWER_MODEL, claude_path)
+    if not verdict:
+        park_for_review(project, "local review call failed (no verdict)")
+        log(f"local review FAILED for {stem}: no verdict; parked for human")
+        return
+    if not legwork_review.is_actionable(verdict):
+        # e.g. a revise with no fix prompt: writing it back would strand the
+        # project, so hand it to a human instead.
+        park_for_review(project, f"reviewer returned a {verdict.get('verdict')} "
+                        f"with no actionable content")
+        log(f"local review {verdict.get('verdict')} for {stem} not actionable; "
+            f"parked for human")
+        return
+    applied = apply_local_review(project, verdict)
+    log(f"local review {verdict['verdict']} for {stem}: "
+        f"{'applied' if applied else 'skipped (terminal status)'}")
+    if applied:
+        send_alert(legwork_review.verdict_alert(verdict, stem))
+
+
 def last_fire_line():
     """The most recent 'fired' entry in runner.log, shortened for Telegram."""
     if not RUNNER_LOG.exists():
@@ -1018,6 +1160,13 @@ def fire(project):
     if not claim_head:
         return
 
+    # The target repo's HEAD before the session, so local review can diff
+    # exactly what this session committed without depending on the hook. Guard
+    # on the return code: on a commitless repo `git rev-parse HEAD` exits non-
+    # zero but still echoes the literal "HEAD", which would poison the diff.
+    head_res = run_git(["rev-parse", "HEAD"], project["repo_path"])
+    pre_head = head_res.stdout.strip() if head_res.returncode == 0 else None
+
     TRANSCRIPTS.mkdir(exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     transcript = TRANSCRIPTS / f"{stamp}-{project['file'].stem}.jsonl"
@@ -1106,6 +1255,10 @@ def fire(project):
             sent = notify_reviewer(project, reason)
             log(f"reviewer notified directly for {project['file'].name}: "
                 f"{'ok' if sent else 'FAILED'}")
+    elif LOCAL_REVIEW:
+        # No n8n webhook, but local review is opted in: triage this session
+        # in-process with a claude call and write the verdict straight back.
+        run_local_review(project, pre_head, detail)
     rebuild_dashboard()
     audit_session_window(project, claim_head)
     return {
@@ -1391,8 +1544,13 @@ def doctor():
     if (LEGWORK_DIR / ".git").exists():
         check("legwork git status readable",
               run_git(["status", "--porcelain"], LEGWORK_DIR).returncode == 0)
-    print(f"[info] review webhook: "
-          f"{'configured' if WEBHOOK_URL else 'unset (review pipeline off)'}")
+    if WEBHOOK_URL:
+        review_mode = "n8n webhook"
+    elif LOCAL_REVIEW:
+        review_mode = f"local ({REVIEWER_MODEL})"
+    else:
+        review_mode = "off (fire-and-wrap only)"
+    print(f"[info] review:        {review_mode}")
     print(f"[info] alert webhook:  "
           f"{'configured' if ALERT_URL else 'unset (alerts/heartbeat off)'}")
     print(f"[info] default config: "
