@@ -1390,10 +1390,10 @@ def tick(dry_run=False):
             # dirty with no hook to commit it, which would stall firing
             # forever. The runner commits those itself and proceeds. Any
             # dirty path outside projects/ still blocks until a human acts.
-            tracked = [l for l in dirty.stdout.splitlines()
-                       if l.strip() and not l.startswith("??")]
-            if tracked and all(porcelain_path(l).startswith("projects/")
-                               for l in tracked):
+            tracked = [line for line in dirty.stdout.splitlines()
+                       if line.strip() and not line.startswith("??")]
+            if tracked and all(porcelain_path(line).startswith("projects/")
+                               for line in tracked):
                 run_git(["add", "projects"], LEGWORK_DIR)
                 committed = run_git(
                     ["commit", "-m",
@@ -1402,13 +1402,13 @@ def tick(dry_run=False):
                 if committed.returncode == 0:
                     push_with_rebase(LEGWORK_DIR)
                     names = ", ".join(sorted(
-                        {porcelain_path(l) for l in tracked}))
+                        {porcelain_path(line) for line in tracked}))
                     log(f"auto-committed tracker edits ({len(tracked)} "
                         f"files): {names}")
                     tracked = []
             if tracked:
-                outside = sorted({porcelain_path(l) for l in tracked
-                                  if not porcelain_path(l).startswith("projects/")})
+                outside = sorted({porcelain_path(line) for line in tracked
+                                  if not porcelain_path(line).startswith("projects/")})
                 blocked = (f"uncommitted tracked changes in the legwork "
                            f"repo ({len(tracked)} files"
                            + (f": {', '.join(outside)}" if outside else "")
