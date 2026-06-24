@@ -3,8 +3,9 @@
 
 Stdlib only, like everything in scripts/. The runner and the dashboard
 builder both parse the same project-file shape (frontmatter, the Next prompt
-fenced block, dated values), so the parsing lives here once instead of being
-copied into each script. Both scripts run with their own directory on
+fenced block, dated values), and the runner and installer share the same
+config-file KEY=VALUE rules, so that parsing lives here once instead of being
+copied into each script. These scripts run with their own directory on
 sys.path[0], so `from legwork_common import ...` resolves whether they are
 run directly (python3 scripts/<x>.py), imported by the tests, or fired by
 launchd. Keep this module dependency-free.
@@ -17,6 +18,13 @@ from datetime import date
 # heading. Shared verbatim by the runner (eligibility) and the dashboard
 # (card rendering) so the two never disagree on what "the prompt" is.
 PROMPT_RE = re.compile(r"##\s*Next prompt.*?```[a-zA-Z]*\n(.*?)```", re.S)
+
+# The per-fire dollar cost in a runner.log "completed" line, e.g.
+# "... completed foo.md: exit 0, 7 min, $1.23, 5 turns". transcript_summary
+# writes it as ${cost:.2f} (always two decimals), and the runner (daily cost
+# cap) and the dashboard (per-file spend) read it back with this one pattern
+# so the two never disagree on what a fire cost.
+COST_RE = re.compile(r"\$(\d+\.\d{2})")
 
 
 def parse_frontmatter(text):
@@ -47,3 +55,17 @@ def days_since(value):
     """Whole days from a YYYY-MM-DD value to today, or None when unparseable."""
     d = parse_date(value)
     return (date.today() - d).days if d else None
+
+
+def iter_config_pairs(text):
+    """Yield (key, value) pairs from KEY=VALUE config text, skipping blank
+    lines and `#` comments and stripping surrounding quotes. Values are
+    returned verbatim: $VARS and ~ are NOT expanded here, so callers expand
+    only when they need to (the runner does, into the environment; the
+    installer does not, so its prompts echo the file's own text)."""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        yield key.strip(), value.strip().strip('"').strip("'")
