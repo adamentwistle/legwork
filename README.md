@@ -51,10 +51,10 @@ The dashboard is a single static HTML file built from `projects/*.md` by `script
 
 Requirements: `python3`, the Claude Code CLI, and `git`.
 
-legwork is the legwork repo: the runner, the dashboard builder, the config file and your project files all live inside one checkout.
+legwork is the legwork repo: the runner, the dashboard builder, the config file and your project files all live inside one checkout. Clone your own legwork repo — a fork, or any git remote you control — so the runner can commit your project files back to it; the local runner and dashboard also work with no remote, so a plain clone is enough just to try it.
 
 ```
-git clone https://github.com/your-github-user/your-repo.git "$HOME/legwork"
+git clone <your-legwork-remote> "$HOME/legwork"
 cd "$HOME/legwork"
 ./install.sh
 ```
