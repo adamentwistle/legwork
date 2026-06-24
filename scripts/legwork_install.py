@@ -38,6 +38,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from legwork_common import iter_config_pairs
+
 REPO = Path(__file__).resolve().parent.parent
 PLIST_TEMPLATE = REPO / "scripts" / "com.legwork.runner.plist"
 START_HOOK = "session_start_hook.sh"
@@ -179,14 +181,7 @@ def parse_config_text(text):
     runner's load_config uses, so a re-run can pre-fill its prompts with what
     is already there. Quotes are stripped; $VARS and ~ are NOT expanded here,
     so the prompt shows the file's own text."""
-    values = {}
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        values[key.strip()] = value.strip().strip('"').strip("'")
-    return values
+    return dict(iter_config_pairs(text))
 
 
 def merge_hooks(settings, legwork_dir):
@@ -572,7 +567,7 @@ def collect_values(wiz, existing):
     }
 
 
-def review_screen(ui, values, config_text):
+def review_screen(ui, config_text):
     """Show the config that will be written before anything touches disk."""
     print("\n" + ui.bold("  Configuration to write") + "  "
           + ui.dim("(config, gitignored)"))
@@ -586,7 +581,7 @@ def review_screen(ui, values, config_text):
     print(ui.dim("  " + ui.rule * 58))
 
 
-def write_repo_files(ui, values):
+def write_repo_files(values):
     """Write `config`, and create projects/ and .runner-logs/. Returns the
     list of human-readable actions taken, for the closing summary."""
     actions = []
@@ -698,7 +693,7 @@ def install_hooks(wiz, values):
     return actions
 
 
-def closing(ui, actions, values):
+def closing(ui, actions):
     print("\n" + ui.good(ui.box["tl"] + ui.box["h"] * 58 + ui.box["tr"]))
     title = f"{ui.spark} legwork is installed"
     print(ui.good(ui.box["v"]) + "  " + ui.bold(title).ljust(
@@ -780,17 +775,17 @@ def main(argv=None):
     values["python_bin"] = detect_python()
 
     config_text = render_config(values)
-    review_screen(ui, values, config_text)
+    review_screen(ui, config_text)
     if not wiz.ask_yn("Write this config and continue?", default=True):
         print("\n  " + ui.dim("nothing written. Re-run when ready."))
         return 0
 
     actions = []
-    actions += write_repo_files(ui, values)
+    actions += write_repo_files(values)
     actions += install_timer(wiz, values)
     actions += install_hooks(wiz, values)
 
-    closing(ui, actions, values)
+    closing(ui, actions)
     run_doctor(wiz)
     return 0
 

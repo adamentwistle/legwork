@@ -22,7 +22,7 @@ import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from legwork_common import parse_frontmatter, PROMPT_RE, parse_date
+from legwork_common import COST_RE, parse_frontmatter, PROMPT_RE, parse_date
 
 ROOT = Path(__file__).resolve().parent.parent
 PROJECTS_DIR = ROOT / "projects"
@@ -92,11 +92,6 @@ def parse_project(path):
         "log": log_lines[:3],
         "log_all": log_lines,
     }
-
-
-# A completed line looks like "... completed <fname>: exit 0, 7 min $1.23 ...";
-# the dollar cost is the runner's per-fire spend.
-COST_RE = re.compile(r"\$(\d+\.\d{2})")
 
 
 def runner_activity(files):

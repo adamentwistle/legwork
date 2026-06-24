@@ -120,7 +120,8 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import legwork_review
-from legwork_common import PROMPT_RE, days_since, parse_frontmatter
+from legwork_common import (
+    COST_RE, PROMPT_RE, days_since, iter_config_pairs, parse_frontmatter)
 
 
 def load_config():
@@ -140,14 +141,9 @@ def load_config():
             text = path.read_text(encoding="utf-8")
         except OSError:
             continue
-        for line in text.splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            value = os.path.expanduser(os.path.expandvars(
-                value.strip().strip('"').strip("'")))
-            os.environ.setdefault(key.strip(), value)
+        for key, value in iter_config_pairs(text):
+            os.environ.setdefault(
+                key, os.path.expanduser(os.path.expandvars(value)))
         break
 
 
@@ -236,8 +232,6 @@ KNOWN_KEYS = {"name", "category", "status", "energy", "description", "repo",
               "updated", "autonomy", "account", "blocked_on", "fire_once"}
 # A session window may write these legwork paths; anything else is audited.
 TRACKER_SURFACE = ("projects/", "dashboard/")
-# The per-fire dollar cost transcript_summary writes to each completed line.
-COST_RE = re.compile(r"\$(\d+(?:\.\d+)?)")
 # Transient cloud failures worth a quiet retry rather than a review cycle:
 # overload, rate limiting and 5xx/connection faults from the API or harness.
 TRANSIENT_RE = re.compile(
