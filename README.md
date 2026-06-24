@@ -65,6 +65,8 @@ cd "$HOME/legwork"
 - install and load the launchd agent (macOS) or a crontab line (Linux)
 - register the SessionStart/SessionEnd hooks in your Claude `settings.json`
 
+Running headless? `./install.sh --yes` accepts every default without prompting; it writes the in-repo config but skips the two outside-the-repo steps (the launchd/cron timer and the Claude hooks) unless you add `--with-launchd` or `--with-hooks`.
+
 Then fill the queue: add projects with the `/add` skill and grant autonomy per project with `/vision`. Verify any time with `python3 scripts/legwork_runner.py --doctor`.
 
 Prefer to do it by hand, or want the optional n8n review, reply-capture, and alerts pipelines? See [SETUP.md](SETUP.md); every step the wizard automates is also written out there.

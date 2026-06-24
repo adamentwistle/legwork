@@ -9,6 +9,10 @@ normally through the wrapper:
     python3 scripts/legwork_install.py --yes  accept every default, no prompts
     python3 scripts/legwork_install.py --no-color   plain output
 
+A non-interactive --yes run never touches anything outside the repo: it
+writes config and creates the repo dirs, but skips the launchd/cron timer
+and the Claude hooks unless you opt in with --with-launchd / --with-hooks.
+
 It walks one screen at a time: it asks for every value legwork can be
 configured with (the legwork dir, the daily fire and cost caps, the review
 mode and reviewer model, an optional dedicated Claude config dir, the tick
@@ -600,9 +604,21 @@ def write_repo_files(values):
     return actions
 
 
-def install_timer(wiz, values):
+def _confirm(wiz, force, question, default=True):
+    """A yes/no decision for a step with side effects. `force` short-circuits
+    the prompt: True or False is used as the answer, None falls back to asking.
+    Non-interactive installs pass force so they never act on anything outside
+    the repo without an explicit opt-in."""
+    if force is not None:
+        return force
+    return wiz.ask_yn(question, default=default)
+
+
+def install_timer(wiz, values, force=None):
     """Install and load the launchd agent (macOS) or a crontab line (Linux),
-    asking before the system-level action. Returns action strings."""
+    asking before the system-level action. `force` (see _confirm) lets a
+    non-interactive run skip it, or accept it with --with-launchd, without a
+    prompt. Returns action strings."""
     ui = wiz.ui
     actions = []
     legwork_dir = os.path.expanduser(os.path.expandvars(values["legwork_dir"]))
@@ -610,10 +626,9 @@ def install_timer(wiz, values):
     interval_seconds = values["interval_minutes"] * 60
 
     if sys.platform == "darwin":
-        if not wiz.ask_yn(
+        if not _confirm(wiz, force,
                 "Install and load the launchd agent now "
-                f"(ticks every {values['interval_minutes']} min)?",
-                default=True):
+                f"(ticks every {values['interval_minutes']} min)?"):
             actions.append(ui.dim("skipped launchd (see SETUP.md step 4a)"))
             return actions
         template = PLIST_TEMPLATE.read_text(encoding="utf-8")
@@ -637,8 +652,8 @@ def install_timer(wiz, values):
     else:
         schedule = cron_schedule(values["interval_minutes"])
         line = render_crontab_line(legwork_dir, python_bin, schedule)
-        if not wiz.ask_yn(
-                f"Add a crontab line ticking '{schedule}'?", default=True):
+        if not _confirm(wiz, force,
+                f"Add a crontab line ticking '{schedule}'?"):
             actions.append(ui.dim("skipped crontab; line to add:"))
             actions.append(ui.dim("  " + line))
             return actions
@@ -657,9 +672,11 @@ def install_timer(wiz, values):
     return actions
 
 
-def install_hooks(wiz, values):
+def install_hooks(wiz, values, force=None):
     """Register the SessionStart/SessionEnd hooks in the relevant Claude
-    settings.json, asking first since it lives outside the repo."""
+    settings.json, asking first since it lives outside the repo. `force` (see
+    _confirm) lets a non-interactive run skip it, or accept it with
+    --with-hooks, without a prompt."""
     ui = wiz.ui
     actions = []
     legwork_dir = os.path.expanduser(os.path.expandvars(values["legwork_dir"]))
@@ -670,8 +687,8 @@ def install_hooks(wiz, values):
         base = Path.home() / ".claude"
     settings_path = base / "settings.json"
 
-    if not wiz.ask_yn(
-            f"Register the review hooks in {settings_path}?", default=True):
+    if not _confirm(wiz, force,
+            f"Register the review hooks in {settings_path}?"):
         actions.append(ui.dim("skipped hooks (see SETUP.md step 3)"))
         return actions
 
@@ -742,9 +759,17 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Interactive installer for legwork.")
     parser.add_argument("--yes", "-y", action="store_true",
-                        help="accept every default; do not prompt")
+                        help="accept every default and do not prompt; the two "
+                             "outside-the-repo steps (launchd/cron, hooks) are "
+                             "skipped unless --with-launchd / --with-hooks")
     parser.add_argument("--no-color", action="store_true",
                         help="plain output, no ANSI color")
+    parser.add_argument("--with-launchd", action="store_true",
+                        help="install the launchd/cron timer without prompting "
+                             "(use with --yes for a headless install)")
+    parser.add_argument("--with-hooks", action="store_true",
+                        help="register the Claude hooks without prompting "
+                             "(use with --yes for a headless install)")
     args = parser.parse_args(argv)
 
     ui = UI(color=detect_color(args.no_color), unicode=detect_unicode())
@@ -755,7 +780,14 @@ def main(argv=None):
               "accept every default non-interactively.", file=sys.stderr)
         return 2
 
-    wiz = Wizard(ui, assume_yes=args.yes or not interactive)
+    assume_yes = args.yes or not interactive
+    wiz = Wizard(ui, assume_yes=assume_yes)
+    # The launchd/cron timer and the Claude hooks touch state outside the repo,
+    # so a non-interactive run must not perform them silently: under --yes they
+    # are skipped unless the matching --with-* flag opts in. Interactive runs
+    # still ask (force=None).
+    force_timer = True if args.with_launchd else (False if assume_yes else None)
+    force_hooks = True if args.with_hooks else (False if assume_yes else None)
 
     print(masthead(ui))
 
@@ -782,8 +814,8 @@ def main(argv=None):
 
     actions = []
     actions += write_repo_files(values)
-    actions += install_timer(wiz, values)
-    actions += install_hooks(wiz, values)
+    actions += install_timer(wiz, values, force=force_timer)
+    actions += install_hooks(wiz, values, force=force_hooks)
 
     closing(ui, actions)
     run_doctor(wiz)
