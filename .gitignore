@@ -8,6 +8,10 @@ __pycache__/
 # Never commit it (it can hold webhook URLs). config.example is tracked.
 /config
 
+# Local secrets, per-machine. e.g. a personal GitHub PAT used to read this
+# private repo's CI run status over the REST API. Never commit.
+/.env
+
 # Your real project data and the generated dashboard; the engine creates
 # both at runtime. Track your own projects in a private repo, not here.
 # Root-anchored so examples/projects/ stays tracked. (Drop these two lines
