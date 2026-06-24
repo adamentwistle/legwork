@@ -23,9 +23,13 @@ creates `projects/` and `.runner-logs/`, installs and loads the launchd agent
 hooks in your Claude `settings.json`. It asks before every action that touches
 anything outside the repo, so you can decline any piece and do it by hand.
 
-Flags: `--yes` accepts every default without prompting, `--no-color` prints
-plainly. Re-running is safe: it reads your existing `config` to pre-fill the
-prompts and never duplicates a launchd agent, crontab line or hook entry.
+Flags: `--yes` accepts every default without prompting — but the two steps
+that touch things outside the repo (the launchd/cron timer and the Claude
+hooks) are skipped unless you add `--with-launchd` or `--with-hooks`, so a
+headless `--yes` install never loads a launchd agent or edits your
+`settings.json` behind your back. `--no-color` prints plainly. Re-running is
+safe: it reads your existing `config` to pre-fill the prompts and never
+duplicates a launchd agent, crontab line or hook entry.
 
 The rest of this guide is the manual path. Follow it if you skipped a piece of
 the wizard, want to understand exactly what it did, or are wiring the optional

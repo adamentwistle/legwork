@@ -6,6 +6,11 @@
 #     ./install.sh --yes      accept every default, no prompts
 #     ./install.sh --no-color plain output
 #
+# A non-interactive --yes run writes the in-repo config but skips the two
+# outside-the-repo steps (the launchd/cron timer and the Claude hooks) unless
+# you add --with-launchd / --with-hooks, so it never loads a launchd agent or
+# edits your settings.json behind your back.
+#
 # It only needs python3, git and the Claude Code CLI on PATH; the wizard
 # checks for the rest and tells you what is missing.
 set -euo pipefail
