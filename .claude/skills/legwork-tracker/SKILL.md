@@ -88,12 +88,15 @@ guessing. The Telegram loop closes the circuit: the human answers the
 letter or replies continue, reply capture queues the project on the remote,
 the runner pulls and fires the next session.
 
-n8n writes decisions and minted prompts straight to the GitHub remote, so the
-local clone can be behind. Every tracker operation begins with `git pull
---rebase` in the legwork repo and ends with `git push`. Pull before you read
-or edit a project file; push after you commit.
+When the legwork repo has a remote (`git remote` prints one), every tracker
+operation begins with `git pull --rebase` there and ends with `git push`:
+n8n and other machines write decisions and minted prompts straight to the
+remote, so the local clone can be behind. A remoteless checkout (someone
+trying legwork locally) skips the pull and the push: commit locally and
+move on, never error on the missing remote.
 
-1. Pull first: `git pull --rebase` in the legwork repo.
+1. Pull first: `git pull --rebase` in the legwork repo, when it has a
+   remote; skip this when `git remote` prints nothing.
 2. Identify the project file. If none exists, create a new
    `projects/<kebab>.md` following the File format spec above (frontmatter,
    `## Next prompt`, `## Log`).
@@ -115,8 +118,13 @@ or edit a project file; push after you commit.
    than leaving stale output from a previous session.
 8. Rebuild the dashboard from the legwork repo:
    `python3 scripts/build_dashboard.py`
-9. Commit your changes with an honest message and `git push`. The remote is
-   shared with n8n, so never leave local tracker commits unpushed.
+9. Commit your changes with an honest message, then `git push` when the
+   repo has a remote: it is shared with n8n and other machines, so never
+   leave local tracker commits unpushed. Two graceful degradations: with no
+   remote, stop after the local commit; and if git refuses the add because
+   `/projects/` is still gitignored (a fresh clone of the public repo ships
+   that way), skip the commit (the file is saved on disk) and point the
+   user at SETUP.md's "Make this repo your tracker" step in your reply.
 
 ## Minting the next prompt
 

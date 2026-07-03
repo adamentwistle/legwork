@@ -8,7 +8,7 @@ Project: $ARGUMENTS (if blank, ask which project this is for).
 
 Steps:
 1. Resolve the legwork repo: $LEGWORK_DIR if set, otherwise ~/legwork.
-   Run `git pull --rebase` there first.
+   If it has a remote, run `git pull --rebase` there first.
 2. Read the project file, its full log, and the target repo's README or
    PROJECT.md when one exists. Draft a candidate Vision yourself before
    asking anything: the interview corrects a draft, it does not start
@@ -33,4 +33,6 @@ Steps:
    work; list the exact commands and let me approve them.
 6. Check the Next prompt still serves the Vision; tweak it if not.
 7. Log one line: `- YYYY-MM-DD: Vision captured. Autonomy <enabled|left manual>.`
-8. Rebuild the dashboard, commit, push. Confirm in two lines.
+8. Rebuild the dashboard, commit, and push when a remote exists (degrade
+   exactly as the legwork-tracker skill describes: no remote, no push;
+   `/projects/` still gitignored, no commit). Confirm in two lines.
