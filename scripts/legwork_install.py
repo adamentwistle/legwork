@@ -39,12 +39,15 @@ helpers runs until main() is called under __main__.
 
 import argparse
 import json
+import math
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from xml.sax.saxutils import escape as xml_escape
 
 from legwork_common import iter_config_pairs
 
@@ -84,9 +87,10 @@ def render_plist(template, legwork_dir, python_bin, interval_seconds):
     """Fill the launchd template: the two `__PLACEHOLDERS__` plus the
     StartInterval value. The template stays a valid, hand-editable file (its
     sed recipe still works); we additionally retarget the interval so the
-    installed agent ticks at the chosen cadence."""
-    text = template.replace("__LEGWORK_DIR__", str(legwork_dir))
-    text = text.replace("__PYTHON__", str(python_bin))
+    installed agent ticks at the chosen cadence. Values are XML-escaped: a
+    path with `&` must not yield a plist launchctl refuses to load."""
+    text = template.replace("__LEGWORK_DIR__", xml_escape(str(legwork_dir)))
+    text = text.replace("__PYTHON__", xml_escape(str(python_bin)))
     text = re.sub(
         r"(<key>StartInterval</key>\s*<integer>)\d+(</integer>)",
         lambda m: f"{m.group(1)}{int(interval_seconds)}{m.group(2)}",
@@ -97,11 +101,15 @@ def render_plist(template, legwork_dir, python_bin, interval_seconds):
 
 def render_crontab_line(legwork_dir, python_bin, schedule):
     """The crontab line that ticks the runner, tagged with a marker comment
-    so the installer can find and replace its own line idempotently."""
+    so the installer can find and replace its own line idempotently. Paths
+    are shell-quoted (a space would split the command) and `%` is escaped,
+    since cron reads a bare % as end-of-command plus stdin."""
     runner = Path(legwork_dir) / "scripts" / "legwork_runner.py"
     log = Path(legwork_dir) / ".runner-logs" / "cron.log"
-    return (f"{schedule} {python_bin} {runner} "
-            f">> {log} 2>&1  {CRON_MARKER}")
+    command = (f"{shlex.quote(str(python_bin))} {shlex.quote(str(runner))} "
+               f">> {shlex.quote(str(log))} 2>&1")
+    command = command.replace("%", "\\%")
+    return f"{schedule} {command}  {CRON_MARKER}"
 
 
 CRON_MARKER = "# legwork runner"
@@ -133,6 +141,11 @@ def render_config(v):
         w(f"LEGWORK_DAILY_COST_CAP={_trim_num(cost)}")
     else:
         w("# LEGWORK_DAILY_COST_CAP=10")
+    w("")
+    w("# Minutes between runner ticks. The live cadence is whatever the")
+    w("# launchd agent or crontab line was installed with; this records the")
+    w("# answer so a re-run of the installer pre-fills it.")
+    w(f"LEGWORK_TICK_MINUTES={v.get('interval_minutes', 5)}")
     w("")
 
     mode = v.get("review_mode", "off")
@@ -192,6 +205,21 @@ def parse_config_text(text):
     return dict(iter_config_pairs(text))
 
 
+def review_mode_default(existing):
+    """Index into the review-mode options a run should default to. A re-run
+    keeps the mode the existing config encodes — an n8n install must not
+    silently flip back to local (dropping its webhook URLs) just because
+    someone trusted the banner or ran with --yes. A fresh install defaults
+    to local, the no-dependency reviewer."""
+    if existing.get("LEGWORK_WEBHOOK_URL"):
+        return 1  # n8n
+    if existing.get("LEGWORK_LOCAL_REVIEW"):
+        return 0  # local
+    if existing:
+        return 2  # an existing config with no reviewer wired: off
+    return 0
+
+
 def plan_verb_installs(repo_claude_dir, dest_base):
     """(source, destination) pairs that install the interactive verbs
     user-level: every `.claude/commands/*.md` plus the whole legwork-tracker
@@ -211,28 +239,34 @@ def plan_verb_installs(repo_claude_dir, dest_base):
 
 def merge_hooks(settings, legwork_dir):
     """Return a copy of a Claude settings dict with the legwork SessionStart
-    and SessionEnd hooks registered. Idempotent: a command already pointing
-    at our hook script for that event is left alone, so re-running the
-    installer never duplicates an entry or disturbs unrelated hooks."""
+    and SessionEnd hooks registered. Idempotent: an entry already pointing at
+    our hook script for that event is re-pointed at the current legwork dir
+    (so a moved checkout does not leave hooks aimed at the dead old path)
+    rather than duplicated, and unrelated hooks are never disturbed."""
     settings = dict(settings) if settings else {}
     hooks = dict(settings.get("hooks") or {})
     for event, script in ((("SessionStart"), START_HOOK),
                           (("SessionEnd"), END_HOOK)):
         command = str(Path(legwork_dir) / "scripts" / script)
-        entries = [dict(e) for e in (hooks.get(event) or [])]
-        if not _hook_present(entries, script):
+        entries = []
+        found = False
+        for group in (hooks.get(event) or []):
+            group = dict(group)
+            if "hooks" in group:
+                inner = []
+                for hook in group.get("hooks") or []:
+                    hook = dict(hook)
+                    if script in str(hook.get("command", "")):
+                        found = True
+                        hook["command"] = command
+                    inner.append(hook)
+                group["hooks"] = inner
+            entries.append(group)
+        if not found:
             entries.append({"hooks": [{"type": "command", "command": command}]})
         hooks[event] = entries
     settings["hooks"] = hooks
     return settings
-
-
-def _hook_present(entries, script):
-    for group in entries:
-        for hook in group.get("hooks", []):
-            if script in str(hook.get("command", "")):
-                return True
-    return False
 
 
 # --- validators: return (ok, cleaned, error) -------------------------------
@@ -241,6 +275,8 @@ def validate_dir(raw):
     expanded = os.path.expanduser(os.path.expandvars(raw.strip()))
     if not expanded:
         return False, None, "a path is required"
+    if not os.path.isabs(expanded):
+        return False, None, "use an absolute path (~ and $VARS are fine)"
     return True, raw.strip(), ""
 
 
@@ -259,6 +295,8 @@ def validate_cost(raw):
         n = float(raw.strip())
     except ValueError:
         return False, None, "enter a number (0 for no cap)"
+    if not math.isfinite(n):
+        return False, None, "enter a finite number (0 for no cap)"
     if n < 0:
         return False, None, "cannot be negative"
     return True, n, ""
@@ -430,6 +468,11 @@ class Wizard:
             print("  " + ui.dim(help_text))
         shown = f"[{default}] " if default != "" else ""
         while True:
+            # `fixed` means the answer can never change on a retry: a --yes
+            # run always answers with the default, and a closed stdin (Ctrl-D,
+            # a drained pipe) always reads as empty. A validation failure then
+            # must abort, not loop forever on the same bad answer.
+            fixed = self.assume_yes
             if self.assume_yes:
                 raw = ""
             else:
@@ -437,6 +480,7 @@ class Wizard:
                     raw = input(f"  {ui.dim(shown)}{ui.accent(ui.arrow)} ")
                 except EOFError:
                     raw = ""
+                    fixed = True
             if raw.strip() == "" and default != "":
                 raw = str(default)
             if validate is None:
@@ -445,6 +489,11 @@ class Wizard:
             if ok:
                 return cleaned
             print("  " + ui.bad(f"{ui.cross} {err}"))
+            if fixed:
+                print(f"error: '{label}' cannot be answered non-interactively "
+                      f"(default {default!r}: {err}); nothing was written",
+                      file=sys.stderr)
+                raise SystemExit(2)
 
     def ask_yn(self, question, default=True):
         ui = self.ui
@@ -540,7 +589,7 @@ def collect_values(wiz, existing):
                     "(no n8n)"),
          ("n8n", "n8n    - POST evidence to an n8n review pipeline"),
          ("off", "Off    - just fire and wrap; skip review entirely")],
-        default_index=0)
+        default_index=review_mode_default(existing))
 
     webhook_url = existing.get("LEGWORK_WEBHOOK_URL", "")
     alert_url = existing.get("LEGWORK_ALERT_URL", "")
@@ -577,7 +626,8 @@ def collect_values(wiz, existing):
     minutes = wiz.ask(
         "Minutes between ticks",
         "How often the runner wakes to fire eligible projects.",
-        default="5", validate=validate_minutes)
+        default=existing.get("LEGWORK_TICK_MINUTES", "5"),
+        validate=validate_minutes)
 
     return {
         "legwork_dir": legwork_dir,
@@ -714,8 +764,20 @@ def install_timer(wiz, values, force=None):
             return actions
         existing = subprocess.run(["crontab", "-l"],
                                   capture_output=True, text=True)
-        lines = [ln for ln in existing.stdout.splitlines()
-                 if CRON_MARKER not in ln] if existing.returncode == 0 else []
+        if existing.returncode == 0:
+            lines = [ln for ln in existing.stdout.splitlines()
+                     if CRON_MARKER not in ln]
+        elif "no crontab" in (existing.stderr or "").lower():
+            lines = []  # genuinely empty: nothing to preserve
+        else:
+            # `crontab -l` failed for some other reason. Treating that as
+            # empty and then running `crontab -` would replace (wipe) the
+            # user's real crontab, so refuse and hand over the line instead.
+            actions.append(ui.warnc(
+                f"{ui.warn} could not read the current crontab "
+                f"({existing.stderr.strip() or 'unknown error'}); not "
+                f"replacing it. Add this line yourself:\n  {line}"))
+            return actions
         lines.append(line)
         proc = subprocess.run(["crontab", "-"], input="\n".join(lines) + "\n",
                               text=True, capture_output=True)
@@ -756,8 +818,22 @@ def install_hooks(wiz, values, force=None):
                 f"{ui.warn} {settings_path} is not valid JSON; left it alone. "
                 "Add the hooks by hand (SETUP.md step 4)."))
             return actions
+        if not isinstance(settings, dict):
+            actions.append(ui.warnc(
+                f"{ui.warn} {settings_path} is not a JSON object; left it "
+                "alone. Add the hooks by hand (SETUP.md step 4)."))
+            return actions
 
-    merged = merge_hooks(settings, legwork_dir)
+    try:
+        merged = merge_hooks(settings, legwork_dir)
+    except (TypeError, AttributeError):
+        # Valid JSON, but a hooks shape we do not understand: report it
+        # instead of dying with a traceback after the user said yes.
+        actions.append(ui.warnc(
+            f"{ui.warn} the hooks section of {settings_path} has an "
+            "unexpected shape; left it alone. Add the hooks by hand "
+            "(SETUP.md step 4)."))
+        return actions
     base.mkdir(parents=True, exist_ok=True)
     settings_path.write_text(json.dumps(merged, indent=2) + "\n",
                              encoding="utf-8")
