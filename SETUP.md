@@ -4,8 +4,9 @@ This guide installs legwork, an autonomous project queue for Claude Code. By
 the end you will have the legwork repo on disk, the runner firing on a timer,
 and (optionally) the n8n review pipeline.
 
-Read it in order. Steps 1 through 4 give you a working queue, runner and
-dashboard with no n8n at all. Step 5 is the optional review pipeline.
+Read it in order. Steps 1 and 2 give you the manual loop: the queue, the
+slash commands and the dashboard, with nothing running on a timer. Steps 3
+through 5 add the level 2 runner. Step 6 is the optional n8n review pipeline.
 
 ## The one-command install
 
@@ -17,23 +18,27 @@ Most people should just run the wizard. From the cloned repo:
 
 `./install.sh` is a thin wrapper around `scripts/legwork_install.py`, a
 standard-library-only interactive installer. It walks the same ground as
-steps 1 through 4 below: it prompts for every config value, writes `config`,
-creates `projects/` and `.runner-logs/`, installs and loads the launchd agent
-(macOS) or a crontab line (Linux), and registers the SessionStart/SessionEnd
-hooks in your Claude `settings.json`. It asks before every action that touches
-anything outside the repo, so you can decline any piece and do it by hand.
+steps 1 through 5 below: it prompts for every config value, writes `config`,
+creates `projects/` and `.runner-logs/`, copies the slash commands and the
+legwork-tracker skill into user-level `~/.claude`, installs and loads the
+launchd agent (macOS) or a crontab line (Linux), and registers the
+SessionStart/SessionEnd hooks in your Claude `settings.json`. It asks before
+every action that touches anything outside the repo, so you can decline any
+piece and do it by hand.
 
-Flags: `--yes` accepts every default without prompting — but the two steps
-that touch things outside the repo (the launchd/cron timer and the Claude
-hooks) are skipped unless you add `--with-launchd` or `--with-hooks`, so a
-headless `--yes` install never loads a launchd agent or edits your
+Flags: `--yes` accepts every default without prompting, but the steps that
+touch things outside the repo (the user-level command install, the
+launchd/cron timer and the Claude hooks) are skipped unless you add
+`--with-commands`, `--with-launchd` or `--with-hooks`, so a headless `--yes`
+install never writes to `~/.claude`, loads a launchd agent or edits your
 `settings.json` behind your back. `--no-color` prints plainly. Re-running is
-safe: it reads your existing `config` to pre-fill the prompts and never
-duplicates a launchd agent, crontab line or hook entry.
+safe: it reads your existing `config` to pre-fill the prompts, refreshes the
+command copies, and never duplicates a launchd agent, crontab line or hook
+entry.
 
 The rest of this guide is the manual path. Follow it if you skipped a piece of
 the wizard, want to understand exactly what it did, or are wiring the optional
-n8n review pipeline (step 5), which the wizard does not automate because it
+n8n review pipeline (step 6), which the wizard does not automate because it
 lives in your n8n instance, not on this machine.
 
 ## Requirements
@@ -46,10 +51,12 @@ lives in your n8n instance, not on this machine.
   for each headless session.
 - `git`. The runner pulls and commits the legwork repo, and it only fires a
   project when the target repo is a clean git tree.
-- A git remote for the legwork repo, only if you want the optional review
-  pipeline in step 5. The Telegram reply path writes decisions back through
-  the GitHub Contents API, so it needs a GitHub remote. The local queue,
-  runner and dashboard work with no remote.
+- A writable git remote for the legwork repo, only for level 2: the runner
+  pulls before every tick and pushes each claim, so it needs a remote it can
+  push to (a private fork, or even a local bare repo). The Telegram reply
+  path additionally needs that remote to be on GitHub, since it writes
+  decisions back through the GitHub Contents API. The manual loop, the
+  dashboard, `--dry-run` and `--doctor` all work with no remote.
 
 ## 1. The legwork repo
 
@@ -66,21 +73,57 @@ mkdir -p projects
 
 The `projects/` directory is the source of truth: one markdown file per
 project (frontmatter, an optional `## Vision`, a `## Next prompt` fenced
-block, an append-only `## Log`). The repo gitignores `/projects/`,
-`/dashboard/index.html` and `/config`, so your real project data, the
-generated dashboard and your local config never get committed to legwork
-itself. Keep your own project files in a private repo if you want them
-tracked.
+block, an append-only `## Log`). For the file format, see
+`examples/projects/`. Those are invented sample projects that show the
+frontmatter, Vision, prompt and Log layout. The full spec is in
+`.claude/skills/legwork-tracker/SKILL.md`.
 
-For the file format, see `examples/projects/`. Those are invented sample
-projects that show the frontmatter, Vision, prompt and Log layout. The full
-spec is in `.claude/skills/legwork-tracker/SKILL.md`.
+### Make this repo your tracker
+
+The stock `.gitignore` ignores `/projects/`, `/dashboard/index.html` and
+`/config`, so a fresh clone can never leak your real queue into a public
+fork by accident. That default is right for trying legwork out, and wrong
+the moment this checkout becomes your actual tracker: the level 2 runner
+commits and pushes project files on every claim and wrap, and the verbs
+(`/wrap`, `/vision`) commit them too when they can. When you are ready:
+
+1. Point the checkout at a private remote you control
+   (`git remote set-url origin <your-private-remote>`), or clone your
+   private fork in the first place.
+2. Delete the `/projects/` and `/dashboard/index.html` lines from
+   `.gitignore` (the comment above them says the same). Leave `/config`
+   ignored; it can hold webhook URLs.
+3. Commit and push, and your queue is versioned from here on.
+
+Until you do this, project files still work; they just live untracked on
+this machine only, and the runner cannot fire.
 
 If you put the checkout somewhere other than `$HOME/legwork`, set
-`LEGWORK_DIR` to that path in your config (step 2). Wherever the runner runs,
-it expects to find `scripts/`, `projects/` and `config` under `LEGWORK_DIR`.
+`LEGWORK_DIR` to that path in your config (step 3) and also export it from
+your shell profile (`export LEGWORK_DIR=/path/to/your/clone`): the config
+file is read by the runner, while the slash commands resolve the queue
+through the environment variable.
 
-## 2. Config
+## 2. The commands and the skill
+
+The manual loop is six slash commands (`/add`, `/wrap`, `/pickup`, `/vision`,
+`/log`, `/shelve`) plus the legwork-tracker skill they share. They ship in
+this repo's `.claude/`, which means a fresh clone only has them inside the
+checkout itself; a `/wrap` at the end of a session in one of your own repos
+would find nothing. Install them user-level so they work from any repo:
+
+```
+mkdir -p ~/.claude/commands ~/.claude/skills
+cp .claude/commands/*.md ~/.claude/commands/
+cp -R .claude/skills/legwork-tracker ~/.claude/skills/
+```
+
+This is the same thing the wizard's command step does. The commands find the
+queue via `$LEGWORK_DIR` (falling back to `~/legwork`), which is why step 1
+has you export it when the checkout lives elsewhere. Re-copy after pulling a
+legwork update; the wizard refreshes the copies on re-run.
+
+## 3. Config
 
 Copy the template and edit it:
 
@@ -102,7 +145,7 @@ The defaults are sensible for a first run. `LEGWORK_DIR` defaults to
 day. The two webhook URLs are optional and commented out; leave them unset
 for now. For every variable, see `CONFIG.md`.
 
-## 3. The hooks
+## 4. The hooks
 
 Two Claude Code hooks feed the review pipeline. Register them in the
 `settings.json` of the Claude config the runner uses. If you set
@@ -152,7 +195,7 @@ skip to `$LEGWORK_DIR/hook.log` and exits. So registering the hooks now is
 harmless even if you never set up the pipeline. Sessions that end via clear or
 resume are also skipped, since they are restarting, not finishing.
 
-## 4. The runner
+## 5. The runner
 
 The runner ticks on a timer. Each tick fires every eligible project as one
 headless `claude -p` session, then wraps. Pick launchd on macOS or cron on
@@ -198,7 +241,7 @@ and that `claude` is on the `PATH` cron uses.
 Overlapping ticks are safe: a lock file makes a second tick exit quietly while
 one is in flight.
 
-## 5. Optional: the n8n review pipeline
+## 6. Optional: the n8n review pipeline
 
 This step is optional. Everything above runs the queue, the runner and the
 dashboard with no n8n. With neither `LEGWORK_WEBHOOK_URL` nor
@@ -248,7 +291,7 @@ Run these from your legwork repo to confirm the install:
 python3 -m unittest discover -s tests
 ```
 
-The full stdlib test suite (127 tests) should pass.
+The full stdlib test suite should pass.
 
 ```
 python3 scripts/build_dashboard.py
@@ -269,3 +312,49 @@ nothing. A fresh queue with no `autonomy: loop` projects will show every
 project skipped, which is correct: autonomy is opt-in per project, granted by
 a human via `/vision` or the Telegram `/loop` command. Drop `--dry-run` to run
 one real tick by hand.
+
+## Troubleshooting
+
+- `python3 scripts/legwork_runner.py --doctor` is the first stop: it checks
+  the config, the repo layout, the `claude` binary, the git state and the
+  review mode, and says what is wrong in plain lines.
+- `$LEGWORK_DIR/runner.log` is the audit trail of every tick: what fired,
+  what was skipped and why, per-fire cost, and review verdicts.
+- `$LEGWORK_DIR/hook.log` records every SessionStart/SessionEnd hook firing
+  and skip, including the webhook POST result.
+- `$LEGWORK_DIR/.runner-logs/` holds the timer's own stdout
+  (`launchd.log` or `cron.log`) and per-session transcripts.
+- The slash commands not found in your own repos? They only ship inside this
+  checkout; install them user-level (step 2). Commands finding no queue?
+  Export `LEGWORK_DIR` in your shell profile (step 1).
+- The runner assessing a project eligible but never firing it? Check the
+  legwork repo has a writable remote and that `/projects/` is no longer
+  gitignored ("Make this repo your tracker", step 1).
+- Touch `$LEGWORK_DIR/.runner-pause` to stop all firing immediately without
+  uninstalling anything; delete it to resume.
+
+## Uninstall
+
+Everything legwork installs outside the repo is one timer, one settings
+entry and the copied commands; remove them and the checkout is just a
+directory you can delete.
+
+```
+# macOS: unload and remove the timer
+launchctl unload ~/Library/LaunchAgents/com.legwork.runner.plist
+rm ~/Library/LaunchAgents/com.legwork.runner.plist
+
+# Linux: remove the marker-tagged crontab line
+crontab -l | grep -v "# legwork runner" | crontab -
+
+# the user-level commands and skill
+rm ~/.claude/commands/{add,wrap,pickup,vision,log,shelve}.md
+rm -r ~/.claude/skills/legwork-tracker
+```
+
+Then open the `settings.json` you registered the hooks in (`~/.claude/` or
+your dedicated `CLAUDE_CONFIG_DIR`) and remove the two entries whose
+`command` ends in `session_start_hook.sh` / `session_end_hook.sh`. Finally
+delete the checkout, which takes `config`, `projects/` and every log with
+it; if you made the repo your tracker, your queue also lives on your private
+remote.
