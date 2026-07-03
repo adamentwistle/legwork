@@ -37,16 +37,23 @@ COST_RE = re.compile(r"\$(\d+\.\d{2})")
 
 def parse_frontmatter(text):
     """Parse the simple `key: value` frontmatter between the first two `---`
-    markers into a dict. One-line values only; the first colon splits."""
+    marker LINES into a dict. One-line values only; the first colon splits.
+    The markers must be whole lines: a `---` inside a value (a date range, a
+    quoted horizontal rule) is content, not a marker, so it can never
+    truncate the block and silently drop the keys after it."""
     meta = {}
-    parts = text.split("---")
-    if len(parts) < 3:
+    lines = text.splitlines()
+    while lines and not lines[0].strip():
+        lines = lines[1:]
+    if not lines or lines[0].strip() != "---":
         return meta
-    for line in parts[1].strip().splitlines():
+    for line in lines[1:]:
+        if line.strip() == "---":
+            return meta
         if ":" in line:
             key, _, value = line.partition(":")
             meta[key.strip()] = value.strip()
-    return meta
+    return {}  # no closing marker: this was not frontmatter
 
 
 def parse_date(value):
