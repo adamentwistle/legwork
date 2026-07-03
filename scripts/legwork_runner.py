@@ -107,6 +107,7 @@ reviewer-by-exception loop runs with no n8n; see scripts/legwork_review.py.
 """
 
 import json
+import math
 import os
 import re
 import shutil
@@ -191,11 +192,36 @@ CLAUDE_FALLBACKS = [
     Path("/usr/local/bin/claude"),
 ]
 
-DAILY_CAP = int(os.environ.get("LEGWORK_DAILY_CAP", "8"))  # fires per project per day
+# Config values that failed to parse. Garbage in a cap must not raise at
+# import and kill every tick with no log line; the bad value falls back to
+# its default and is surfaced by tick() and --doctor instead.
+CONFIG_WARNINGS = []
+
+
+def _env_number(name, default, cast):
+    """A numeric env/config value, or its default when unset, garbage or
+    non-finite. Failures are recorded in CONFIG_WARNINGS, never raised."""
+    raw = os.environ.get(name, "")
+    if not raw.strip():
+        return default
+    try:
+        value = cast(raw)
+    except ValueError:
+        CONFIG_WARNINGS.append(
+            f"{name}={raw!r} is not a number; using {default}")
+        return default
+    if not math.isfinite(value):
+        CONFIG_WARNINGS.append(
+            f"{name}={raw!r} is not finite; using {default}")
+        return default
+    return value
+
+
+DAILY_CAP = _env_number("LEGWORK_DAILY_CAP", 8, int)  # fires per project per day
 # Optional spend guard. Unset or 0 means no cost cap. When set, the runner
 # sums today's per-fire costs from runner.log (the $X.XX transcript_summary
 # logs) and stops firing for the rest of the day once the cap is reached.
-DAILY_COST_CAP = float(os.environ.get("LEGWORK_DAILY_COST_CAP", "0") or 0)
+DAILY_COST_CAP = _env_number("LEGWORK_DAILY_COST_CAP", 0.0, float)
 SESSION_TIMEOUT = 3600   # seconds before a session is terminated
 GRACE = 60               # seconds between SIGTERM and SIGKILL
 # A single tick should never outlive one session. Past this a live-PID lock
@@ -427,16 +453,20 @@ def extract_directives(prompt):
         name = m.group(1).lower()
         model = MODELS.get(name)
         if model is None:
+            # Not a directive we know: leave the line in the prompt (it may
+            # be legitimate prose that merely starts "Model:") and only
+            # report it, rather than silently eating part of the prompt.
             ignored.append(f"model={name}")
-        prompt = MODEL_RE.sub("", prompt, count=1)
+        else:
+            prompt = MODEL_RE.sub("", prompt, count=1)
     e = EFFORT_RE.search(prompt)
     if e:
         name = e.group(1).lower()
         if name in EFFORTS:
             effort = name
+            prompt = EFFORT_RE.sub("", prompt, count=1)
         else:
             ignored.append(f"effort={name}")
-        prompt = EFFORT_RE.sub("", prompt, count=1)
     return prompt.strip(), model, effort, ignored
 
 
@@ -541,6 +571,9 @@ def assess(path):
         "effort": effort,
         "account": meta.get("account", "personal").lower(),
         "has_vision": has_vision,
+        # The raw fire_once value, so a transient-error requeue can restore
+        # the key the claim consumed.
+        "fire_once": meta.get("fire_once", ""),
     }
 
 
@@ -616,8 +649,11 @@ def claim(project):
         path = project["file"]
         run_git(["pull", "--rebase"], LEGWORK_DIR)
         text = path.read_text(encoding="utf-8")
+        # Case-insensitive to match assess(): a hand-typed "status: Queued"
+        # must claim (and be normalised) rather than assess eligible every
+        # tick and log "claim dropped" forever.
         flipped = re.sub(r"^status:[ \t]*queued[ \t]*$", "status: running",
-                         text, count=1, flags=re.M)
+                         text, count=1, flags=re.M | re.I)
         if flipped == text:
             log(f"claim dropped for {path.name}: no longer queued")
             return None
@@ -753,7 +789,7 @@ def park_for_review(project, reason="local review could not produce an "
             return
         today = date.today().isoformat()
         text = re.sub(r"^status:[ \t]*(?:queued|running)[ \t]*$",
-                      "status: review", text, count=1, flags=re.M)
+                      "status: review", text, count=1, flags=re.M | re.I)
         bullet = f"- {today}: Runner: {reason}; parked for human pickup.\n"
         new = re.sub(r"(##[ \t]*Log[^\n]*\n+)",
                      lambda m: m.group(1) + bullet, text, count=1)
@@ -954,11 +990,16 @@ def repair_unwrapped(project, exit_code, minutes, claim_head=None,
         run_git(["pull", "--rebase"], LEGWORK_DIR)
         text = path.read_text(encoding="utf-8")
         meta = parse_frontmatter(text)
-        if meta.get("status") != "running":
+        if meta.get("status", "").lower() != "running":
             return None  # the session set its own status, nothing to repair
         today = date.today().isoformat()
         if transient:
             new_status = "status: queued"
+            # The claim consumed a fire_once key that was one session's
+            # consent, and that session never ran: restore it with the
+            # re-queue, or the retry this log line promises can never fire.
+            if project.get("fire_once"):
+                new_status += f"\nfire_once: {project['fire_once']}"
             detail = (f"session died on a transient API error before doing "
                       f"any work (exit {exit_code} after {minutes} min); "
                       f"re-queued for retry")
@@ -973,11 +1014,15 @@ def repair_unwrapped(project, exit_code, minutes, claim_head=None,
             detail = (f"autonomous session exited without wrapping "
                       f"(exit {exit_code} after {minutes} min)")
             subject = f"legwork: runner flags unwrapped session on {path.stem}"
-        text = re.sub(r"^status:[ \t]*running[ \t]*$", new_status,
-                      text, count=1, flags=re.M)
-        text = re.sub(r"(##[ \t]*Log[^\n]*\n+)",
-                      lambda m: m.group(1) + f"- {today}: Runner: {detail}. "
-                      f"Transcript in .runner-logs/.\n", text, count=1)
+        text = re.sub(r"^status:[ \t]*running[ \t]*$", lambda m: new_status,
+                      text, count=1, flags=re.M | re.I)
+        bullet = (f"- {today}: Runner: {detail}. "
+                  f"Transcript in .runner-logs/.\n")
+        new = re.sub(r"(##[ \t]*Log[^\n]*\n+)",
+                     lambda m: m.group(1) + bullet, text, count=1)
+        if new == text:  # no ## Log section to prepend under
+            new = text.rstrip() + "\n\n## Log\n\n" + bullet
+        text = new
         path.write_text(text, encoding="utf-8")
         run_git(["add", str(path)], LEGWORK_DIR)
         run_git(["commit", "-m", subject], LEGWORK_DIR)
@@ -1153,7 +1198,28 @@ def fire(project):
     claim_head = claim(project)
     if not claim_head:
         return
+    started = datetime.now()
+    try:
+        return fire_claimed(project, claude_path, claim_head, started)
+    except Exception:
+        # The claim just published status: running. A crash anywhere in the
+        # post-claim work (a failed mkdir or Popen, a hung push) must not
+        # strand that status until the daily heartbeat notices days later:
+        # repair it in front of a human, then re-raise to fire_thread's net.
+        minutes = max(1, int((datetime.now() - started).total_seconds() // 60))
+        try:
+            repair_unwrapped(project, "runner crash", minutes,
+                             claim_head=claim_head)
+        except Exception as repair_exc:  # noqa: BLE001 - keep the original error
+            log(f"ERROR: post-crash repair of {project['file'].name} "
+                f"failed too: {repair_exc}")
+        raise
 
+
+def fire_claimed(project, claude_path, claim_head, started):
+    """The post-claim work: run the session, classify the outcome, repair,
+    review and audit. Split out of fire() so a crash anywhere in here still
+    repairs the running status the claim just published."""
     # The target repo's HEAD before the session, so local review can diff
     # exactly what this session committed without depending on the hook. Guard
     # on the return code: on a commitless repo `git rev-parse HEAD` exits non-
@@ -1176,7 +1242,6 @@ def fire(project):
     )
     log(f"fired {project['file'].name} in {project['repo_path']}"
         f"{chosen} (transcript {transcript.name})")
-    started = datetime.now()
     guard = str(GUARD_SETTINGS) if GUARD_SETTINGS.exists() else None
     argv = [
         claude_path, "-p", prompt,
@@ -1347,7 +1412,20 @@ def acquire_lock():
         return False  # holder is alive and within the time budget
 
 
+def release_lock():
+    """Delete the lock only when this process still owns it. A later run may
+    have reclaimed a wedged lock (LOCK_MAX_AGE) and written its own; blindly
+    unlinking here would strip that run's protection mid-flight."""
+    try:
+        if LOCK_FILE.read_text().split()[0] == str(os.getpid()):
+            LOCK_FILE.unlink()
+    except (OSError, IndexError, ValueError):
+        pass
+
+
 def tick(dry_run=False):
+    for warning in CONFIG_WARNINGS:
+        print(f"config: {warning}") if dry_run else log(f"CONFIG: {warning}")
     pause_note = None
     if PAUSE_FILE.exists():
         pause_note = ".runner-pause exists; delete it to resume"
@@ -1388,7 +1466,9 @@ def tick(dry_run=False):
                        if line.strip() and not line.startswith("??")]
             if tracked and all(porcelain_path(line).startswith("projects/")
                                for line in tracked):
-                run_git(["add", "projects"], LEGWORK_DIR)
+                # -u stages only tracked files: an untracked scratch file
+                # sitting in projects/ must not be swept into the commit.
+                run_git(["add", "-u", "projects"], LEGWORK_DIR)
                 committed = run_git(
                     ["commit", "-m",
                      "legwork: runner auto-commits tracker edits"],
@@ -1417,6 +1497,9 @@ def tick(dry_run=False):
         if blocked:
             log(f"skipped tick: {blocked}")
             note_blocked(state, blocked)
+            # The daily pulse still goes out: a long blockage must not also
+            # silence the heartbeat, or the stall is invisible end to end.
+            maybe_heartbeat(state)
             return
         clear_blocked(state)
         if REMOTE_PAUSE_FILE.exists():
@@ -1538,6 +1621,8 @@ def doctor():
     if (LEGWORK_DIR / ".git").exists():
         check("legwork git status readable",
               run_git(["status", "--porcelain"], LEGWORK_DIR).returncode == 0)
+    check("numeric config values parse", not CONFIG_WARNINGS,
+          "; ".join(CONFIG_WARNINGS))
     if WEBHOOK_URL:
         review_mode = "n8n webhook"
     elif LOCAL_REVIEW:
@@ -1580,7 +1665,7 @@ def main():
     try:
         tick()
     finally:
-        LOCK_FILE.unlink(missing_ok=True)
+        release_lock()
 
 
 if __name__ == "__main__":
