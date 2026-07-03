@@ -10,8 +10,9 @@ normally through the wrapper:
     python3 scripts/legwork_install.py --no-color   plain output
 
 A non-interactive --yes run never touches anything outside the repo: it
-writes config and creates the repo dirs, but skips the launchd/cron timer
-and the Claude hooks unless you opt in with --with-launchd / --with-hooks.
+writes config and creates the repo dirs, but skips the user-level command
+install, the launchd/cron timer and the Claude hooks unless you opt in with
+--with-commands / --with-launchd / --with-hooks.
 
 It walks one screen at a time: it asks for every value legwork can be
 configured with (the legwork dir, the daily fire and cost caps, the review
@@ -20,6 +21,9 @@ interval), shows you the config it will write, then offers to activate the
 pieces that live OUTSIDE the repo, asking before each one:
 
   - write `config` and create `projects/` and `.runner-logs/` in the repo
+  - copy the slash commands (/add, /wrap, /pickup, /vision, /log, /shelve)
+    and the legwork-tracker skill into user-level `~/.claude`, so the manual
+    loop works from any repo, not just this checkout
   - install and load the launchd agent (macOS) or a crontab line (Linux)
   - register the SessionStart/SessionEnd hooks in your Claude `settings.json`
 
@@ -136,7 +140,7 @@ def render_config(v):
     if mode == "n8n":
         w("# n8n review pipeline: the runner and the SessionEnd hook POST")
         w("# session evidence here for review, and alerts/heartbeat go to the")
-        w("# alert URL. See SETUP.md step 5 to import the workflows.")
+        w("# alert URL. See SETUP.md step 6 to import the workflows.")
         w(f"LEGWORK_WEBHOOK_URL={v.get('webhook_url', '')}")
         if v.get("alert_url"):
             w(f"LEGWORK_ALERT_URL={v['alert_url']}")
@@ -186,6 +190,23 @@ def parse_config_text(text):
     is already there. Quotes are stripped; $VARS and ~ are NOT expanded here,
     so the prompt shows the file's own text."""
     return dict(iter_config_pairs(text))
+
+
+def plan_verb_installs(repo_claude_dir, dest_base):
+    """(source, destination) pairs that install the interactive verbs
+    user-level: every `.claude/commands/*.md` plus the whole legwork-tracker
+    skill, mirrored under `<dest_base>/commands` and `<dest_base>/skills`.
+    Read-only: computes the copy plan, copies nothing."""
+    repo_claude_dir = Path(repo_claude_dir)
+    dest_base = Path(dest_base)
+    pairs = []
+    for src in sorted((repo_claude_dir / "commands").glob("*.md")):
+        pairs.append((src, dest_base / "commands" / src.name))
+    skills = repo_claude_dir / "skills"
+    skill = skills / "legwork-tracker"
+    for src in sorted(p for p in skill.rglob("*") if p.is_file()):
+        pairs.append((src, dest_base / "skills" / src.relative_to(skills)))
+    return pairs
 
 
 def merge_hooks(settings, legwork_dir):
@@ -614,6 +635,40 @@ def _confirm(wiz, force, question, default=True):
     return wiz.ask_yn(question, default=default)
 
 
+def install_verbs(wiz, values, force=None):
+    """Copy the slash commands and the legwork-tracker skill into user-level
+    `~/.claude`, so /add, /wrap, /pickup, /vision, /log and /shelve work from
+    any repo instead of only inside this checkout. Asks first since it writes
+    outside the repo; `force` (see _confirm) lets a non-interactive run skip
+    it, or accept it with --with-commands. Re-running refreshes the copies
+    (e.g. after a git pull), overwriting earlier ones."""
+    ui = wiz.ui
+    actions = []
+    dest_base = Path.home() / ".claude"
+    if not _confirm(wiz, force,
+            "Install the slash commands (/add, /wrap, /pickup, ...) and the "
+            f"legwork-tracker skill into {dest_base}, so they work from any "
+            "repo?"):
+        actions.append(ui.dim(
+            "skipped commands/skill; the verbs only work inside this "
+            "checkout (see SETUP.md step 2)"))
+        return actions
+    pairs = plan_verb_installs(REPO / ".claude", dest_base)
+    for src, dest in pairs:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, dest)
+    actions.append(ui.good(
+        f"{ui.check} installed {len(pairs)} command/skill files "
+        f"under {dest_base}"))
+    legwork_dir = os.path.expanduser(os.path.expandvars(values["legwork_dir"]))
+    if Path(legwork_dir) != Path.home() / "legwork":
+        actions.append(ui.warnc(
+            f"{ui.warn} the commands look for the legwork repo at "
+            "$LEGWORK_DIR (falling back to ~/legwork); add "
+            f"'export LEGWORK_DIR={legwork_dir}' to your shell profile"))
+    return actions
+
+
 def install_timer(wiz, values, force=None):
     """Install and load the launchd agent (macOS) or a crontab line (Linux),
     asking before the system-level action. `force` (see _confirm) lets a
@@ -629,7 +684,7 @@ def install_timer(wiz, values, force=None):
         if not _confirm(wiz, force,
                 "Install and load the launchd agent now "
                 f"(ticks every {values['interval_minutes']} min)?"):
-            actions.append(ui.dim("skipped launchd (see SETUP.md step 4a)"))
+            actions.append(ui.dim("skipped launchd (see SETUP.md step 5a)"))
             return actions
         template = PLIST_TEMPLATE.read_text(encoding="utf-8")
         plist = render_plist(template, legwork_dir, python_bin,
@@ -689,7 +744,7 @@ def install_hooks(wiz, values, force=None):
 
     if not _confirm(wiz, force,
             f"Register the review hooks in {settings_path}?"):
-        actions.append(ui.dim("skipped hooks (see SETUP.md step 3)"))
+        actions.append(ui.dim("skipped hooks (see SETUP.md step 4)"))
         return actions
 
     settings = {}
@@ -699,7 +754,7 @@ def install_hooks(wiz, values, force=None):
         except (OSError, json.JSONDecodeError):
             actions.append(ui.warnc(
                 f"{ui.warn} {settings_path} is not valid JSON; left it alone. "
-                "Add the hooks by hand (SETUP.md step 3)."))
+                "Add the hooks by hand (SETUP.md step 4)."))
             return actions
 
     merged = merge_hooks(settings, legwork_dir)
@@ -721,7 +776,8 @@ def closing(ui, actions):
         print(f"  {ui.dim(ui.arrow)} {action}")
     print()
     print("  " + ui.bold("Next:"))
-    print("  " + ui.dim(f"{ui.arrow} add projects with the /add skill"))
+    print("  " + ui.dim(f"{ui.arrow} add a project with /add, close a "
+                        "session with /wrap"))
     print("  " + ui.dim(f"{ui.arrow} grant autonomy per project with /vision"))
     print("  " + ui.dim(f"{ui.arrow} verify: python3 scripts/legwork_runner.py "
                         "--doctor"))
@@ -759,11 +815,16 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Interactive installer for legwork.")
     parser.add_argument("--yes", "-y", action="store_true",
-                        help="accept every default and do not prompt; the two "
-                             "outside-the-repo steps (launchd/cron, hooks) are "
-                             "skipped unless --with-launchd / --with-hooks")
+                        help="accept every default and do not prompt; the "
+                             "outside-the-repo steps (commands, launchd/cron, "
+                             "hooks) are skipped unless --with-commands / "
+                             "--with-launchd / --with-hooks")
     parser.add_argument("--no-color", action="store_true",
                         help="plain output, no ANSI color")
+    parser.add_argument("--with-commands", action="store_true",
+                        help="copy the slash commands and skill into "
+                             "user-level ~/.claude without prompting "
+                             "(use with --yes for a headless install)")
     parser.add_argument("--with-launchd", action="store_true",
                         help="install the launchd/cron timer without prompting "
                              "(use with --yes for a headless install)")
@@ -782,10 +843,12 @@ def main(argv=None):
 
     assume_yes = args.yes or not interactive
     wiz = Wizard(ui, assume_yes=assume_yes)
-    # The launchd/cron timer and the Claude hooks touch state outside the repo,
-    # so a non-interactive run must not perform them silently: under --yes they
-    # are skipped unless the matching --with-* flag opts in. Interactive runs
-    # still ask (force=None).
+    # The command install, the launchd/cron timer and the Claude hooks touch
+    # state outside the repo, so a non-interactive run must not perform them
+    # silently: under --yes they are skipped unless the matching --with-* flag
+    # opts in. Interactive runs still ask (force=None).
+    force_verbs = (True if args.with_commands
+                   else (False if assume_yes else None))
     force_timer = True if args.with_launchd else (False if assume_yes else None)
     force_hooks = True if args.with_hooks else (False if assume_yes else None)
 
@@ -814,6 +877,7 @@ def main(argv=None):
 
     actions = []
     actions += write_repo_files(values)
+    actions += install_verbs(wiz, values, force=force_verbs)
     actions += install_timer(wiz, values, force=force_timer)
     actions += install_hooks(wiz, values, force=force_hooks)
 

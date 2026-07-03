@@ -1719,6 +1719,24 @@ class TestInstaller(unittest.TestCase):
         self.assertEqual(len(twice["hooks"]["SessionEnd"]), 1)
         self.assertEqual(twice["model"], "opus")
 
+    def test_plan_verb_installs_covers_commands_and_skill(self):
+        dest = Path("/tmp/fake-home/.claude")
+        pairs = legwork_install.plan_verb_installs(REPO / ".claude", dest)
+        names = {src.name for src, _ in pairs}
+        for verb in ("add.md", "wrap.md", "pickup.md", "vision.md",
+                     "log.md", "shelve.md"):
+            self.assertIn(verb, names)
+        self.assertIn("SKILL.md", names)
+        # Destinations mirror the source layout under the dest base, and
+        # every source is a real file in this repo.
+        by_dest = {d: s for s, d in pairs}
+        self.assertIn(dest / "commands" / "wrap.md", by_dest)
+        self.assertIn(dest / "skills" / "legwork-tracker" / "SKILL.md",
+                      by_dest)
+        for src, d in pairs:
+            self.assertTrue(src.is_file(), src)
+            self.assertTrue(str(d).startswith(str(dest)), d)
+
     def test_validators(self):
         self.assertEqual(legwork_install.validate_int("8")[1], 8)
         self.assertFalse(legwork_install.validate_int("nope")[0])
