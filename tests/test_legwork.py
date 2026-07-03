@@ -84,6 +84,24 @@ class TestFrontmatter(unittest.TestCase):
     def test_missing(self):
         self.assertEqual(legwork_runner.parse_frontmatter("no fences"), {})
 
+    def test_dashes_inside_a_value_do_not_truncate(self):
+        # The reviewer's repro: `---` inside a value used to end the block
+        # and silently drop every key after it (an autonomy opt-in, a
+        # blocked_on). Markers are whole lines, not substrings.
+        meta = legwork_runner.parse_frontmatter(
+            "---\nname: X\ndescription: range 1---2\nautonomy: loop\n"
+            "---\nbody")
+        self.assertEqual(meta["description"], "range 1---2")
+        self.assertEqual(meta["autonomy"], "loop")
+
+    def test_unclosed_frontmatter_yields_nothing(self):
+        self.assertEqual(
+            legwork_runner.parse_frontmatter("---\nname: X\nno close"), {})
+
+    def test_leading_blank_lines_tolerated(self):
+        meta = legwork_runner.parse_frontmatter("\n\n---\nname: X\n---\n")
+        self.assertEqual(meta["name"], "X")
+
 
 class TestPromptRe(unittest.TestCase):
     """The shared Next-prompt regex must never read past the end of its own
@@ -142,7 +160,12 @@ class TestDirectives(unittest.TestCase):
         self.assertIsNone(model)
         self.assertIsNone(effort)
         self.assertEqual(ignored, ["model=gpt9", "effort=extreme"])
-        self.assertEqual(clean, "Task: y.")
+        # Unrecognised values are reported but their lines stay in the
+        # prompt: they may be legitimate prose that merely starts with
+        # "Model:"/"Effort:", so nothing is silently eaten.
+        self.assertIn("Model: gpt9", clean)
+        self.assertIn("Effort: extreme", clean)
+        self.assertIn("Task: y.", clean)
 
     def test_absent_directives(self):
         clean, model, effort, ignored = legwork_runner.extract_directives(
@@ -1012,6 +1035,88 @@ class TestConcurrentRunner(unittest.TestCase):
         self.assertNotIn("fire_once", published,
                          "the claim must consume the one-shot consent")
 
+    def test_claim_flips_capitalized_status(self):
+        # assess() lowercases the status check, so a hand-typed "Queued"
+        # is eligible; the claim must flip it too or the project assesses
+        # eligible every tick and logs "claim dropped" forever.
+        path = write_project("c-caps.md", status="Queued",
+                             repo=str(make_git_repo("c-caps-repo")))
+        self.commit_and_push("add capitalized status project")
+        sha = legwork_runner.claim({"file": path})
+        self.assertTrue(sha, "a hand-typed 'Queued' must still claim")
+        self.assertIn("status: running",
+                      self.origin_file("projects/c-caps.md"))
+
+    def test_repair_transient_restores_fire_once(self):
+        # The reviewer's repro for the lost one-shot: claim consumes
+        # fire_once, the session dies on a transient error, and the requeue
+        # must hand the consent back or the promised retry can never fire.
+        path = write_project("c-fonce-req.md", autonomy="", vision=False,
+                             repo=str(make_git_repo("c-fonce-req-repo")),
+                             fire_once="2026-07-03")
+        self.commit_and_push("add fire_once requeue project")
+        ok, _, details = legwork_runner.assess(path)
+        self.assertTrue(ok)
+        self.assertEqual(details["fire_once"], "2026-07-03")
+        self.assertTrue(legwork_runner.claim(details))
+        self.assertNotIn("fire_once", path.read_text(encoding="utf-8"))
+        legwork_runner.repair_unwrapped(details, exit_code=1, minutes=1,
+                                        transient=True)
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("status: queued", text)
+        self.assertIn("fire_once: 2026-07-03", text)
+        ok, reason, _ = legwork_runner.assess(path)
+        self.assertTrue(ok, f"restored one-shot must be eligible ({reason})")
+
+    def test_repair_flips_capitalized_running(self):
+        path = write_project("c-caps-run.md", status="Running",
+                             repo=str(make_git_repo("c-caps-run-repo")))
+        self.commit_and_push("add capitalized running project")
+        detail = legwork_runner.repair_unwrapped({"file": path},
+                                                 exit_code=1, minutes=2)
+        self.assertIsNotNone(detail)
+        self.assertIn("status: review", path.read_text(encoding="utf-8"))
+
+    def test_repair_without_log_heading_appends_one(self):
+        path = write_project("c-nolog.md", status="running",
+                             repo=str(make_git_repo("c-nolog-repo")))
+        text = path.read_text(encoding="utf-8")
+        path.write_text(text.split("## Log")[0], encoding="utf-8")
+        self.commit_and_push("add no-log project")
+        legwork_runner.repair_unwrapped({"file": path}, exit_code=1,
+                                        minutes=2)
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("## Log", text)
+        self.assertIn("Runner: autonomous session exited without wrapping",
+                      text)
+
+    def test_fire_crash_after_claim_repairs_running_status(self):
+        # A crash anywhere after the claim published status: running must
+        # not strand it until the daily heartbeat: fire() repairs before
+        # re-raising into fire_thread's net.
+        path = write_project("c-crash.md",
+                             repo=str(make_git_repo("c-crash-repo")))
+        self.commit_and_push("add crash project")
+        ok, _, details = legwork_runner.assess(path)
+        self.assertTrue(ok)
+        orig_claimed = legwork_runner.fire_claimed
+        orig_find = legwork_runner.find_claude
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("post-claim crash")
+
+        legwork_runner.fire_claimed = boom
+        legwork_runner.find_claude = lambda: "claude"
+        try:
+            outcome = legwork_runner.fire_thread(details)
+        finally:
+            legwork_runner.fire_claimed = orig_claimed
+            legwork_runner.find_claude = orig_find
+        self.assertIsNone(outcome)
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("status: review", text)
+        self.assertIn("exited without wrapping", text)
+
     def test_remote_pause_arriving_with_the_pull_stops_the_tick(self):
         write_project("c-paused.md",
                       repo=str(make_git_repo("c-paused-repo")))
@@ -1159,6 +1264,39 @@ class TestConcurrentRunner(unittest.TestCase):
                       self.origin_subjects())
         self.assertIn("c-autocommit.md", fired,
                       "project should fire the same tick it was committed")
+
+    def test_tick_auto_commit_leaves_untracked_scratch_alone(self):
+        # The auto-commit stages tracked tracker edits only (-u): an
+        # untracked scratch file sitting in projects/ must not be swept
+        # into the runner's commit.
+        repo = make_git_repo("c-scratch-repo")
+        write_project("c-scratch.md", repo=str(repo), updated="2026-06-06")
+        self.commit_and_push("add scratch project")
+        p = SANDBOX / "projects" / "c-scratch.md"
+        p.write_text(p.read_text(encoding="utf-8") +
+                     "\n- 2026-06-15: manual wrap, never committed.\n",
+                     encoding="utf-8")
+        scratch = SANDBOX / "projects" / "c-scratch-note.txt"
+        scratch.write_text("do not commit me\n", encoding="utf-8")
+        legwork_runner.save_state({"last_heartbeat": date.today().isoformat()})
+        original = legwork_runner.fire
+        legwork_runner.fire = lambda pr: None
+        try:
+            legwork_runner.tick()
+        finally:
+            legwork_runner.fire = original
+            legwork_runner.STATE_FILE.unlink()
+        status = subprocess.run(["git", "status", "--porcelain"], cwd=SANDBOX,
+                                capture_output=True, text=True).stdout
+        self.assertIn("?? projects/c-scratch-note.txt", status,
+                      "the scratch file must stay untracked")
+        scratch.unlink()
+        self.assertEqual(
+            self.origin_file("projects/c-scratch-note.txt"), "",
+            "the scratch file must not reach the remote")
+        self.assertIn("manual wrap, never committed",
+                      self.origin_file("projects/c-scratch.md"),
+                      "the tracked tracker edit itself is still committed")
 
     def test_tick_blocks_on_dirty_file_outside_projects(self):
         # A dirty tracked file outside projects/ must still stall the tick;
@@ -1433,6 +1571,76 @@ class TestDashboard(unittest.TestCase):
         page = build_dashboard.build(projects)
         self.assertIn("t-b1", page)
         self.assertIn("Copy prompt", page)
+
+    def test_non_utf8_project_is_skipped_not_fatal(self):
+        bad = SANDBOX / "projects" / "t-bad-bytes.md"
+        bad.write_bytes(b"\xff\xfe\x00 not utf-8 \x9c")
+        try:
+            import contextlib
+            import io
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertIsNone(build_dashboard.parse_project(bad))
+        finally:
+            bad.unlink()
+
+    def test_future_dated_project_reads_as_today(self):
+        future = (date.today() + timedelta(days=3)).isoformat()
+        parsed = build_dashboard.parse_project(write_project(
+            "t-future.md", updated=future,
+            log_lines=[f"- {future}: scheduled ahead."]))
+        self.assertEqual(parsed["days_quiet"], 0,
+                         "future dates clamp to 0, not negative freshness")
+
+    def test_freshness_reads_all_log_bullets(self):
+        # A hand-edited log is not always newest-first: the newest date
+        # anywhere in the log decides freshness.
+        old = (date.today() - timedelta(days=30)).isoformat()
+        parsed = build_dashboard.parse_project(write_project(
+            "t-logorder.md", updated=old,
+            log_lines=[f"- {old}: created.",
+                       f"- {date.today().isoformat()}: appended below."]))
+        self.assertEqual(parsed["days_quiet"], 0)
+
+
+class TestRunnerGuards(unittest.TestCase):
+    """Small pure guards added in the correctness pass: numeric config
+    parsing that must not raise at import, and ownership-checked lock
+    release."""
+
+    def test_env_number_garbage_falls_back(self):
+        os.environ["LEGWORK_TEST_NUM"] = "abc"
+        try:
+            legwork_runner.CONFIG_WARNINGS.clear()
+            self.assertEqual(
+                legwork_runner._env_number("LEGWORK_TEST_NUM", 8, int), 8)
+            self.assertEqual(len(legwork_runner.CONFIG_WARNINGS), 1)
+            os.environ["LEGWORK_TEST_NUM"] = "inf"
+            self.assertEqual(
+                legwork_runner._env_number("LEGWORK_TEST_NUM", 0.0, float),
+                0.0)
+            os.environ["LEGWORK_TEST_NUM"] = "12.5"
+            self.assertEqual(
+                legwork_runner._env_number("LEGWORK_TEST_NUM", 0.0, float),
+                12.5)
+            os.environ["LEGWORK_TEST_NUM"] = ""
+            self.assertEqual(
+                legwork_runner._env_number("LEGWORK_TEST_NUM", 8, int), 8)
+        finally:
+            del os.environ["LEGWORK_TEST_NUM"]
+            legwork_runner.CONFIG_WARNINGS.clear()
+
+    def test_release_lock_respects_ownership(self):
+        lock = legwork_runner.LOCK_FILE
+        lock.write_text(f"{os.getpid() + 99} {time.time()}", encoding="utf-8")
+        try:
+            legwork_runner.release_lock()
+            self.assertTrue(lock.exists(),
+                            "another run's reclaimed lock must survive")
+        finally:
+            lock.unlink(missing_ok=True)
+        lock.write_text(f"{os.getpid()} {time.time()}", encoding="utf-8")
+        legwork_runner.release_lock()
+        self.assertFalse(lock.exists(), "our own lock is released")
 
 
 class TestHooks(unittest.TestCase):
@@ -1743,11 +1951,83 @@ class TestInstaller(unittest.TestCase):
         self.assertFalse(legwork_install.validate_int("0", low=1)[0])
         self.assertEqual(legwork_install.validate_cost("12.5")[1], 12.5)
         self.assertFalse(legwork_install.validate_cost("-1")[0])
+        # inf renders a config the runner cannot read back; nan compares
+        # false against everything, silently disabling the cap.
+        self.assertFalse(legwork_install.validate_cost("inf")[0])
+        self.assertFalse(legwork_install.validate_cost("nan")[0])
         self.assertTrue(
             legwork_install.validate_url("https://h/x")[0])
         self.assertFalse(legwork_install.validate_url("ftp://h/x")[0])
         self.assertFalse(legwork_install.validate_minutes("0")[0])
         self.assertTrue(legwork_install.validate_minutes("5")[0])
+        self.assertTrue(legwork_install.validate_dir("/abs/path")[0])
+        self.assertTrue(legwork_install.validate_dir("~/legwork")[0])
+        self.assertFalse(legwork_install.validate_dir("relative/path")[0])
+
+    def test_ask_aborts_instead_of_looping_when_answer_cannot_change(self):
+        # Under --yes (or Ctrl-D at a prompt) the answer is always the
+        # default; a default that fails validation used to spin the while
+        # loop forever. It must abort non-zero instead.
+        import contextlib
+        import io
+        ui = legwork_install.UI(color=False, unicode=False)
+        wiz = legwork_install.Wizard(ui, assume_yes=True)
+        with contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as ctx:
+                wiz.ask("Daily fire cap", default="abc",
+                        validate=legwork_install.validate_int)
+            self.assertEqual(ctx.exception.code, 2)
+            # A valid default still sails through.
+            self.assertEqual(
+                wiz.ask("Daily fire cap", default="8",
+                        validate=legwork_install.validate_int), 8)
+
+    def test_review_mode_default_keeps_the_configured_mode(self):
+        self.assertEqual(legwork_install.review_mode_default({}), 0)
+        self.assertEqual(legwork_install.review_mode_default(
+            {"LEGWORK_WEBHOOK_URL": "https://n8n.example/webhook/x"}), 1)
+        self.assertEqual(legwork_install.review_mode_default(
+            {"LEGWORK_LOCAL_REVIEW": "1"}), 0)
+        self.assertEqual(legwork_install.review_mode_default(
+            {"LEGWORK_DIR": "/x"}), 2)
+
+    def test_render_plist_escapes_xml(self):
+        import plistlib
+        template = legwork_install.PLIST_TEMPLATE.read_text(encoding="utf-8")
+        out = legwork_install.render_plist(
+            template, "/Users/me/A & B/legwork", "/usr/bin/python3", 300)
+        data = plistlib.loads(out.encode("utf-8"))  # must stay valid XML
+        self.assertIn("A & B", str(data))
+
+    def test_render_crontab_line_quotes_and_escapes(self):
+        line = legwork_install.render_crontab_line(
+            "/Users/me/My Projects/legwork", "/usr/bin/python3",
+            "*/5 * * * *")
+        self.assertIn("'/Users/me/My Projects/legwork/scripts/"
+                      "legwork_runner.py'", line)
+        line = legwork_install.render_crontab_line(
+            "/Users/me/pct%dir/legwork", "/usr/bin/python3", "*/5 * * * *")
+        self.assertIn("pct\\%dir", line)
+        self.assertNotIn("pct%dir", line.replace("pct\\%dir", ""))
+
+    def test_merge_hooks_repoints_after_repo_move(self):
+        base = legwork_install.merge_hooks({}, "/old/legwork")
+        moved = legwork_install.merge_hooks(base, "/new/legwork")
+        for event, script in (("SessionStart", "session_start_hook.sh"),
+                              ("SessionEnd", "session_end_hook.sh")):
+            entries = moved["hooks"][event]
+            self.assertEqual(len(entries), 1, "re-pointed, not duplicated")
+            self.assertEqual(entries[0]["hooks"][0]["command"],
+                             f"/new/legwork/scripts/{script}")
+
+    def test_render_config_persists_tick_minutes(self):
+        cfg = legwork_install.render_config({
+            "legwork_dir": "/srv/legwork", "daily_cap": 8,
+            "daily_cost_cap": 0, "review_mode": "local",
+            "reviewer_model": "claude-sonnet-4-6", "interval_minutes": 7})
+        parsed = legwork_install.parse_config_text(cfg)
+        self.assertEqual(parsed["LEGWORK_TICK_MINUTES"], "7")
 
     def test_wordmark_alignment_and_ascii_fallback(self):
         ascii_ui = legwork_install.UI(color=False, unicode=False)
