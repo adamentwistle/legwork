@@ -23,19 +23,18 @@ __pycache__/
 # Legwork runtime state: local, per-machine, not version controlled.
 # .session-heads/ holds per-session HEAD markers the SessionEnd hook consumes.
 # hook.log is this machine's audit trail of hook firings and skips.
-# .claude/settings.local.json is per-machine permission state. It is also
-# covered by the user's global ~/.config/git/ignore, but listing it here
-# keeps the protection with the repo once it is pushed to a remote.
+# .claude/settings.local.json is per-machine permission state, and
+# .claude/scheduled_tasks.lock is Claude Code's local scheduler lock. Both
+# are also covered by the user's global ~/.config/git/ignore, but listing
+# them here keeps the protection with the repo once it is pushed to a remote.
 # .legwork/ holds the verification summary /wrap writes for the reviewer's
 # test evidence channel. It is per-session runtime state in every repo,
 # including this one when legwork is the repo under work.
 .session-heads/
 hook.log
 .claude/settings.local.json
+.claude/scheduled_tasks.lock
 .legwork/
-# legwork is tracked as a project in the dispatch queue; the dispatch
-# SessionEnd hook writes its test evidence here.
-.dispatch/
 
 # Runner state: runner.log is this machine's audit of autonomous fires,
 # .runner-logs/ holds session transcripts, .runner.lock is the in-flight
