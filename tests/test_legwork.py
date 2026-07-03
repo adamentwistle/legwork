@@ -85,6 +85,41 @@ class TestFrontmatter(unittest.TestCase):
         self.assertEqual(legwork_runner.parse_frontmatter("no fences"), {})
 
 
+class TestPromptRe(unittest.TestCase):
+    """The shared Next-prompt regex must never read past the end of its own
+    section: a prompt section with no fenced block yields no match instead of
+    binding to a fence quoted under a later heading (e.g. ## Log)."""
+
+    def test_reads_fence_in_own_section(self):
+        text = ("## Next prompt\n\n```text\ndo the thing\n```\n\n"
+                "## Log\n\n- 2026-07-01: created.\n")
+        m = legwork_runner.PROMPT_RE.search(text)
+        self.assertEqual(m.group(1).strip(), "do the thing")
+
+    def test_allows_prose_between_heading_and_fence(self):
+        text = ("## Next prompt\n\nQueued by hand:\n\n```\nreal prompt\n```\n")
+        m = legwork_runner.PROMPT_RE.search(text)
+        self.assertEqual(m.group(1).strip(), "real prompt")
+
+    def test_does_not_cross_into_a_later_section(self):
+        text = ("## Next prompt\n\nPROMPT NEEDED. Human will fill this in.\n\n"
+                "## Log\n\n- 2026-07-01: cleanup notes:\n\n"
+                "```bash\nrm -rf build/\n```\n")
+        self.assertIsNone(legwork_runner.PROMPT_RE.search(text))
+
+    def test_unfenced_section_assessed_as_no_prompt(self):
+        # End to end through assess(): the log fence must not fire.
+        repo = make_git_repo("promptre-target")
+        path = write_project("promptre.md", repo=str(repo), prompt="x")
+        path.write_text(path.read_text(encoding="utf-8").replace(
+            "```text\nx\n```\n",
+            "PROMPT NEEDED.\n") + "\n```bash\nrm -rf build/\n```\n",
+            encoding="utf-8")
+        ok, reason, _ = legwork_runner.assess(path)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "no next prompt")
+
+
 class TestDirectives(unittest.TestCase):
     def test_model_and_effort_extracted(self):
         prompt = ("Read X.\n\nTask: y.\nModel: opus\nEffort: high\n\n"
