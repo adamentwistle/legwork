@@ -17,7 +17,15 @@ from datetime import date
 # The Next prompt is the first fenced block under the "## Next prompt"
 # heading. Shared verbatim by the runner (eligibility) and the dashboard
 # (card rendering) so the two never disagree on what "the prompt" is.
-PROMPT_RE = re.compile(r"##\s*Next prompt.*?```[a-zA-Z]*\n(.*?)```", re.S)
+# The lines between the heading and the fence must not contain another
+# `##` heading: a Next prompt section with no fenced block yields no
+# match instead of silently binding to a fence in a later section
+# (e.g. a shell snippet quoted under `## Log`).
+PROMPT_RE = re.compile(
+    r"##[ \t]*Next prompt[^\n]*\n"   # the heading line
+    r"(?:(?!##)[^\n]*\n)*?"          # gap lines, none opening a new section
+    r"```[a-zA-Z]*[ \t]*\n(.*?)```",
+    re.S)
 
 # The per-fire dollar cost in a runner.log "completed" line, e.g.
 # "... completed foo.md: exit 0, 7 min, $1.23, 5 turns". transcript_summary
