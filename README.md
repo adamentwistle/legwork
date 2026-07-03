@@ -2,11 +2,92 @@
 
 [![CI](https://github.com/adamentwistle/legwork/actions/workflows/ci.yml/badge.svg)](https://github.com/adamentwistle/legwork/actions/workflows/ci.yml)
 
-legwork is an autonomous project queue for Claude Code. Each project is one markdown file. A runner fires queued prompts as headless Claude Code sessions; an optional LLM reviewer triages the output and escalates to a human only when a decision is actually needed.
+legwork is a project queue for Claude Code that survives you walking away. Each project is one markdown file with a status, an append-only log, and a ready-to-run next prompt. You end a work session with `/wrap`, which records what happened and writes the prompt your next session should start from, while the context is still hot. Days later, `/pickup` briefs you back into the project in thirty seconds instead of twenty minutes of re-reading. A static dashboard shows the whole queue at a glance. And when a project has earned it, there is a level 2: a runner that fires those queued prompts as unattended Claude Code sessions, with an LLM reviewer that only interrupts you when a human decision is actually needed.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/dashboard-dark.png" />
+  <img alt="The legwork dashboard: a queue ribbon, a needs-you zone, status-spined project cards, and a changelog timeline" src="docs/dashboard-light.png" />
+</picture>
+
+<sub>The dashboard is one static HTML file, rebuilt from your project files by a standard-library Python script. No server, no dependencies. Light and dark both ship in <code>docs/</code>; the image follows your GitHub theme.</sub>
+
+## The loop
+
+The core of legwork is a habit, not a daemon: never end a session without writing down what the next session should do.
+
+```
+/add      create projects/<name>.md: status, description, a real first prompt
+ work     any Claude Code session, in any repo
+/wrap     log what happened, write the next prompt while context is hot
+ away     days pass; the dashboard shows every project and its next step
+/pickup   a 30-second re-entry briefing; run the queued prompt or adjust it
+```
+
+A project file looks like this (six full samples, one per status, live in [`examples/projects/`](examples/projects/)):
+
+````markdown
+---
+name: Garden Planner
+status: queued
+description: A small CLI that plans a vegetable bed by frost dates.
+repo: ~/code/garden-planner
+updated: 2026-05-28
+---
+
+## Next prompt
+
+```text
+Read README.md and the last three log entries first.
+
+Task: add a --frost-dates flag that overrides the zone-derived dates.
+
+Done when: the calendar shifts to the supplied dates and the tests pass.
+```
+
+## Log
+
+- 2026-05-28: Zone table shipped. Next: frost-date override.
+````
+
+## Quickstart
+
+Requirements: `python3` (3.9 or newer), the Claude Code CLI, and `git`.
+
+```
+git clone <your-legwork-remote> "$HOME/legwork"
+cd "$HOME/legwork"
+./install.sh
+```
+
+You supply the clone: fork this repo or push a copy to a private remote you control. Cloning this repo directly is fine just to try it; nothing in the manual loop needs a remote.
+
+`./install.sh` is an interactive, dependency-free wizard. It asks for every value legwork can be configured with, shows you the `config` it will write, then offers each piece that lives outside the repo, asking before every one:
+
+- write `config` and create `projects/` and `.runner-logs/`
+- copy the slash commands (`/add`, `/wrap`, `/pickup`, `/vision`, `/log`, `/shelve`) and the legwork-tracker skill into user-level `~/.claude`, so the loop works from any repo on your machine, not just this checkout. Say yes to this one.
+- install the launchd agent (macOS) or crontab line (Linux) for the level 2 runner
+- register the SessionStart/SessionEnd hooks in your Claude `settings.json` (level 2 review evidence; harmless if you never use it)
+
+Running headless? `./install.sh --yes` accepts every default and writes only the in-repo config; the outside-the-repo steps are opt-in via `--with-commands`, `--with-launchd` and `--with-hooks`.
+
+Then the first five minutes: run `claude` in any repo you are working on, `/add <project>` to queue it, do some work, `/wrap` to close out, and open `dashboard/index.html` in the legwork checkout. Come back another day with `/pickup <project>`. Verify the install any time with `python3 scripts/legwork_runner.py --doctor`.
+
+> **Make this repo your tracker.** A fresh clone gitignores `/projects/`, so your real queue stays out of any public fork by accident. When you want your queue in version control (the level 2 runner requires it; the verbs commit and push when it is there), point the checkout at a private remote of your own and delete the `/projects/` and `/dashboard/index.html` lines from `.gitignore`. [SETUP.md](SETUP.md) walks through it.
+
+If you cloned somewhere other than `$HOME/legwork`, add `export LEGWORK_DIR=/path/to/your/clone` to your shell profile; the slash commands resolve the queue through that variable.
+
+## What it costs
+
+The manual loop bills nothing beyond the Claude Code sessions you were already running; the dashboard and the queue are local files. Level 2 spends real money while you are away: each fire is one headless session, each reviewed session adds one `claude -p` reviewer call, and the runner records the per-fire dollar cost in `runner.log`. Two caps guard it: `LEGWORK_DAILY_CAP` (fires per project per day, default 8) and `LEGWORK_DAILY_COST_CAP` (a dollar ceiling across all projects). The n8n review path bills an Anthropic API key separately.
+
+## Level 2: the autonomous loop
 
 The idea worth stealing is reviewer-by-exception. An LLM reviewer reads every autonomous session and only escalates to a human when a human decision is genuinely required: money, deploys, credentials, sending things to people, deleting data, or work that contradicts the stated intent. Everything else passes or is sent back for another pass. You stay in the loop by exception, not by babysitting.
 
-## How it works
+Autonomy is opt-in per project, granted by `/vision`: an interview that captures a standing brief (north star, done means, guardrails, escalate when, taste) and only then sets `autonomy: loop`. The runner refuses projects without one.
+
+<details>
+<summary><strong>How the runner and reviewer work</strong></summary>
 
 ```
 projects/*.md            source of truth: one markdown file per project
@@ -34,42 +115,13 @@ reply-capture  <--  commit decision, mint/keep next prompt, status -> queued
 (no webhook set?  the runner still fires and wraps; the pipeline is skipped)
 ```
 
-Each project is a markdown file with frontmatter, an optional `## Vision` brief, a `## Next prompt` fenced block, and an append-only `## Log`. The runner ticks every five minutes, pulls the legwork repo, and fires every eligible project as a headless `claude -p` session. Eligibility is strict: status `queued`, `autonomy: loop`, a `## Vision` section, a clean target git tree, a real next prompt, and under the daily cap. Sessions run with `--permission-mode acceptEdits` plus a narrow allowlist of git, mkdir, and the dashboard rebuild; anything more needs the target repo's own `.claude/settings.json`. When a review webhook is set, the optional n8n pipeline triages each session and writes the outcome back to the queue. Don't want to run n8n? Set `LEGWORK_LOCAL_REVIEW` and the runner triages each session itself with a `claude -p` call, writing the pass/revise/escalate verdict straight back to the project file: reviewer-by-exception with zero extra infrastructure. With neither, the runner still fires and wraps and review is simply skipped.
+The runner ticks every five minutes, pulls the legwork repo, and fires every eligible project as an unattended (`claude -p`) session. Eligibility is strict: status `queued`, `autonomy: loop`, a `## Vision` section, no `blocked_on` line, a `repo:` that exists and is a clean git tree, a real next prompt, and both daily caps unspent. Sessions run with `--permission-mode acceptEdits` plus a narrow allowlist of git, mkdir, and the dashboard rebuild; anything more needs the target repo's own `.claude/settings.json`.
 
-## Dashboard
+One requirement the manual loop does not have: the runner needs the legwork repo to have a writable remote (a private fork or even a local bare repo), because it pulls before every tick and pushes each claim so parallel machines and the review pipeline can never double-fire a project. `--dry-run`, `--doctor`, the dashboard and the manual loop all work without one.
 
-The dashboard is a single static HTML file built from `projects/*.md` by `scripts/build_dashboard.py`, which uses the Python standard library only and rewrites `dashboard/index.html` wholesale on each run. It is a build artifact, gitignored, and read straight from disk in a browser. It shows each project as a card with its status, energy, description, blocker, and staleness, so the queue is visible at a glance with no server.
+Review is three options deep. Set `LEGWORK_LOCAL_REVIEW=1` and the runner triages each finished session itself with one `claude -p` call, writing the pass/revise/escalate verdict straight back to the project file: reviewer-by-exception with zero extra infrastructure. Point `LEGWORK_WEBHOOK_URL` at the optional n8n pipeline instead and reviews arrive as Telegram letters you can answer from your phone. With neither, the runner still fires and wraps; review is simply skipped.
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/dashboard-dark.png" />
-  <img alt="The legwork dashboard: a queue ribbon, a needs-you zone, status-spined project cards, and a changelog timeline" src="docs/dashboard-light.png" />
-</picture>
-
-<sub>Light and dark both ship in <code>docs/</code>; the image above follows your GitHub theme.</sub>
-
-## Quickstart
-
-Requirements: `python3` (3.9 or newer), the Claude Code CLI, and `git`.
-
-legwork is the legwork repo: the runner, the dashboard builder, the config file and your project files all live inside one checkout. Clone your own legwork repo — a fork, or any git remote you control — so the runner can commit your project files back to it; the local runner and dashboard also work with no remote, so a plain clone is enough just to try it.
-
-```
-git clone <your-legwork-remote> "$HOME/legwork"
-cd "$HOME/legwork"
-./install.sh
-```
-
-`./install.sh` is an interactive, dependency-free wizard. It asks for every value legwork can be configured with (the legwork dir, the daily fire and cost caps, the review mode and reviewer model, an optional dedicated Claude config dir, the tick interval), shows you the `config` it will write, then offers to activate the pieces that live outside the repo, asking before each one:
-
-- write `config` and create `projects/` and `.runner-logs/`
-- install and load the launchd agent (macOS) or a crontab line (Linux)
-- register the SessionStart/SessionEnd hooks in your Claude `settings.json`
-
-Running headless? `./install.sh --yes` accepts every default without prompting; it writes the in-repo config but skips the two outside-the-repo steps (the launchd/cron timer and the Claude hooks) unless you add `--with-launchd` or `--with-hooks`.
-
-Then fill the queue: add projects with the `/add` skill and grant autonomy per project with `/vision`. Verify any time with `python3 scripts/legwork_runner.py --doctor`.
-
-Prefer to do it by hand, or want the optional n8n review, reply-capture, and alerts pipelines? See [SETUP.md](SETUP.md); every step the wizard automates is also written out there.
+</details>
 
 ## What this is not
 
