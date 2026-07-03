@@ -47,7 +47,12 @@ LOG_ROW_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2}):\s*(.*)$", re.S)
 
 
 def parse_project(path):
-    text = path.read_text(encoding="utf-8")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        # One unreadable or non-UTF-8 file must not abort the whole build.
+        print(f"Warning: skipping {path.name}: {exc}", file=sys.stderr)
+        return None
     meta = parse_frontmatter(text)
     if not meta.get("name"):
         return None
@@ -68,13 +73,14 @@ def parse_project(path):
         print(f"Warning: {path.name} has unknown status '{status}', treating as queued", file=sys.stderr)
         status = "queued"
 
-    # Freshness is the newest of the frontmatter date and the latest log
-    # entry, so a forgotten `updated` bump cannot make a project look stale.
+    # Freshness is the newest of the frontmatter date and any log entry
+    # (all of them, since a hand-edited log is not always newest-first), so
+    # a forgotten `updated` bump cannot make a project look stale. Clamped
+    # at zero: a future-dated entry reads as "today", not negative days.
     candidates = [parse_date(meta.get("updated", ""))]
-    if log_lines:
-        candidates.append(parse_date(log_lines[0]))
+    candidates.extend(parse_date(line) for line in log_lines)
     dates = [c for c in candidates if c]
-    days_quiet = (date.today() - max(dates)).days if dates else None
+    days_quiet = max(0, (date.today() - max(dates)).days) if dates else None
 
     return {
         "file": path.name,
