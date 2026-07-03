@@ -27,6 +27,8 @@ dashboard renders (`escalated`, `queued`, `running`, `review`, `done`,
   the log and a reopen-style next prompt.
 
 You would keep your own projects in a private legwork repo (`$LEGWORK_DIR`,
-default `$HOME/legwork`), not here. The top-level `/projects/` directory in
-this repo is gitignored for exactly that reason. Copy a sample, change the
-frontmatter, and point `repo:` at your own code.
+default `$HOME/legwork`), not here. A fresh clone gitignores the top-level
+`/projects/` directory for exactly that reason; when this checkout becomes
+your real tracker, follow "Make this repo your tracker" in `SETUP.md` (a
+private remote, then drop that ignore line) so your queue is versioned.
+Copy a sample, change the frontmatter, and point `repo:` at your own code.

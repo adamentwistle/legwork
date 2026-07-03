@@ -15,7 +15,8 @@ __pycache__/
 # Your real project data and the generated dashboard; the engine creates
 # both at runtime. Track your own projects in a private repo, not here.
 # Root-anchored so examples/projects/ stays tracked. (Drop these two lines
-# if you fork this to run your own queue.)
+# when you make this repo your tracker; see "Make this repo your tracker"
+# in SETUP.md.)
 /projects/
 /dashboard/index.html
 
