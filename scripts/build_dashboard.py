@@ -585,19 +585,11 @@ CSS = """
   --st-stale:#FFA94D;
 }
 
-/* dark: the collage board flips to blackboard — canvas near-black, panels
-   pure black, and the ink (borders, text, shadows) becomes cream. The
-   highlighter hues stay put; black label text stays legible on all of them.
-   The violet changelog band stays a printed light island in both themes. */
-@media (prefers-color-scheme: dark){
-  :root:not([data-theme="light"]){ color-scheme:dark;
-    --paper:#121212;
-    --card:#000000;
-    --ink:#FFFDF5;
-    --ink-soft:rgba(255,253,245,0.62);
-    --grid-line:rgba(255,253,245,0.07);
-  }
-}
+/* dark: opt-in via the toggle only — the definitive palette is light.
+   The collage board flips to blackboard: canvas near-black, panels pure
+   black, and the ink (borders, text, shadows) becomes cream. The
+   highlighter hues stay put; black label text stays legible on all of
+   them. The violet changelog band stays a printed light island. */
 :root[data-theme="dark"]{ color-scheme:dark;
   --paper:#121212;
   --card:#000000;
@@ -698,10 +690,6 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;color:inhe
 .theme-toggle .ic-moon{display:none;}
 :root[data-theme="dark"] .theme-toggle .ic-sun{display:none;}
 :root[data-theme="dark"] .theme-toggle .ic-moon{display:inline;}
-@media (prefers-color-scheme: dark){
-  :root:not([data-theme="light"]) .theme-toggle .ic-sun{display:none;}
-  :root:not([data-theme="light"]) .theme-toggle .ic-moon{display:inline;}
-}
 
 /* queue ribbon — a bordered bar of solid blocks over an ink base, so the
    4px gaps read as hard seams; the legend carries the names and counts */
@@ -1040,11 +1028,10 @@ SCRIPT = """
   "use strict";
   var root = document.documentElement;
 
-  /* ---- theme toggle (defaults to prefers-color-scheme) ---- */
+  /* ---- theme toggle (light is the default; dark is opt-in) ---- */
   var KEY = "legwork-theme";
   var toggle = document.getElementById("themeToggle");
-  function systemDark(){ return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches; }
-  function effective(){ var a = root.getAttribute("data-theme"); return a ? a : (systemDark() ? "dark" : "light"); }
+  function effective(){ return root.getAttribute("data-theme") === "dark" ? "dark" : "light"; }
   function syncLabel(){ var e = effective(); if(toggle) toggle.setAttribute("aria-label", (e === "dark" ? "Dark" : "Light") + " theme — switch to " + (e === "dark" ? "light" : "dark")); }
   try{ var saved = localStorage.getItem(KEY); if(saved === "dark" || saved === "light"){ root.setAttribute("data-theme", saved); } }catch(e){}
   syncLabel();
@@ -1055,9 +1042,6 @@ SCRIPT = """
       try{ localStorage.setItem(KEY, next); }catch(e){}
       syncLabel();
     });
-  }
-  if(window.matchMedia){
-    try{ window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", syncLabel); }catch(e){}
   }
 
   /* ---- expanders ---- */
