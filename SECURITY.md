@@ -28,20 +28,34 @@ repo (the session's working directory) and in the legwork repo (added with
 `git`, `mkdir`, and the dashboard rebuild. That is enough to read, write,
 commit, and run `/wrap`.
 
-Everything else is denied. Test runners, builds, package installs, deploys,
-arbitrary shell: none of it runs unless the target repo grants it in its own
+Everything else is denied by name. Test runners, builds, package installs,
+deploys: none of those run unless the target repo grants them in its own
 `.claude/settings.json` allow rules. Per-repo allowlists are the consent
-model. The runner never widens them and bypasses no permission checks. A
-session that hits a wall is expected to say so and wrap honestly rather than
-work around it.
+model. The runner never widens them and bypasses no permission checks.
 
-Because `--add-dir <LEGWORK_DIR>` plus `acceptEdits` auto-accepts edits in the
-legwork repo too, a session could in principle edit legwork's own control-plane
-files. The runner mitigates this at the tool layer: it passes a `--settings`
-file with Edit/Write deny rules on `scripts/**`, `reviewer/**`,
-`reply-capture/**`, `alerts/**`, and the hook scripts under `LEGWORK_DIR`, so a
-worker session cannot rewrite the runner, hooks, or reviewer. The post-hoc audit
-below is a second layer over the same files.
+Be honest about what that boundary is, though. `Bash(git:*)` is not a
+narrow grant: git can be made to run arbitrary shell (a `git config
+alias.x '!<command>'` followed by `git x`, a `git -c core.pager=<command>
+log`, a repo-local `core.hooksPath`), so a session that wants a shell can
+get one through git without tripping a permission prompt, and none of that
+shows up in the commit-based audit below. The allowlist keeps an honest
+session on the rails and stops accidental tool sprawl; it is not a sandbox
+against a session that actively tries to escape. A session that hits a wall
+is expected to say so and wrap honestly rather than work around it, and the
+model's training carries real weight in that sentence.
+
+Because `--add-dir <LEGWORK_DIR>` plus `acceptEdits` auto-accepts edits in
+the legwork repo too, a session could in principle edit legwork's own
+control-plane files. The runner raises the bar at the tool layer: it passes
+a `--settings` file with deny rules on `scripts/**`, `reviewer/**`,
+`reply-capture/**` and `alerts/**` under `LEGWORK_DIR` (the hook scripts
+live in `scripts/`). Those deny rules cover the Edit, Write and MultiEdit
+tools only, not Bash, so they block the direct edit path but not a
+git-mediated one: the same `Bash(git:*)` grant above could rewrite those
+files through a checkout, an apply, or shell obtained via git. The post-hoc
+audit below is the detection layer for exactly that, and it sees commits
+only: a control-plane change left uncommitted in the working tree never
+appears in it.
 
 ## Autonomy is opt-in
 
@@ -61,9 +75,22 @@ There is one exception, also human. A `fire_once` key in the frontmatter
 stands in for the autonomy opt-in and the Vision section, for exactly one
 session. It is the human hand-firing a single minted prompt from the phone
 (the Telegram `/fire` command). The claim that flips `queued` to `running`
-deletes the key, so a `fire_once` project cannot fire again without the human
-setting it once more. Every other eligibility guard still holds: a real
-prompt, a clean target repo, no `blocked_on`, and under the daily cap.
+deletes the key, so the `fire_once` grant itself is single-use. Every other
+eligibility guard still holds: a real prompt, a clean target repo, no
+`blocked_on`, and under the daily cap.
+
+One known limit: the opt-in gate governs how the runner chooses to fire,
+not what a fired session may write. `projects/` is writable by every
+session (that is how `/wrap` works) and the audit below deliberately
+ignores it, so a session fired once could edit its own project file:
+re-queue itself, set another `fire_once`, or grant itself `autonomy: loop`
+plus a `## Vision`. Nothing alerts on that today. The mitigations are
+indirect: the tracker is fully tracked in git, so self-granted autonomy is
+a visible commit in `git log -- projects/`; the optional reviewer reads the
+tracker entry after every session; and the daily fire and cost caps bound
+how often anything fires regardless of who queued it. Treat the autonomy
+gate as protection against drift and accident, not against a session
+determined to keep itself running.
 
 ## Credentials
 
@@ -84,6 +111,21 @@ Never commit credentials.
 If you wire up the optional pipelines, the secrets stay in `config`, in your
 environment, and in n8n. The public repo holds none of them.
 
+## The Telegram surface
+
+If you wire up reply-capture, the bot is the highest-privilege remote
+surface in the system: its slash commands mint prompts (`/prompt`), queue
+one-shot sessions (`/fire`), grant standing autonomy (`/loop`), and pause
+or resume the runner, all through the GitHub write-back. Telegram bots are
+publicly addressable, and the workflow as committed does not authenticate
+the sender: the trigger fires on any message from any Telegram user, so
+anyone who learns the bot's handle could drive your queue.
+
+Do not activate it without an allowlist. Restrict the trigger to your own
+Telegram user id (the message's `from.id`) before turning the workflow on;
+reply-capture/SETUP.md has the step. The same applies to any other Telegram
+trigger you ever point at the bot.
+
 ## Guardrails
 
 The session prompt itself carries a standing instruction to stop rather than
@@ -102,6 +144,13 @@ work. It escalates anything that touches:
 - work that contradicts the project's stated intent.
 
 The reviewer also always escalates self-modification of the pipeline.
+
+The reviewer is best-effort triage, not a hard gate. Its evidence (the
+tracker entry, the diff stat, the test output) is assembled from what the
+session under review wrote, so a session can shape what the reviewer sees,
+and a crafted wrap could coerce a pass. It reliably catches the ordinary
+failures it exists for: honest-but-wrong work, unfinished tasks, accidental
+scope. Do not model it as a security boundary against a session that lies.
 
 The runner audits its own control plane. After every fire,
 `audit_session_window()` diffs the legwork repo over the session window

@@ -37,10 +37,11 @@ and the dashboard rebuild, which is just enough to work, commit and /wrap.
 Anything more (test runners, builds, deploys) is granted per repo by the
 human, in that repo's own .claude/settings.json allow rules; everything else
 is denied and the session is expected to say so and wrap honestly. No
-permission checks are bypassed. A per-session --settings file denies edits to
-the legwork control plane (scripts/, reviewer/, the n8n pipelines), so a
-worker session does its work and wraps without rewriting the runner that
-governs it; audit_session_window stays as a second, post-hoc layer.
+permission checks are bypassed. A per-session --settings file denies the
+Edit/Write tools on the legwork control plane (scripts/, reviewer/, the n8n
+pipelines); Bash is not covered, so the deny blocks the direct edit path
+while audit_session_window detects committed control-plane touches post-hoc.
+SECURITY.md spells out the boundary honestly.
 
 Accounts: when CLAUDE_CONFIG_DIR is set, sessions fire under that config dir
 so an autonomous run never inherits whatever account your interactive shell
@@ -1250,9 +1251,9 @@ def fire_claimed(project, claude_path, claim_head, started):
         "--add-dir", str(LEGWORK_DIR),
     ]
     if guard:
-        # Deny edits to the legwork control plane (scripts/, reviewer/, the
-        # n8n pipelines): a worker session does its work and /wrap without
-        # being able to rewrite the runner that governs it.
+        # Deny the edit tools on the legwork control plane (scripts/,
+        # reviewer/, the n8n pipelines). Bash(git:*) is not covered, so this
+        # blocks the direct path only; the post-fire audit is the detector.
         argv += ["--settings", guard]
     argv += [
         "--allowedTools",
