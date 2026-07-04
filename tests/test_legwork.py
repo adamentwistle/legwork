@@ -2335,7 +2335,7 @@ class TestInstaller(unittest.TestCase):
     @staticmethod
     def _args(**kw):
         import argparse
-        ns = argparse.Namespace(yes=False, with_commands=False,
+        ns = argparse.Namespace(yes=False, lite=False, with_commands=False,
                                 with_launchd=False, with_hooks=False)
         ns.__dict__.update(kw)
         return ns
@@ -2362,10 +2362,82 @@ class TestInstaller(unittest.TestCase):
                 legwork_install.plan_forces(ns, interactive), expected,
                 f"args={ns} interactive={interactive}")
 
-    def test_main_yes_wires_the_skip_forces_into_the_steps(self):
-        # main(["--yes", "--with-hooks"]) end to end with the side-effect
-        # steps stubbed: the two un-flagged steps receive force=False, the
-        # flagged one True, and the run exits 0.
+    def test_plan_level_truth_table(self):
+        # The level 1 / level 2 fork: --lite pins 1, the level-2 opt-in
+        # flags pin 2, a re-run pre-fills the recorded level (a pre-fork
+        # config reads as a full install), a fresh install defaults to the
+        # manual loop.
+        args = self._args
+        cases = [
+            (args(), {}, (1, False)),                       # fresh: lite
+            (args(yes=True), {}, (1, False)),               # bare --yes too
+            (args(lite=True), {}, (1, True)),
+            (args(with_launchd=True), {}, (2, True)),
+            (args(with_hooks=True), {}, (2, True)),
+            (args(yes=True, with_hooks=True), {}, (2, True)),
+            (args(), {"LEGWORK_LEVEL": "1"}, (1, False)),   # re-run pre-fill
+            (args(), {"LEGWORK_LEVEL": "2"}, (2, False)),
+            (args(), {"LEGWORK_DIR": "/x"}, (2, False)),    # pre-fork config
+            (args(lite=True), {"LEGWORK_LEVEL": "2"}, (1, True)),  # flag wins
+        ]
+        for ns, existing, expected in cases:
+            self.assertEqual(
+                legwork_install.plan_level(ns, existing), expected,
+                f"args={ns} existing={existing}")
+        for contradiction in (self._args(lite=True, with_launchd=True),
+                              self._args(lite=True, with_hooks=True)):
+            with self.assertRaises(ValueError):
+                legwork_install.plan_level(contradiction, {})
+
+    def test_render_config_level_1_is_lite_and_round_trips(self):
+        cfg = legwork_install.render_config(
+            {"level": 1, "legwork_dir": "/srv/legwork"})
+        parsed = legwork_install.parse_config_text(cfg)
+        self.assertEqual(parsed, {"LEGWORK_LEVEL": "1",
+                                  "LEGWORK_DIR": "/srv/legwork"})
+        # The round trip that makes re-runs pre-fill the level.
+        self.assertEqual(
+            legwork_install.plan_level(self._args(), parsed), (1, False))
+
+    def test_render_config_level_2_records_the_level(self):
+        for values in (
+            {"level": 2, "legwork_dir": "/srv/legwork", "daily_cap": 8,
+             "daily_cost_cap": 0, "review_mode": "local",
+             "reviewer_model": "claude-sonnet-4-6", "interval_minutes": 5},
+            # A values dict without the key (older callers) is a full install.
+            {"legwork_dir": "/srv/legwork", "daily_cap": 8,
+             "daily_cost_cap": 0, "review_mode": "off",
+             "reviewer_model": "", "interval_minutes": 5},
+        ):
+            parsed = legwork_install.parse_config_text(
+                legwork_install.render_config(values))
+            self.assertEqual(parsed.get("LEGWORK_LEVEL"), "2", values)
+            self.assertIn("LEGWORK_DAILY_CAP", parsed)
+
+    def test_write_repo_files_level_1_skips_runner_logs(self):
+        orig_repo = legwork_install.REPO
+        try:
+            for level, expect_logs in ((1, False), (2, True)):
+                repo = Path(tempfile.mkdtemp(dir=str(TMP)))
+                legwork_install.REPO = repo
+                values = {"level": level, "legwork_dir": str(repo),
+                          "daily_cap": 8, "daily_cost_cap": 0,
+                          "review_mode": "off", "reviewer_model": "",
+                          "interval_minutes": 5}
+                legwork_install.write_repo_files(values)
+                parsed = legwork_install.parse_config_text(
+                    (repo / "config").read_text(encoding="utf-8"))
+                self.assertEqual(parsed.get("LEGWORK_LEVEL"), str(level))
+                self.assertTrue((repo / "projects").is_dir())
+                self.assertEqual((repo / ".runner-logs").is_dir(),
+                                 expect_logs, f"level={level}")
+        finally:
+            legwork_install.REPO = orig_repo
+
+    def _run_main_with_stubbed_steps(self, argv, repo=None):
+        """main(argv) with every side-effect step stubbed out. Returns
+        (rc, received): which steps ran with which force, plus the values
+        write_repo_files saw under the 'write_repo_files' key."""
         import contextlib
         import io
         received = {}
@@ -2381,24 +2453,79 @@ class TestInstaller(unittest.TestCase):
 
         for name in names:
             setattr(legwork_install, name, step(name))
-        legwork_install.write_repo_files = lambda values: ["config (stubbed)"]
+
+        def fake_write(values):
+            received["write_repo_files"] = values
+            return ["config (stubbed)"]
+
+        legwork_install.write_repo_files = fake_write
         legwork_install.run_doctor = lambda wiz: None
-        # An empty stand-in repo: no real config is read, none written.
-        legwork_install.REPO = Path(tempfile.mkdtemp(dir=str(TMP)))
+        legwork_install.REPO = repo or Path(tempfile.mkdtemp(dir=str(TMP)))
         stdin = sys.stdin
         sys.stdin = io.StringIO("")  # not a tty: non-interactive
         try:
-            with contextlib.redirect_stdout(io.StringIO()):
-                rc = legwork_install.main(["--yes", "--with-hooks",
-                                           "--no-color"])
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                rc = legwork_install.main(argv)
         finally:
             sys.stdin = stdin
             for name, value in orig.items():
                 setattr(legwork_install, name, value)
+        return rc, received
+
+    def test_main_lite_never_reaches_the_timer_or_hook_steps(self):
+        # --yes --lite: a level-1 config is written, the verbs step still
+        # runs (skipped without --with-commands), and the timer and hook
+        # steps are never called at all -- not merely forced to skip.
+        rc, received = self._run_main_with_stubbed_steps(
+            ["--yes", "--lite", "--no-color"])
         self.assertEqual(rc, 0)
-        self.assertEqual(received, {"install_verbs": False,
-                                    "install_timer": False,
-                                    "install_hooks": True})
+        self.assertEqual(received["write_repo_files"]["level"], 1)
+        self.assertEqual(received["install_verbs"], False)
+        self.assertNotIn("install_timer", received)
+        self.assertNotIn("install_hooks", received)
+
+    def test_main_bare_yes_on_a_fresh_clone_defaults_to_level_1(self):
+        rc, received = self._run_main_with_stubbed_steps(
+            ["--yes", "--no-color"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(received["write_repo_files"]["level"], 1)
+        self.assertNotIn("install_timer", received)
+
+    def test_main_yes_rerun_keeps_an_existing_level_2_install(self):
+        # A pre-fork config (no LEGWORK_LEVEL) came from the full flow: a
+        # --yes re-run over it must not silently downgrade to level 1.
+        repo = Path(tempfile.mkdtemp(dir=str(TMP)))
+        (repo / "config").write_text("LEGWORK_DIR=/srv/legwork\n",
+                                     encoding="utf-8")
+        rc, received = self._run_main_with_stubbed_steps(
+            ["--yes", "--no-color"], repo=repo)
+        self.assertEqual(rc, 0)
+        self.assertEqual(received["write_repo_files"]["level"], 2)
+        self.assertEqual(received["install_timer"], False)
+        self.assertEqual(received["install_hooks"], False)
+
+    def test_main_lite_with_hooks_is_refused(self):
+        repo = Path(tempfile.mkdtemp(dir=str(TMP)))
+        rc, received = self._run_main_with_stubbed_steps(
+            ["--yes", "--lite", "--with-hooks", "--no-color"], repo=repo)
+        self.assertEqual(rc, 2)
+        self.assertEqual(received, {}, "nothing ran, nothing was written")
+
+    def test_main_yes_wires_the_skip_forces_into_the_steps(self):
+        # main(["--yes", "--with-hooks"]) end to end with the side-effect
+        # steps stubbed: the two un-flagged steps receive force=False, the
+        # flagged one True (--with-hooks also pins level 2), and the run
+        # exits 0.
+        rc, received = self._run_main_with_stubbed_steps(
+            ["--yes", "--with-hooks", "--no-color"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(received["write_repo_files"]["level"], 2)
+        self.assertEqual(
+            {name: received[name] for name in
+             ("install_verbs", "install_timer", "install_hooks")},
+            {"install_verbs": False, "install_timer": False,
+             "install_hooks": True})
 
     def test_main_without_tty_or_yes_refuses(self):
         import contextlib

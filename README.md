@@ -61,14 +61,14 @@ cd "$HOME/legwork"
 
 You supply the clone: fork this repo or push a copy to a private remote you control. Cloning this repo directly is fine just to try it; nothing in the manual loop needs a remote.
 
-`./install.sh` is an interactive, dependency-free wizard. It asks for every value legwork can be configured with, shows you the `config` it will write, then offers each piece that lives outside the repo, asking before every one:
+`./install.sh` is an interactive, dependency-free wizard. Its first question is which level you are installing:
 
-- write `config` and create `projects/` and `.runner-logs/`
-- copy the slash commands (`/add`, `/wrap`, `/pickup`, `/vision`, `/log`, `/shelve`) and the legwork-tracker skill into user-level `~/.claude`, so the loop works from any repo on your machine, not just this checkout. Say yes to this one.
-- install the launchd agent (macOS) or crontab line (Linux) for the level 2 runner
-- register the SessionStart/SessionEnd hooks in your Claude `settings.json` (level 2 review evidence; harmless if you never use it)
+- **Level 1, the manual loop** (the default): one question — where the repo lives — then it writes `config`, creates `projects/`, and offers to copy the slash commands (`/add`, `/wrap`, `/pickup`, `/vision`, `/log`, `/shelve`) and the legwork-tracker skill into user-level `~/.claude`, so the loop works from any repo on your machine, not just this checkout. Say yes to that one. No timer, no hooks, nothing running in the background.
+- **Level 2, autonomy**: everything above, plus the firing and cost caps, the review pipeline, the launchd agent (macOS) or crontab line (Linux) that ticks the runner, and the SessionStart/SessionEnd review hooks in your Claude `settings.json`. It still asks before each piece that lives outside the repo.
 
-Running headless? `./install.sh --yes` accepts every default and writes only the in-repo config; the outside-the-repo steps are opt-in via `--with-commands`, `--with-launchd` and `--with-hooks`.
+Graduating is re-running `./install.sh` in the same checkout and picking level 2: your previous answers, including the level, pre-fill.
+
+Running headless? `./install.sh --yes` accepts every default and writes only the in-repo config; a fresh clone defaults to level 1 (`--lite` pins it). The outside-the-repo steps are opt-in via `--with-commands`, `--with-launchd` and `--with-hooks` — the latter two imply level 2.
 
 Then the first five minutes: run `claude` in any repo you are working on, `/add <project>` to queue it, do some work, `/wrap` to close out, and open `dashboard/index.html` in the legwork checkout. Come back another day with `/pickup <project>`. Verify the install any time with `python3 scripts/legwork_runner.py --doctor`.
 
