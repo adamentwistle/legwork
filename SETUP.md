@@ -20,11 +20,13 @@ Most people should just run the wizard. From the cloned repo:
 standard-library-only interactive installer. Its first question is the
 install level, and the answer decides how much of this guide it walks:
 
-- **Level 1, the manual loop** (the default on a fresh clone) covers steps 1
-  and 2: it asks where the repo lives, writes `config`, creates `projects/`,
-  and offers to copy the slash commands and the legwork-tracker skill into
-  user-level `~/.claude`. The timer and hook steps are never reached, so
-  nothing runs in the background.
+- **Level 1, the manual loop** (the default on a fresh clone) covers steps 1,
+  2 and 4: it asks where the repo lives, writes `config`, creates `projects/`,
+  offers to copy the slash commands and the legwork-tracker skill into
+  user-level `~/.claude`, and offers the session hooks — with no webhook set,
+  the SessionEnd hook rebuilds the dashboard after every session, so the
+  queue page stays fresh without you running the builder. The timer step is
+  never reached, so nothing runs in the background.
 - **Level 2, autonomy** walks the same ground as steps 1 through 5: every
   config value (caps, review pipeline, tick interval), `.runner-logs/`, the
   launchd agent (macOS) or crontab line (Linux), and the
@@ -41,8 +43,9 @@ launchd/cron timer and the Claude hooks) are skipped unless you add
 `--with-commands`, `--with-launchd` or `--with-hooks`, so a headless `--yes`
 install never writes to `~/.claude`, loads a launchd agent or edits your
 `settings.json` behind your back. `--lite` pins level 1 without asking;
-`--with-launchd` and `--with-hooks` pin level 2 (and clash with `--lite`).
-`--no-color` prints plainly. Re-running is safe: it reads your existing
+`--with-launchd` pins level 2 (and clashes with `--lite`); `--with-hooks`
+works at either level, so `--yes --lite --with-hooks` is the headless
+lite-with-hooks install. `--no-color` prints plainly. Re-running is safe: it reads your existing
 `config` to pre-fill the prompts (including the level; a config from before
 the level question reads as level 2), refreshes the command copies, and
 never duplicates a launchd agent, crontab line or hook entry.
@@ -158,18 +161,23 @@ for now. For every variable, see `CONFIG.md`.
 
 ## 4. The hooks
 
-Two Claude Code hooks feed the review pipeline. Register them in the
-`settings.json` of the Claude config the runner uses. If you set
-`CLAUDE_CONFIG_DIR` (or a per-account `CLAUDE_CONFIG_DIR_<NAME>`) in your
-config, that is the config dir whose `settings.json` needs them. If you left
-`CLAUDE_CONFIG_DIR` unset, autonomous sessions inherit your default config, so
-register them in `~/.claude/settings.json`.
+Two Claude Code hooks bracket every session. They are useful at both levels:
+with `LEGWORK_WEBHOOK_URL` set they feed the review pipeline; without it the
+SessionEnd hook rebuilds the dashboard instead, so a level-1 install gets a
+queue page that stays fresh on its own. Register them in the `settings.json`
+of the Claude config the runner uses. If you set `CLAUDE_CONFIG_DIR` (or a
+per-account `CLAUDE_CONFIG_DIR_<NAME>`) in your config, that is the config
+dir whose `settings.json` needs them. If you left `CLAUDE_CONFIG_DIR` unset,
+autonomous sessions inherit your default config, so register them in
+`~/.claude/settings.json`.
 
 - `scripts/session_start_hook.sh` (SessionStart): records the repo HEAD for
   the session, so the end hook can report only what this session changed.
-- `scripts/session_end_hook.sh` (SessionEnd): gathers session-scoped git
-  evidence plus the project's tracker entry and POSTs them to
-  `LEGWORK_WEBHOOK_URL`.
+- `scripts/session_end_hook.sh` (SessionEnd): with `LEGWORK_WEBHOOK_URL` set,
+  gathers session-scoped git evidence plus the project's tracker entry and
+  POSTs them to the webhook; with it unset, runs
+  `scripts/build_dashboard.py` so `dashboard/index.html` reflects what the
+  session just wrapped.
 
 Add this to the `settings.json` of that config dir, with `$HOME/legwork`
 replaced by your `LEGWORK_DIR` if it differs:
@@ -201,10 +209,10 @@ replaced by your `LEGWORK_DIR` if it differs:
 }
 ```
 
-The SessionEnd hook is a no-op when `LEGWORK_WEBHOOK_URL` is unset: it logs a
-skip to `$LEGWORK_DIR/hook.log` and exits. So registering the hooks now is
-harmless even if you never set up the pipeline. Sessions that end via clear or
-resume are also skipped, since they are restarting, not finishing.
+Both outcomes are logged to `$LEGWORK_DIR/hook.log`, and the hook always
+exits 0 — a failed rebuild or POST never blocks the session. Sessions that
+end via clear or resume are skipped either way, since they are restarting,
+not finishing.
 
 ## 5. The runner
 
@@ -333,7 +341,8 @@ one real tick by hand.
 - `$LEGWORK_DIR/runner.log` is the audit trail of every tick: what fired,
   what was skipped and why, per-fire cost, and review verdicts.
 - `$LEGWORK_DIR/hook.log` records every SessionStart/SessionEnd hook firing
-  and skip, including the webhook POST result.
+  and skip, including the webhook POST result (or, with no webhook set, the
+  dashboard rebuild outcome).
 - `$LEGWORK_DIR/.runner-logs/` holds the timer's own stdout
   (`launchd.log` or `cron.log`) and per-session transcripts.
 - The slash commands not found in your own repos? They only ship inside this

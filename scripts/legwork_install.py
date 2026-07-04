@@ -17,11 +17,13 @@ install, the launchd/cron timer and the Claude hooks unless you opt in with
 
 The first question is the install level. Level 1 is the manual loop: it
 writes `config`, creates `projects/`, and offers the user-level command/skill
-copy; the timer and hook steps are never reached. Level 2 is the full flow.
-The written config records the choice (LEGWORK_LEVEL), so a re-run pre-fills
-it, and graduating is just re-running and picking level 2 in the same
-checkout. Headless, --lite pins level 1 and --with-launchd / --with-hooks pin
-level 2; a bare --yes on a fresh clone defaults to level 1.
+copy and the Claude hooks (webhook-less, the SessionEnd hook rebuilds the
+dashboard after every session); the timer step is never reached. Level 2 is
+the full flow. The written config records the choice (LEGWORK_LEVEL), so a
+re-run pre-fills it, and graduating is just re-running and picking level 2
+in the same checkout. Headless, --lite pins level 1 and --with-launchd pins
+level 2; --with-hooks carries no level signal (the hooks earn their keep at
+either level); a bare --yes on a fresh clone defaults to level 1.
 
 Level 2 walks one screen at a time: it asks for every value legwork can be
 configured with (the legwork dir, the daily fire and cost caps, the review
@@ -140,8 +142,8 @@ def render_config(v):
     w("# Real environment variables override anything set here. Values may use")
     w("# $HOME and ~, which are expanded. Lines are KEY=VALUE; # is a comment.")
     w("")
-    w("# The install level the wizard wrote: 1 is the manual loop (no runner,")
-    w("# timer or hooks), 2 is autonomy. Only read back by ./install.sh to")
+    w("# The install level the wizard wrote: 1 is the manual loop (no runner")
+    w("# or timer), 2 is autonomy. Only read back by ./install.sh to")
     w("# pre-fill this choice on a re-run; the runner ignores it.")
     w(f"LEGWORK_LEVEL={level}")
     w("")
@@ -739,21 +741,23 @@ def plan_forces(args, interactive):
 
 def plan_level(args, existing):
     """The install level a run should offer: 1 is the manual loop (config,
-    projects/ and the user-level commands; the timer and hook steps are never
-    reached), 2 is today's full flow. Returns (default_level, fixed): fixed
-    means a flag settled the answer and the wizard must not ask. --lite pins
-    level 1; --with-launchd / --with-hooks opt into level-2 steps, so they
-    pin level 2 (and contradict --lite, which raises ValueError). With no
-    flag, a re-run pre-fills the level the existing config recorded — a
-    config from before this fork existed came from the full flow, so it
+    projects/, the user-level commands and the webhook-less hooks; the timer
+    step is never reached), 2 is today's full flow. Returns (default_level,
+    fixed): fixed means a flag settled the answer and the wizard must not
+    ask. --lite pins level 1; --with-launchd opts into the level-2 timer, so
+    it pins level 2 (and contradicts --lite, which raises ValueError).
+    --with-hooks carries no level signal: the hooks earn their keep at either
+    level (review posts at level 2, dashboard rebuilds at level 1), so
+    --lite --with-hooks is a valid headless lite-with-hooks install. With no
+    pinning flag, a re-run pre-fills the level the existing config recorded
+    — a config from before this fork existed came from the full flow, so it
     reads as level 2 — and a fresh install defaults to level 1."""
-    wants_suite = args.with_launchd or args.with_hooks
-    if args.lite and wants_suite:
-        raise ValueError("--lite never reaches the timer or hook steps; "
-                         "drop --with-launchd/--with-hooks, or drop --lite")
+    if args.lite and args.with_launchd:
+        raise ValueError("--lite never reaches the timer step; "
+                         "drop --with-launchd, or drop --lite")
     if args.lite:
         return 1, True
-    if wants_suite:
+    if args.with_launchd:
         return 2, True
     if existing.get("LEGWORK_LEVEL", "").strip() == "1":
         return 1, False
@@ -868,7 +872,9 @@ def install_timer(wiz, values, force=None):
 
 def install_hooks(wiz, values, force=None):
     """Register the SessionStart/SessionEnd hooks in the relevant Claude
-    settings.json, asking first since it lives outside the repo. `force` (see
+    settings.json, asking first since it lives outside the repo. Offered at
+    both levels: with a webhook the SessionEnd hook posts review evidence,
+    without one it rebuilds the dashboard after every session. `force` (see
     _confirm) lets a non-interactive run skip it, or accept it with
     --with-hooks, without a prompt."""
     ui = wiz.ui
@@ -881,8 +887,12 @@ def install_hooks(wiz, values, force=None):
         base = Path.home() / ".claude"
     settings_path = base / "settings.json"
 
-    if not _confirm(wiz, force,
-            f"Register the review hooks in {settings_path}?"):
+    if int(values.get("level", 2)) == 1:
+        question = (f"Register the session hooks in {settings_path}? "
+                    "(SessionEnd rebuilds the dashboard after every session)")
+    else:
+        question = f"Register the review hooks in {settings_path}?"
+    if not _confirm(wiz, force, question):
         actions.append(ui.dim("skipped hooks (see SETUP.md step 4)"))
         return actions
 
@@ -984,8 +994,8 @@ def main(argv=None):
     parser.add_argument("--lite", action="store_true",
                         help="install level 1, the manual loop: write config, "
                              "create projects/ and offer the user-level "
-                             "commands; the timer and hook steps are never "
-                             "reached")
+                             "commands and the webhook-less hooks; the timer "
+                             "step is never reached")
     parser.add_argument("--with-commands", action="store_true",
                         help="copy the slash commands and skill into "
                              "user-level ~/.claude without prompting "
@@ -1046,8 +1056,8 @@ def main(argv=None):
             "Which level are you installing?",
             "Same checkout either way: re-run ./install.sh any time to "
             "change your answer.",
-            [(1, "Level 1, the manual loop - /add, /wrap, /pickup and the "
-                 "dashboard; no timer, no hooks"),
+            [(1, "Level 1, the manual loop - /add, /wrap, /pickup and a "
+                 "dashboard that rebuilds itself; no timer"),
              (2, "Level 2, autonomy    - the manual loop plus the runner "
                  "that fires queued prompts, and review")],
             default_index=default_level - 1)
@@ -1066,7 +1076,9 @@ def main(argv=None):
     actions += install_verbs(wiz, values, force=force_verbs)
     if level == 2:
         actions += install_timer(wiz, values, force=force_timer)
-        actions += install_hooks(wiz, values, force=force_hooks)
+    # Hooks are offered at both levels: without a webhook the SessionEnd
+    # hook rebuilds the dashboard, so level 1 gets something out of them.
+    actions += install_hooks(wiz, values, force=force_hooks)
 
     closing(ui, actions, level=level)
     if level == 2:

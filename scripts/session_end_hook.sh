@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # SessionEnd hook for Claude Code.
-# Gathers evidence about what the session changed and posts it to the
-# n8n review webhook. Fails quietly: a broken hook should never block work.
+# With LEGWORK_WEBHOOK_URL set: gathers evidence about what the session
+# changed and posts it to the n8n review webhook. Without it (a level 1 /
+# lite install, or a level 2 install using the local reviewer): rebuilds
+# the dashboard instead, so the queue page reflects what the session just
+# wrapped. Fails quietly either way: a broken hook should never block work.
 # Every invocation is logged to $LEGWORK_DIR/hook.log, including skips.
 #
-# Requires: LEGWORK_WEBHOOK_URL set in the environment.
 # Hook input arrives as JSON on stdin (session_id, cwd, reason, ...).
 # Reference: https://code.claude.com/docs/en/hooks
 
@@ -36,11 +38,6 @@ CWD="${HOOK_CWD:-}"
 [ -z "$CWD" ] && CWD="${CLAUDE_PROJECT_DIR:-$PWD}"
 REPO_NAME="$(basename "$CWD")"
 
-if [ -z "${LEGWORK_WEBHOOK_URL:-}" ]; then
-  log "$REPO_NAME  skipped: LEGWORK_WEBHOOK_URL not set"
-  exit 0
-fi
-
 # Sessions that ended via clear or resume are restarting, not finishing.
 case "$REASON" in
   clear|resume)
@@ -65,6 +62,22 @@ if [ -n "$SESSION_ID" ] && [ -f "$START_FILE" ]; then
   case "$MARKER" in
     *" "*) START_REPO="${MARKER#* }" ;;
   esac
+fi
+
+# No webhook means no reviewer to notify (a level 1 / lite install, or a
+# level 2 install using the local reviewer). Make the hook earn its keep
+# anyway: rebuild the dashboard so the queue page reflects whatever this
+# session's /wrap just wrote to the tracker. The marker above is still
+# consumed so .session-heads/ does not accumulate. Never log "sent:" here;
+# the runner matches that token to decide a review was delivered.
+if [ -z "${LEGWORK_WEBHOOK_URL:-}" ]; then
+  BUILDER="$LEGWORK_DIR/scripts/build_dashboard.py"
+  if [ -f "$BUILDER" ] && python3 "$BUILDER" >/dev/null 2>&1; then
+    log "$REPO_NAME  rebuilt dashboard: no webhook set, reason=${REASON:-manual}"
+  else
+    log "$REPO_NAME  skipped: no webhook set and the dashboard rebuild failed"
+  fi
+  exit 0
 fi
 
 WORK_DIR="$CWD"
