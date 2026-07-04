@@ -4,12 +4,9 @@
 
 legwork is a project queue for Claude Code that survives you walking away. Each project is one markdown file with a status, an append-only log, and a ready-to-run next prompt. You end a work session with `/wrap`, which records what happened and writes the prompt your next session should start from, while the context is still hot. Days later, `/pickup` briefs you back into the project in thirty seconds instead of twenty minutes of re-reading. A static dashboard shows the whole queue at a glance. And when a project has earned it, there is a level 2: a runner that fires those queued prompts as unattended Claude Code sessions, with an LLM reviewer that only interrupts you when a human decision is actually needed.
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/dashboard-dark.png" />
-  <img alt="The legwork dashboard: a queue ribbon, a needs-you zone, status-spined project cards, and a changelog timeline" src="docs/dashboard-light.png" />
-</picture>
+<img alt="The legwork dashboard: a queue ribbon, a needs-you zone, status-spined project cards, and a changelog timeline" src="docs/dashboard-light.png" />
 
-<sub>The dashboard is one static HTML file, rebuilt from your project files by a standard-library Python script. No server, no dependencies. Light and dark both ship in <code>docs/</code>; the image follows your GitHub theme.</sub>
+<sub>The dashboard is one static HTML file, rebuilt from your project files by a standard-library Python script. No server, no dependencies. Light is the default; a blackboard <a href="docs/dashboard-dark.png">dark theme</a> is one toggle away.</sub>
 
 ## The loop
 
