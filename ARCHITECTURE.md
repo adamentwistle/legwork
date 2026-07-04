@@ -68,7 +68,8 @@ id, so the end of the session can report only what this session changed.
 `scripts/session_end_hook.sh` gathers session-scoped git evidence (the diff and
 commits since the recorded HEAD) plus the project's tracker entry, and POSTs it
 to `LEGWORK_WEBHOOK_URL`. When `LEGWORK_WEBHOOK_URL` is unset the end hook
-logs a skip and does nothing else.
+rebuilds `dashboard/index.html` instead (and logs the outcome), so a
+webhook-less install still gets a queue page that stays fresh on its own.
 
 When the webhook is set, the optional review pipeline takes over. The reviewer
 (an LLM call in an n8n workflow) reads the evidence against the project's stated
@@ -154,8 +155,9 @@ HEAD, and assembles a payload: repo (resolved to the project file stem),
 branch, last commit, diff stat, session commits, uncommitted file names, the
 project's tracker entry, and optional test output from
 `<repo>/.legwork/last_test_output.txt`. It POSTs the payload to
-`LEGWORK_WEBHOOK_URL`. It is a no-op that logs a skip when
-`LEGWORK_WEBHOOK_URL` is unset, and skips sessions that ended via clear or
+`LEGWORK_WEBHOOK_URL`. When `LEGWORK_WEBHOOK_URL` is unset it rebuilds
+`dashboard/index.html` instead (quietly: a failed rebuild is logged and the
+hook still exits 0), and it skips sessions that ended via clear or
 resume. Every invocation is logged to `hook.log`. If a session ends without
 the hook firing (for example an account whose config carries no hooks), the
 runner posts the review request itself, so the loop closes either way.

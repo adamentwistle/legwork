@@ -1975,10 +1975,51 @@ class TestHooks(unittest.TestCase):
                          os.path.realpath(str(self.work)))
         self.assertFalse(stale.exists(), "stale marker should be pruned")
 
-    def test_end_skips_without_webhook_url(self):
+    def test_end_without_webhook_rebuilds_the_dashboard(self):
+        # The lite path: no webhook means no reviewer to notify, so the
+        # hook rebuilds the dashboard instead. Exercised with the real
+        # builder copied into the sandbox's scripts/, so the rebuild runs
+        # against sandbox projects and never the contributor's repo.
+        import shutil
+        scripts = SANDBOX / "scripts"
+        scripts.mkdir(exist_ok=True)
+        try:
+            for mod in ("build_dashboard.py", "legwork_common.py"):
+                shutil.copyfile(REPO / "scripts" / mod, scripts / mod)
+            out = SANDBOX / "dashboard" / "index.html"
+            self.run_hook(self.START,
+                          f'{{"session_id":"hk-lite","cwd":"{self.work}"}}')
+            self.run_hook(
+                self.END,
+                f'{{"session_id":"hk-lite","cwd":"{self.work}","reason":"exit"}}',
+                url=None)
+            tail = self.hook_log_tail()
+            self.assertIn("rebuilt dashboard", tail)
+            # The runner matches "sent:" to decide a review was delivered;
+            # the lite path must never emit it.
+            self.assertNotIn("sent:", tail)
+            self.assertTrue(out.exists(), "dashboard/index.html is rebuilt")
+            self.assertFalse(
+                (SANDBOX / ".session-heads" / "hk-lite").exists(),
+                "the lite path still consumes the session marker")
+        finally:
+            shutil.rmtree(scripts, ignore_errors=True)
+            shutil.rmtree(SANDBOX / "dashboard", ignore_errors=True)
+
+    def test_end_without_webhook_and_no_builder_fails_quietly(self):
+        # No webhook and no scripts/build_dashboard.py under LEGWORK_DIR
+        # (this sandbox): the rebuild cannot run, the hook logs the skip
+        # and still exits 0 -- a broken hook must never block work.
         payload = f'{{"session_id":"hk-2","cwd":"{self.work}","reason":"exit"}}'
+        result = self.run_hook(self.END, payload, url=None)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("dashboard rebuild failed", self.hook_log_tail())
+
+    def test_end_skips_on_clear_even_without_webhook(self):
+        # A clear/resume ending is a restart, not a finish: no rebuild.
+        payload = f'{{"session_id":"hk-3b","cwd":"{self.work}","reason":"clear"}}'
         self.run_hook(self.END, payload, url=None)
-        self.assertIn("LEGWORK_WEBHOOK_URL not set", self.hook_log_tail())
+        self.assertIn("skipped: reason=clear", self.hook_log_tail())
 
     def test_end_logs_sent_on_2xx(self):
         # The success path: a 2xx response logs "sent:", so the runner reads
@@ -2363,18 +2404,21 @@ class TestInstaller(unittest.TestCase):
                 f"args={ns} interactive={interactive}")
 
     def test_plan_level_truth_table(self):
-        # The level 1 / level 2 fork: --lite pins 1, the level-2 opt-in
-        # flags pin 2, a re-run pre-fills the recorded level (a pre-fork
-        # config reads as a full install), a fresh install defaults to the
-        # manual loop.
+        # The level 1 / level 2 fork: --lite pins 1, --with-launchd (the
+        # timer is autonomy) pins 2, --with-hooks carries no level signal
+        # (the hooks earn their keep at either level), a re-run pre-fills
+        # the recorded level (a pre-fork config reads as a full install),
+        # a fresh install defaults to the manual loop.
         args = self._args
         cases = [
             (args(), {}, (1, False)),                       # fresh: lite
             (args(yes=True), {}, (1, False)),               # bare --yes too
             (args(lite=True), {}, (1, True)),
             (args(with_launchd=True), {}, (2, True)),
-            (args(with_hooks=True), {}, (2, True)),
-            (args(yes=True, with_hooks=True), {}, (2, True)),
+            (args(with_hooks=True), {}, (1, False)),        # level-neutral
+            (args(yes=True, with_hooks=True), {}, (1, False)),
+            (args(lite=True, with_hooks=True), {}, (1, True)),
+            (args(with_hooks=True), {"LEGWORK_LEVEL": "2"}, (2, False)),
             (args(), {"LEGWORK_LEVEL": "1"}, (1, False)),   # re-run pre-fill
             (args(), {"LEGWORK_LEVEL": "2"}, (2, False)),
             (args(), {"LEGWORK_DIR": "/x"}, (2, False)),    # pre-fork config
@@ -2384,10 +2428,9 @@ class TestInstaller(unittest.TestCase):
             self.assertEqual(
                 legwork_install.plan_level(ns, existing), expected,
                 f"args={ns} existing={existing}")
-        for contradiction in (self._args(lite=True, with_launchd=True),
-                              self._args(lite=True, with_hooks=True)):
-            with self.assertRaises(ValueError):
-                legwork_install.plan_level(contradiction, {})
+        with self.assertRaises(ValueError):
+            legwork_install.plan_level(
+                self._args(lite=True, with_launchd=True), {})
 
     def test_render_config_level_1_is_lite_and_round_trips(self):
         cfg = legwork_install.render_config(
@@ -2473,17 +2516,18 @@ class TestInstaller(unittest.TestCase):
                 setattr(legwork_install, name, value)
         return rc, received
 
-    def test_main_lite_never_reaches_the_timer_or_hook_steps(self):
-        # --yes --lite: a level-1 config is written, the verbs step still
-        # runs (skipped without --with-commands), and the timer and hook
-        # steps are never called at all -- not merely forced to skip.
+    def test_main_lite_reaches_hooks_but_never_the_timer(self):
+        # --yes --lite: a level-1 config is written, the verbs and hook
+        # steps still run (both skipped headless without their --with-*
+        # flag), and the timer step is never called at all -- not merely
+        # forced to skip.
         rc, received = self._run_main_with_stubbed_steps(
             ["--yes", "--lite", "--no-color"])
         self.assertEqual(rc, 0)
         self.assertEqual(received["write_repo_files"]["level"], 1)
         self.assertEqual(received["install_verbs"], False)
+        self.assertEqual(received["install_hooks"], False)
         self.assertNotIn("install_timer", received)
-        self.assertNotIn("install_hooks", received)
 
     def test_main_bare_yes_on_a_fresh_clone_defaults_to_level_1(self):
         rc, received = self._run_main_with_stubbed_steps(
@@ -2505,20 +2549,34 @@ class TestInstaller(unittest.TestCase):
         self.assertEqual(received["install_timer"], False)
         self.assertEqual(received["install_hooks"], False)
 
-    def test_main_lite_with_hooks_is_refused(self):
+    def test_main_lite_with_hooks_installs_the_lite_hooks(self):
+        # --lite --with-hooks used to be a contradiction; with the
+        # webhook-less hooks it is the headless lite-with-hooks install:
+        # level 1, the hook step forced on, the timer never reached.
+        rc, received = self._run_main_with_stubbed_steps(
+            ["--yes", "--lite", "--with-hooks", "--no-color"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(received["write_repo_files"]["level"], 1)
+        self.assertEqual(received["install_hooks"], True)
+        self.assertNotIn("install_timer", received)
+
+    def test_main_lite_with_launchd_is_refused(self):
         repo = Path(tempfile.mkdtemp(dir=str(TMP)))
         rc, received = self._run_main_with_stubbed_steps(
-            ["--yes", "--lite", "--with-hooks", "--no-color"], repo=repo)
+            ["--yes", "--lite", "--with-launchd", "--no-color"], repo=repo)
         self.assertEqual(rc, 2)
         self.assertEqual(received, {}, "nothing ran, nothing was written")
 
     def test_main_yes_wires_the_skip_forces_into_the_steps(self):
-        # main(["--yes", "--with-hooks"]) end to end with the side-effect
-        # steps stubbed: the two un-flagged steps receive force=False, the
-        # flagged one True (--with-hooks also pins level 2), and the run
+        # main(["--yes", "--with-hooks"]) over a recorded level-2 config,
+        # end to end with the side-effect steps stubbed: the two un-flagged
+        # steps receive force=False, the flagged one True, and the run
         # exits 0.
+        repo = Path(tempfile.mkdtemp(dir=str(TMP)))
+        (repo / "config").write_text(
+            "LEGWORK_LEVEL=2\nLEGWORK_DIR=/srv/legwork\n", encoding="utf-8")
         rc, received = self._run_main_with_stubbed_steps(
-            ["--yes", "--with-hooks", "--no-color"])
+            ["--yes", "--with-hooks", "--no-color"], repo=repo)
         self.assertEqual(rc, 0)
         self.assertEqual(received["write_repo_files"]["level"], 2)
         self.assertEqual(
@@ -2526,6 +2584,16 @@ class TestInstaller(unittest.TestCase):
              ("install_verbs", "install_timer", "install_hooks")},
             {"install_verbs": False, "install_timer": False,
              "install_hooks": True})
+
+    def test_main_yes_with_hooks_on_a_fresh_clone_is_lite_with_hooks(self):
+        # --with-hooks no longer drags a fresh install to level 2: a bare
+        # --yes --with-hooks is the one-line lite-with-hooks install.
+        rc, received = self._run_main_with_stubbed_steps(
+            ["--yes", "--with-hooks", "--no-color"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(received["write_repo_files"]["level"], 1)
+        self.assertEqual(received["install_hooks"], True)
+        self.assertNotIn("install_timer", received)
 
     def test_main_without_tty_or_yes_refuses(self):
         import contextlib
