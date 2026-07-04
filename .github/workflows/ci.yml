@@ -13,26 +13,31 @@ concurrency:
 permissions:
   contents: read
 
+# Actions are pinned to full commit SHAs (the trailing comment names the
+# release), so a moved or compromised tag cannot change what runs here.
+
 jobs:
   # The gate. Dependency-free, no secrets, no network: just the stdlib suite
   # across the supported Python range. Keep it green.
   tests:
     name: tests (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.9", "3.12"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: ${{ matrix.python-version }}
 
-      # The suite shells out to git (hooks, the runner's commits). A fresh
-      # runner has no global identity or default branch, so set the same ones
-      # a dev box already carries. No network, no secrets.
+      # Belt and braces: the suite seals itself against the host git config
+      # (GIT_CONFIG_GLOBAL=/dev/null and its own inline identities), but a
+      # sane global identity and default branch keep any future test that
+      # forgets the seal from failing only on a fresh runner.
       - name: Configure git
         run: |
           git config --global user.email "ci@legwork.invalid"
@@ -42,16 +47,43 @@ jobs:
       - name: Run the stdlib test suite
         run: python3 -m unittest discover -s tests
 
+  # Cheap blocking syntax checks for everything the Python suite cannot
+  # import: the n8n workflow JSONs, the bash installer + hooks, and the
+  # reviewer build node. Seconds to run, and a truncated JSON or an
+  # unparseable hook should gate, not advise.
+  syntax:
+    name: syntax (json, bash, node)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Parse the n8n workflow JSONs
+        run: |
+          python3 -m json.tool alerts/n8n-alerts-workflow.json > /dev/null
+          python3 -m json.tool reply-capture/n8n-reply-capture-workflow.json > /dev/null
+          python3 -m json.tool reviewer/n8n-review-workflow.json > /dev/null
+
+      - name: Bash syntax (installer + hooks)
+        run: |
+          bash -n install.sh
+          bash -n scripts/session_start_hook.sh
+          bash -n scripts/session_end_hook.sh
+
+      - name: Node syntax (reviewer build node)
+        run: node --check reviewer/n8n-build-node.js
+
   # Dev-only, advisory. continue-on-error keeps it off the critical path: it
   # surfaces lint and byte-compile signal without ever blocking the gate above.
   quality:
     name: quality (advisory)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
 
