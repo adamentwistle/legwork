@@ -81,6 +81,12 @@ config stays in one mental place, but you set them where they are read.
   runner from cron instead, the interval is your crontab schedule, not this
   key.
 
+- `LEGWORK_LEVEL` and `LEGWORK_TICK_MINUTES` are written by `./install.sh`
+  and only read back by it, to pre-fill the level question (1 is the manual
+  loop, 2 is autonomy) and the tick-interval question on a re-run. The
+  runner ignores both; the live tick cadence is whatever the launchd agent
+  or crontab line was installed with (the bullet above).
+
 ## The optional pipeline
 
 The review pipeline is optional. With neither `LEGWORK_WEBHOOK_URL` nor

@@ -17,24 +17,35 @@ Most people should just run the wizard. From the cloned repo:
 ```
 
 `./install.sh` is a thin wrapper around `scripts/legwork_install.py`, a
-standard-library-only interactive installer. It walks the same ground as
-steps 1 through 5 below: it prompts for every config value, writes `config`,
-creates `projects/` and `.runner-logs/`, copies the slash commands and the
-legwork-tracker skill into user-level `~/.claude`, installs and loads the
-launchd agent (macOS) or a crontab line (Linux), and registers the
-SessionStart/SessionEnd hooks in your Claude `settings.json`. It asks before
-every action that touches anything outside the repo, so you can decline any
-piece and do it by hand.
+standard-library-only interactive installer. Its first question is the
+install level, and the answer decides how much of this guide it walks:
+
+- **Level 1, the manual loop** (the default on a fresh clone) covers steps 1
+  and 2: it asks where the repo lives, writes `config`, creates `projects/`,
+  and offers to copy the slash commands and the legwork-tracker skill into
+  user-level `~/.claude`. The timer and hook steps are never reached, so
+  nothing runs in the background.
+- **Level 2, autonomy** walks the same ground as steps 1 through 5: every
+  config value (caps, review pipeline, tick interval), `.runner-logs/`, the
+  launchd agent (macOS) or crontab line (Linux), and the
+  SessionStart/SessionEnd hooks in your Claude `settings.json`.
+
+Either way it asks before every action that touches anything outside the
+repo, so you can decline any piece and do it by hand. The written `config`
+records the level (`LEGWORK_LEVEL`), so graduating from level 1 is just
+re-running `./install.sh` in the same checkout and picking level 2.
 
 Flags: `--yes` accepts every default without prompting, but the steps that
 touch things outside the repo (the user-level command install, the
 launchd/cron timer and the Claude hooks) are skipped unless you add
 `--with-commands`, `--with-launchd` or `--with-hooks`, so a headless `--yes`
 install never writes to `~/.claude`, loads a launchd agent or edits your
-`settings.json` behind your back. `--no-color` prints plainly. Re-running is
-safe: it reads your existing `config` to pre-fill the prompts, refreshes the
-command copies, and never duplicates a launchd agent, crontab line or hook
-entry.
+`settings.json` behind your back. `--lite` pins level 1 without asking;
+`--with-launchd` and `--with-hooks` pin level 2 (and clash with `--lite`).
+`--no-color` prints plainly. Re-running is safe: it reads your existing
+`config` to pre-fill the prompts (including the level; a config from before
+the level question reads as level 2), refreshes the command copies, and
+never duplicates a launchd agent, crontab line or hook entry.
 
 The rest of this guide is the manual path. Follow it if you skipped a piece of
 the wizard, want to understand exactly what it did, or are wiring the optional

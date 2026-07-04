@@ -6,6 +6,7 @@ normally through the wrapper:
 
     ./install.sh                 the visual wizard
     python3 scripts/legwork_install.py        same thing, directly
+    python3 scripts/legwork_install.py --lite level 1, the manual loop only
     python3 scripts/legwork_install.py --yes  accept every default, no prompts
     python3 scripts/legwork_install.py --no-color   plain output
 
@@ -14,7 +15,15 @@ writes config and creates the repo dirs, but skips the user-level command
 install, the launchd/cron timer and the Claude hooks unless you opt in with
 --with-commands / --with-launchd / --with-hooks.
 
-It walks one screen at a time: it asks for every value legwork can be
+The first question is the install level. Level 1 is the manual loop: it
+writes `config`, creates `projects/`, and offers the user-level command/skill
+copy; the timer and hook steps are never reached. Level 2 is the full flow.
+The written config records the choice (LEGWORK_LEVEL), so a re-run pre-fills
+it, and graduating is just re-running and picking level 2 in the same
+checkout. Headless, --lite pins level 1 and --with-launchd / --with-hooks pin
+level 2; a bare --yes on a fresh clone defaults to level 1.
+
+Level 2 walks one screen at a time: it asks for every value legwork can be
 configured with (the legwork dir, the daily fire and cost caps, the review
 mode and reviewer model, an optional dedicated Claude config dir, the tick
 interval), shows you the config it will write, then offers to activate the
@@ -118,7 +127,10 @@ CRON_MARKER = "# legwork runner"
 def render_config(v):
     """Render a `config` file from a values dict. Only the lines that matter
     for the chosen review mode are left active; the rest stay as commented
-    guidance, so the file documents itself and mirrors config.example."""
+    guidance, so the file documents itself and mirrors config.example. A
+    level-1 install (`v['level'] == 1`, the manual loop) stops after
+    LEGWORK_DIR: none of the runner values were asked, so none are written."""
+    level = int(v.get("level", 2))
     out = []
     w = out.append
     w("# Legwork configuration. Written by scripts/legwork_install.py.")
@@ -128,10 +140,22 @@ def render_config(v):
     w("# Real environment variables override anything set here. Values may use")
     w("# $HOME and ~, which are expanded. Lines are KEY=VALUE; # is a comment.")
     w("")
+    w("# The install level the wizard wrote: 1 is the manual loop (no runner,")
+    w("# timer or hooks), 2 is autonomy. Only read back by ./install.sh to")
+    w("# pre-fill this choice on a re-run; the runner ignores it.")
+    w(f"LEGWORK_LEVEL={level}")
+    w("")
     w("# Where the legwork repo lives: projects/, runner.log, the dashboard")
     w("# and runner state all sit under here.")
     w(f"LEGWORK_DIR={v['legwork_dir']}")
     w("")
+    if level == 1:
+        w("# Level 1 stops here: the queue, the slash commands and the")
+        w("# dashboard need nothing else. Re-run ./install.sh and pick")
+        w("# level 2 to configure the runner, the review pipeline and the")
+        w("# timer. See SETUP.md.")
+        w("")
+        return "\n".join(out) + "\n"
     w("# Autonomous fires per project per calendar day.")
     w(f"LEGWORK_DAILY_CAP={v['daily_cap']}")
     w("")
@@ -554,18 +578,23 @@ def detect_python():
     return found or sys.executable
 
 
-def collect_values(wiz, existing):
+def collect_values(wiz, existing, level=2):
     """Walk every configurable variable. `existing` pre-fills defaults from a
-    previously written config so a re-run keeps your answers."""
+    previously written config so a re-run keeps your answers. A level-1
+    install only needs the legwork dir: every other value configures the
+    runner, which level 1 does not have."""
     ui = wiz.ui
 
-    print(progress(ui, 1, 5, "Where legwork lives"))
+    total = 1 if level == 1 else 5
+    print(progress(ui, 1, total, "Where legwork lives"))
     legwork_dir = wiz.ask(
         "Legwork directory",
         "Holds projects/, runner.log, the dashboard and runner state. "
         "This checkout is the natural home.",
         default=existing.get("LEGWORK_DIR", str(REPO)),
         validate=validate_dir)
+    if level == 1:
+        return {"level": 1, "legwork_dir": legwork_dir}
 
     print(progress(ui, 2, 5, "Firing limits"))
     daily_cap = wiz.ask(
@@ -630,6 +659,7 @@ def collect_values(wiz, existing):
         validate=validate_minutes)
 
     return {
+        "level": 2,
         "legwork_dir": legwork_dir,
         "daily_cap": daily_cap,
         "daily_cost_cap": daily_cost_cap,
@@ -657,8 +687,10 @@ def review_screen(ui, config_text):
 
 
 def write_repo_files(values):
-    """Write `config`, and create projects/ and .runner-logs/. Returns the
-    list of human-readable actions taken, for the closing summary."""
+    """Write `config`, and create projects/ and .runner-logs/. A level-1
+    install skips .runner-logs/: it holds fired-session transcripts, and
+    level 1 has no runner to fire them. Returns the list of human-readable
+    actions taken, for the closing summary."""
     actions = []
     legwork_dir = Path(os.path.expanduser(os.path.expandvars(
         values["legwork_dir"])))
@@ -667,7 +699,9 @@ def write_repo_files(values):
     config_path.write_text(config_text, encoding="utf-8")
     actions.append(f"wrote {config_path}")
 
-    for sub in ("projects", ".runner-logs"):
+    subs = ("projects",) if int(values.get("level", 2)) == 1 \
+        else ("projects", ".runner-logs")
+    for sub in subs:
         target = legwork_dir / sub
         created = not target.exists()
         target.mkdir(parents=True, exist_ok=True)
@@ -701,6 +735,31 @@ def plan_forces(args, interactive):
 
     return (force(args.with_commands), force(args.with_launchd),
             force(args.with_hooks))
+
+
+def plan_level(args, existing):
+    """The install level a run should offer: 1 is the manual loop (config,
+    projects/ and the user-level commands; the timer and hook steps are never
+    reached), 2 is today's full flow. Returns (default_level, fixed): fixed
+    means a flag settled the answer and the wizard must not ask. --lite pins
+    level 1; --with-launchd / --with-hooks opt into level-2 steps, so they
+    pin level 2 (and contradict --lite, which raises ValueError). With no
+    flag, a re-run pre-fills the level the existing config recorded — a
+    config from before this fork existed came from the full flow, so it
+    reads as level 2 — and a fresh install defaults to level 1."""
+    wants_suite = args.with_launchd or args.with_hooks
+    if args.lite and wants_suite:
+        raise ValueError("--lite never reaches the timer or hook steps; "
+                         "drop --with-launchd/--with-hooks, or drop --lite")
+    if args.lite:
+        return 1, True
+    if wants_suite:
+        return 2, True
+    if existing.get("LEGWORK_LEVEL", "").strip() == "1":
+        return 1, False
+    if existing:
+        return 2, False
+    return 1, False
 
 
 def install_verbs(wiz, values, force=None):
@@ -859,7 +918,7 @@ def install_hooks(wiz, values, force=None):
     return actions
 
 
-def closing(ui, actions):
+def closing(ui, actions, level=2):
     print("\n" + ui.good(ui.box["tl"] + ui.box["h"] * 58 + ui.box["tr"]))
     title = f"{ui.spark} legwork is installed"
     print(ui.good(ui.box["v"]) + "  " + ui.bold(title).ljust(
@@ -872,9 +931,16 @@ def closing(ui, actions):
     print("  " + ui.bold("Next:"))
     print("  " + ui.dim(f"{ui.arrow} add a project with /add, close a "
                         "session with /wrap"))
-    print("  " + ui.dim(f"{ui.arrow} grant autonomy per project with /vision"))
-    print("  " + ui.dim(f"{ui.arrow} verify: python3 scripts/legwork_runner.py "
-                        "--doctor"))
+    if level == 1:
+        print("  " + ui.dim(f"{ui.arrow} build the dashboard: python3 "
+                            "scripts/build_dashboard.py"))
+        print("  " + ui.dim(f"{ui.arrow} ready for autonomy? re-run "
+                            "./install.sh and pick level 2"))
+    else:
+        print("  " + ui.dim(f"{ui.arrow} grant autonomy per project with "
+                            "/vision"))
+        print("  " + ui.dim(f"{ui.arrow} verify: python3 "
+                            "scripts/legwork_runner.py --doctor"))
     print()
 
 
@@ -915,6 +981,11 @@ def main(argv=None):
                              "--with-launchd / --with-hooks")
     parser.add_argument("--no-color", action="store_true",
                         help="plain output, no ANSI color")
+    parser.add_argument("--lite", action="store_true",
+                        help="install level 1, the manual loop: write config, "
+                             "create projects/ and offer the user-level "
+                             "commands; the timer and hook steps are never "
+                             "reached")
     parser.add_argument("--with-commands", action="store_true",
                         help="copy the slash commands and skill into "
                              "user-level ~/.claude without prompting "
@@ -943,12 +1014,20 @@ def main(argv=None):
     # opts in. Interactive runs still ask (force=None).
     force_verbs, force_timer, force_hooks = plan_forces(args, interactive)
 
-    print(masthead(ui))
-
     existing = {}
     config_path = REPO / "config"
     if config_path.exists():
         existing = parse_config_text(config_path.read_text(encoding="utf-8"))
+
+    try:
+        default_level, level_fixed = plan_level(args, existing)
+    except ValueError as err:
+        print(f"legwork install: {err}", file=sys.stderr)
+        return 2
+
+    print(masthead(ui))
+
+    if config_path.exists():
         print("\n  " + ui.dim(
             f"{ui.spark} found an existing config; its values pre-fill below."))
 
@@ -957,7 +1036,23 @@ def main(argv=None):
             f"{ui.warn} the `claude` CLI is not on PATH. The runner shells out "
             "to it; install it before the timer fires."))
 
-    values = collect_values(wiz, existing)
+    if level_fixed:
+        level = default_level
+        what = "the manual loop" if level == 1 else "autonomy"
+        print("\n  " + ui.dim(
+            f"{ui.spark} installing level {level} ({what}), set by the flags."))
+    else:
+        level = wiz.ask_choice(
+            "Which level are you installing?",
+            "Same checkout either way: re-run ./install.sh any time to "
+            "change your answer.",
+            [(1, "Level 1, the manual loop - /add, /wrap, /pickup and the "
+                 "dashboard; no timer, no hooks"),
+             (2, "Level 2, autonomy    - the manual loop plus the runner "
+                 "that fires queued prompts, and review")],
+            default_index=default_level - 1)
+
+    values = collect_values(wiz, existing, level=level)
     values["python_bin"] = detect_python()
 
     config_text = render_config(values)
@@ -969,11 +1064,13 @@ def main(argv=None):
     actions = []
     actions += write_repo_files(values)
     actions += install_verbs(wiz, values, force=force_verbs)
-    actions += install_timer(wiz, values, force=force_timer)
-    actions += install_hooks(wiz, values, force=force_hooks)
+    if level == 2:
+        actions += install_timer(wiz, values, force=force_timer)
+        actions += install_hooks(wiz, values, force=force_hooks)
 
-    closing(ui, actions)
-    run_doctor(wiz)
+    closing(ui, actions, level=level)
+    if level == 2:
+        run_doctor(wiz)
     return 0
 
 

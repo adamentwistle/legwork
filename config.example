@@ -8,6 +8,11 @@
 #
 # You can also point the runner at a config elsewhere with LEGWORK_CONFIG=/path.
 
+# The install level ./install.sh recorded: 1 is the manual loop (no runner,
+# timer or hooks), 2 is autonomy. Only read back by the installer to pre-fill
+# the choice on a re-run; the runner ignores it.
+# LEGWORK_LEVEL=2
+
 # Where the legwork repo lives. Default: $HOME/legwork.
 LEGWORK_DIR=$HOME/legwork
 
