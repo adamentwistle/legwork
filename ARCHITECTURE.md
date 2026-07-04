@@ -403,15 +403,18 @@ pieces rely on.
 - The runner audits its own control plane. Any commit in a session window that
   touches the legwork repo outside `projects/` and `dashboard/` raises an
   alert.
-- Self-modification of the control plane is blocked locally at the tool layer.
-  The runner passes `--settings` deny rules on `scripts/**`, `reviewer/**`,
-  `reply-capture/**`, `alerts/**`, and the hook scripts under `LEGWORK_DIR`, so
-  a worker session cannot rewrite the runner, hooks, or reviewer regardless of
-  any webhook, and `audit_session_window()` records any control-plane touch in
-  `runner.log` after the fact. When the optional reviewer is wired, it
-  additionally escalates self-modification: a diff of the legwork repo that
-  touches its hooks, reviewer rubric, n8n workflow, or dashboard build script
-  is escalate regardless of confidence.
+- Self-modification of the control plane is resisted at the tool layer. The
+  runner passes `--settings` deny rules on `scripts/**`, `reviewer/**`,
+  `reply-capture/**` and `alerts/**` under `LEGWORK_DIR` (the hook scripts
+  live in `scripts/`), blocking the Edit, Write and MultiEdit tools on those
+  paths regardless of any webhook. The deny does not cover Bash, so a
+  git-mediated write remains possible; `audit_session_window()` is the
+  detection layer, recording any committed control-plane touch in
+  `runner.log` after the fact (SECURITY.md spells out the boundary). When
+  the optional reviewer is wired, it additionally escalates
+  self-modification: a diff of the legwork repo that touches its hooks,
+  reviewer rubric, n8n workflow, or dashboard build script is escalate
+  regardless of confidence.
 
 ## Design choices
 

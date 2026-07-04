@@ -100,7 +100,25 @@ review and running flip to queued.
 
 ## One time setup
 
-### 1. Create the GitHub PAT (human only)
+The committed workflow references three n8n credentials through
+`REPLACE_WITH_` placeholder ids: the Telegram bot (`LegworkTG`), the GitHub
+write-back token (`GitHub legwork contents`), and the Anthropic API key
+(`Anthropic`). None of them ship in the repo and none exist on your n8n
+instance until you create them, so every node shows a missing credential
+after import. Create all three, attach them, and restrict the trigger to
+your own Telegram user id before activating.
+
+### 1. Create the Telegram bot and its credential
+
+- In Telegram, message @BotFather, send `/newbot`, and follow the prompts
+  to get a bot token.
+- In n8n, create a credential of type "Telegram API" named `LegworkTG` and
+  paste the token in.
+- If you already created `LegworkTG` for the review or alert pipelines,
+  reuse it: one bot serves all three. (But see the caveat under Activate:
+  only one workflow may hold a Telegram Trigger on a given bot.)
+
+### 2. Create the GitHub PAT (human only)
 
 The write-back token never lives in this repo. Create a GitHub fine-grained
 personal access token:
@@ -110,7 +128,7 @@ personal access token:
 - Repository permissions: Contents -> Read and write. Nothing else.
 - Expiration: your call. Set a reminder to rotate it.
 
-### 2. Store it as an n8n credential
+### 3. Store it as an n8n credential
 
 In n8n, create a credential of type "Header Auth":
 
@@ -118,13 +136,43 @@ In n8n, create a credential of type "Header Auth":
 - Header Name: `Authorization`
 - Header Value: `Bearer <the PAT you just created>`
 
-### 3. Attach it to the two GitHub nodes
+### 4. Create the Anthropic credential
 
-Open the "Legwork reply capture" workflow and set the credential on both
-"GitHub get file" and "GitHub put file" to `GitHub legwork contents`. The
-Telegram (LegworkTG) and Anthropic credentials are already attached.
+The two minter nodes call the Anthropic Messages API directly over HTTP, so
+the key is stored the same way:
 
-### 4. Activate
+- Name: `Anthropic`
+- Type: "Header Auth"
+- Header Name: `x-api-key`
+- Header Value: your Anthropic API key (from console.anthropic.com). The
+  `anthropic-version` header is already set on the nodes themselves.
+
+### 5. Attach the credentials
+
+Open the imported "Legwork reply capture" workflow and set the matching
+credential on every node that needs one:
+
+- `LegworkTG` on the "Reply trigger" and each Telegram reply node.
+- `GitHub legwork contents` on every GitHub Contents API node: "GitHub get
+  file", "GitHub put file", "List projects", "Get each project", "Cmd get
+  file", "Cmd put file", "Get pause flag", "Pause create", "Pause delete".
+- `Anthropic` on "Call minter" and "Cmd call minter".
+
+### 6. Restrict the trigger to your Telegram user id
+
+The trigger fires on any message anyone sends the bot: nothing in the
+workflow checks who the sender is, and the command branch reaches the
+GitHub write-back, so without this step anyone who learns the bot's handle
+can mint prompts and queue sessions on your repo (SECURITY.md covers why).
+Treat it as required, not optional:
+
+- Find your numeric Telegram user id: message @userinfobot, or read
+  `message.from.id` off any execution of the trigger in n8n.
+- Open the "Reply trigger" node, add the additional field "Restrict to
+  User IDs", and enter your id. The trigger then drops messages from
+  anyone else before the workflow runs.
+
+### 7. Activate
 
 Toggle the workflow Off then On in the n8n UI. This instance registers the
 trigger route only on UI activation: a REST API activate sets active=true in

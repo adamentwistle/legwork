@@ -278,8 +278,9 @@ After import:
    `LEGWORK_WEBHOOK_URL` is the review post the SessionEnd hook and the runner
    send to. `LEGWORK_ALERT_URL` receives stall alerts and the heartbeat.
 
-For the Telegram side (the GitHub fine-grained PAT, the n8n credential, and
-activating the trigger), follow `reply-capture/SETUP.md`. The write-back token
+For the Telegram side (the bot and its credential, the GitHub fine-grained
+PAT, the Anthropic key, restricting the trigger to your own Telegram user
+id, and activating), follow `reply-capture/SETUP.md`. The write-back token
 is a fine-grained, repo-scoped PAT held only as an n8n credential, never in
 the repo.
 
