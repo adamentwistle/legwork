@@ -685,6 +685,24 @@ def _confirm(wiz, force, question, default=True):
     return wiz.ask_yn(question, default=default)
 
 
+def plan_forces(args, interactive):
+    """The `force` decision (see _confirm) for the three steps that touch
+    state outside the repo: the user-level command/skill copies, the
+    launchd/cron timer and the Claude hooks. An explicit --with-* flag opts
+    its step in without a prompt; any other non-interactive run (--yes or a
+    piped stdin) skips the step; an interactive run without the flag asks
+    (None). Returns (force_verbs, force_timer, force_hooks)."""
+    assume_yes = args.yes or not interactive
+
+    def force(opted_in):
+        if opted_in:
+            return True
+        return False if assume_yes else None
+
+    return (force(args.with_commands), force(args.with_launchd),
+            force(args.with_hooks))
+
+
 def install_verbs(wiz, values, force=None):
     """Copy the slash commands and the legwork-tracker skill into user-level
     `~/.claude`, so /add, /wrap, /pickup, /vision, /log and /shelve work from
@@ -923,10 +941,7 @@ def main(argv=None):
     # state outside the repo, so a non-interactive run must not perform them
     # silently: under --yes they are skipped unless the matching --with-* flag
     # opts in. Interactive runs still ask (force=None).
-    force_verbs = (True if args.with_commands
-                   else (False if assume_yes else None))
-    force_timer = True if args.with_launchd else (False if assume_yes else None)
-    force_hooks = True if args.with_hooks else (False if assume_yes else None)
+    force_verbs, force_timer, force_hooks = plan_forces(args, interactive)
 
     print(masthead(ui))
 

@@ -24,7 +24,19 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 TMP = Path(tempfile.mkdtemp(prefix="legwork-test-"))
 SANDBOX = TMP / "legwork"
+
+# Seal the sandbox before the imports below read the environment. The
+# contributor's real legwork config must not leak into the suite
+# (legwork_runner.load_config() runs at import; /dev/null reads clean, which
+# also stops the fallback to the repo's own gitignored `config`), and their
+# global/system git config must not leak into the throwaway repos or the
+# hook subprocesses, which inherit os.environ.
+for _key in [k for k in os.environ if k.startswith("LEGWORK_")]:
+    del os.environ[_key]
 os.environ["LEGWORK_DIR"] = str(SANDBOX)
+os.environ["LEGWORK_CONFIG"] = os.devnull
+os.environ["GIT_CONFIG_GLOBAL"] = os.devnull
+os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
 sys.path.insert(0, str(REPO / "scripts"))
 
 import build_dashboard  # noqa: E402
@@ -32,15 +44,84 @@ import legwork_install  # noqa: E402
 import legwork_review  # noqa: E402
 import legwork_runner  # noqa: E402
 
-(SANDBOX / "projects").mkdir(parents=True)
+# The guard settings file normally lives in the system temp dir; point it
+# into the suite's own TMP so no test can leave a legwork-runner-guard.json
+# behind on the contributor's machine (tearDownModule removes all of TMP).
+legwork_runner.GUARD_SETTINGS = TMP / "legwork-runner-guard.json"
 
 GIT_ID = ["-c", "user.email=test@test", "-c", "user.name=test"]
+
+
+def _init_sandbox_repo():
+    """Make the sandbox legwork dir a real git clone with a bare origin
+    standing in for the GitHub remote. Runs at import, not in any class's
+    setUpClass, so no test depends on another class having run first."""
+    origin = TMP / "legwork-origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main",
+                    str(origin)], check=True)
+    (SANDBOX / "projects").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=SANDBOX,
+                   check=True)
+    subprocess.run(["git", "config", "user.email", "test@test"],
+                   cwd=SANDBOX, check=True)
+    subprocess.run(["git", "config", "user.name", "test"], cwd=SANDBOX,
+                   check=True)
+    subprocess.run(["git", "remote", "add", "origin", str(origin)],
+                   cwd=SANDBOX, check=True)
+    # Mirror the real repo's ignores: runtime files must stay untracked
+    # or their churn would read as uncommitted tracked changes and
+    # block ticks mid-suite.
+    (SANDBOX / ".gitignore").write_text(
+        "runner.log\n.runner-state.json\nhook.log\n.session-heads/\n",
+        encoding="utf-8")
+    return origin
+
+
+ORIGIN = _init_sandbox_repo()
+
+
+def commit_and_push(message):
+    subprocess.run(["git", "add", "-A"], cwd=SANDBOX, check=True)
+    subprocess.run(["git", *GIT_ID, "commit", "-q", "--allow-empty",
+                    "-m", message], cwd=SANDBOX, check=True)
+    subprocess.run(["git", "push", "-q", "-u", "origin", "main"],
+                   cwd=SANDBOX, check=True)
+
+
+def remote_commit(relpath, content, message):
+    """Move the origin from a second clone, the way the n8n Contents
+    API or a parallel session's wrap moves the real remote."""
+    clone = Path(tempfile.mkdtemp(prefix="clone-", dir=str(TMP)))
+    subprocess.run(["git", "clone", "-q", str(ORIGIN), str(clone)],
+                   check=True)
+    target = clone / relpath
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=clone, check=True)
+    subprocess.run(["git", *GIT_ID, "commit", "-q", "-m", message],
+                   cwd=clone, check=True)
+    subprocess.run(["git", "push", "-q"], cwd=clone, check=True)
+
+
+def origin_file(relpath):
+    return subprocess.run(
+        ["git", "show", f"main:{relpath}"], cwd=ORIGIN,
+        capture_output=True, text=True).stdout
+
+
+def origin_subjects():
+    return subprocess.run(
+        ["git", "log", "--format=%s", "main"], cwd=ORIGIN,
+        capture_output=True, text=True).stdout
+
+
+commit_and_push("init sandbox")
 
 
 def make_git_repo(name):
     path = TMP / name
     path.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=path, check=True)
     return path
 
 
@@ -70,6 +151,10 @@ def write_project(fname, status="queued", autonomy="loop", vision=True,
     for entry in (log_lines or [f"- {updated}: created for tests."]):
         lines.append(entry)
     path = SANDBOX / "projects" / fname
+    # git removes a directory that loses its last tracked file (e.g. a
+    # reset rolling back a commit), so recreate it rather than depend on
+    # what earlier tests left behind.
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
 
@@ -276,7 +361,7 @@ class TestAssess(unittest.TestCase):
             self.assertFalse(ok)
             self.assertIn("daily cap", reason)
         finally:
-            legwork_runner.RUNNER_LOG.unlink()
+            legwork_runner.RUNNER_LOG.unlink(missing_ok=True)
 
     def test_fires_today_ignores_other_days(self):
         with open(legwork_runner.RUNNER_LOG, "w", encoding="utf-8") as fh:
@@ -284,7 +369,7 @@ class TestAssess(unittest.TestCase):
         try:
             self.assertEqual(legwork_runner.fires_today("t-old.md"), 0)
         finally:
-            legwork_runner.RUNNER_LOG.unlink()
+            legwork_runner.RUNNER_LOG.unlink(missing_ok=True)
 
 
 class TestTransientCrash(unittest.TestCase):
@@ -475,7 +560,7 @@ class TestHelpers(unittest.TestCase):
         try:
             self.assertEqual(legwork_runner.load_state(), {"k": "v"})
         finally:
-            legwork_runner.STATE_FILE.unlink()
+            legwork_runner.STATE_FILE.unlink(missing_ok=True)
 
     def test_porcelain_path(self):
         self.assertEqual(
@@ -523,7 +608,7 @@ class TestAuditedFixes(unittest.TestCase):
             self.assertEqual(legwork_runner.fires_today("foo.md"), 1)
             self.assertEqual(legwork_runner.fires_today("foo-bar.md"), 1)
         finally:
-            legwork_runner.RUNNER_LOG.unlink()
+            legwork_runner.RUNNER_LOG.unlink(missing_ok=True)
 
     def test_cost_today_sums_today_only(self):
         today = date.today().isoformat()
@@ -538,7 +623,7 @@ class TestAuditedFixes(unittest.TestCase):
         try:
             self.assertAlmostEqual(legwork_runner.cost_today(), 1.75, places=2)
         finally:
-            legwork_runner.RUNNER_LOG.unlink()
+            legwork_runner.RUNNER_LOG.unlink(missing_ok=True)
 
     def test_validate_project_flags_typos(self):
         d = Path(tempfile.mkdtemp(dir=str(TMP)))
@@ -910,29 +995,8 @@ class TestConcurrentRunner(unittest.TestCase):
     """Claim and wrap race paths: parallel claims serialise behind
     WRITE_LOCK, remote movement (n8n write-back, parallel wraps) is rebased
     over, and one tick fires every eligible project except repo-sharers.
-    The sandbox legwork dir becomes a real git clone with a bare origin
-    standing in for the GitHub remote."""
-
-    @classmethod
-    def setUpClass(cls):
-        cls.origin = TMP / "legwork-origin.git"
-        subprocess.run(["git", "init", "-q", "--bare", "-b", "main",
-                        str(cls.origin)], check=True)
-        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=SANDBOX,
-                       check=True)
-        subprocess.run(["git", "config", "user.email", "test@test"],
-                       cwd=SANDBOX, check=True)
-        subprocess.run(["git", "config", "user.name", "test"], cwd=SANDBOX,
-                       check=True)
-        subprocess.run(["git", "remote", "add", "origin", str(cls.origin)],
-                       cwd=SANDBOX, check=True)
-        # Mirror the real repo's ignores: runtime files must stay untracked
-        # or their churn would read as uncommitted tracked changes and
-        # block ticks mid-suite.
-        (SANDBOX / ".gitignore").write_text(
-            "runner.log\n.runner-state.json\nhook.log\n.session-heads/\n",
-            encoding="utf-8")
-        cls.commit_and_push("init sandbox")
+    The sandbox legwork dir is a real git clone with a bare origin standing
+    in for the GitHub remote (see _init_sandbox_repo)."""
 
     def setUp(self):
         # Belt and braces: nothing in these tests may hit the network.
@@ -942,42 +1006,29 @@ class TestConcurrentRunner(unittest.TestCase):
     def tearDown(self):
         legwork_runner.send_alert = self._send_alert
 
-    @classmethod
-    def commit_and_push(cls, message):
-        subprocess.run(["git", "add", "-A"], cwd=SANDBOX, check=True)
-        subprocess.run(["git", *GIT_ID, "commit", "-q", "--allow-empty",
-                        "-m", message], cwd=SANDBOX, check=True)
-        subprocess.run(["git", "push", "-q", "-u", "origin", "main"],
-                       cwd=SANDBOX, check=True)
-
-    def remote_commit(self, relpath, content, message):
-        """Move the origin from a second clone, the way the n8n Contents
-        API or a parallel session's wrap moves the real remote."""
-        clone = Path(tempfile.mkdtemp(prefix="clone-", dir=str(TMP)))
-        subprocess.run(["git", "clone", "-q", str(self.origin), str(clone)],
-                       check=True)
-        target = clone / relpath
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
-        subprocess.run(["git", "add", "-A"], cwd=clone, check=True)
-        subprocess.run(["git", *GIT_ID, "commit", "-q", "-m", message],
-                       cwd=clone, check=True)
-        subprocess.run(["git", "push", "-q"], cwd=clone, check=True)
-
-    def origin_file(self, relpath):
-        return subprocess.run(
-            ["git", "show", f"main:{relpath}"], cwd=self.origin,
-            capture_output=True, text=True).stdout
-
-    def origin_subjects(self):
-        return subprocess.run(
-            ["git", "log", "--format=%s", "main"], cwd=self.origin,
-            capture_output=True, text=True).stdout
+    def run_tick(self, fire_stub=None, keep_state=False):
+        """One tick with fire() stubbed out and the daily heartbeat marked
+        already sent; returns the file names the tick tried to fire. State
+        is removed afterwards unless keep_state (for multi-tick tests)."""
+        state = legwork_runner.load_state()
+        state["last_heartbeat"] = date.today().isoformat()
+        legwork_runner.save_state(state)
+        fired = []
+        original = legwork_runner.fire
+        legwork_runner.fire = fire_stub or (
+            lambda project: fired.append(project["file"].name))
+        try:
+            legwork_runner.tick()
+        finally:
+            legwork_runner.fire = original
+            if not keep_state:
+                legwork_runner.STATE_FILE.unlink(missing_ok=True)
+        return fired
 
     def test_parallel_claims_both_publish(self):
         write_project("c-claim-a.md", repo=str(make_git_repo("c-claim-a-repo")))
         write_project("c-claim-b.md", repo=str(make_git_repo("c-claim-b-repo")))
-        self.commit_and_push("add claim race projects")
+        commit_and_push("add claim race projects")
         results = {}
 
         def do_claim(fname):
@@ -996,27 +1047,27 @@ class TestConcurrentRunner(unittest.TestCase):
         self.assertNotEqual(results["c-claim-a.md"], results["c-claim-b.md"])
         for fname in ("c-claim-a.md", "c-claim-b.md"):
             self.assertIn("status: running",
-                          self.origin_file(f"projects/{fname}"))
+                          origin_file(f"projects/{fname}"))
 
     def test_claim_publishes_over_remote_movement(self):
         path = write_project("c-race.md",
                              repo=str(make_git_repo("c-race-repo")))
-        self.commit_and_push("add remote race project")
-        self.remote_commit("reviewer-note.txt", "verdict",
+        commit_and_push("add remote race project")
+        remote_commit("reviewer-note.txt", "verdict",
                            "n8n: verdict appended")
         sha = legwork_runner.claim({"file": path})
         self.assertTrue(sha, "claim should land despite the moved remote")
-        subjects = self.origin_subjects()
+        subjects = origin_subjects()
         self.assertIn("legwork: runner fires c-race", subjects)
         self.assertIn("n8n: verdict appended", subjects)
 
     def test_claim_dropped_when_remote_flips_status(self):
         path = write_project("c-flip.md",
                              repo=str(make_git_repo("c-flip-repo")))
-        self.commit_and_push("add flip race project")
+        commit_and_push("add flip race project")
         flipped = path.read_text(encoding="utf-8").replace(
             "status: queued", "status: escalated")
-        self.remote_commit("projects/c-flip.md", flipped,
+        remote_commit("projects/c-flip.md", flipped,
                            "n8n: escalate c-flip")
         sha = legwork_runner.claim({"file": path})
         self.assertIsNone(sha, "a status moved off queued drops the claim")
@@ -1027,10 +1078,10 @@ class TestConcurrentRunner(unittest.TestCase):
         path = write_project("c-fonce.md", autonomy="", vision=False,
                              repo=str(make_git_repo("c-fonce-repo")),
                              fire_once="2026-06-11")
-        self.commit_and_push("add fire_once project")
+        commit_and_push("add fire_once project")
         sha = legwork_runner.claim({"file": path})
         self.assertTrue(sha, "fire_once claim should publish")
-        published = self.origin_file("projects/c-fonce.md")
+        published = origin_file("projects/c-fonce.md")
         self.assertIn("status: running", published)
         self.assertNotIn("fire_once", published,
                          "the claim must consume the one-shot consent")
@@ -1041,11 +1092,11 @@ class TestConcurrentRunner(unittest.TestCase):
         # eligible every tick and logs "claim dropped" forever.
         path = write_project("c-caps.md", status="Queued",
                              repo=str(make_git_repo("c-caps-repo")))
-        self.commit_and_push("add capitalized status project")
+        commit_and_push("add capitalized status project")
         sha = legwork_runner.claim({"file": path})
         self.assertTrue(sha, "a hand-typed 'Queued' must still claim")
         self.assertIn("status: running",
-                      self.origin_file("projects/c-caps.md"))
+                      origin_file("projects/c-caps.md"))
 
     def test_repair_transient_restores_fire_once(self):
         # The reviewer's repro for the lost one-shot: claim consumes
@@ -1054,7 +1105,7 @@ class TestConcurrentRunner(unittest.TestCase):
         path = write_project("c-fonce-req.md", autonomy="", vision=False,
                              repo=str(make_git_repo("c-fonce-req-repo")),
                              fire_once="2026-07-03")
-        self.commit_and_push("add fire_once requeue project")
+        commit_and_push("add fire_once requeue project")
         ok, _, details = legwork_runner.assess(path)
         self.assertTrue(ok)
         self.assertEqual(details["fire_once"], "2026-07-03")
@@ -1071,7 +1122,7 @@ class TestConcurrentRunner(unittest.TestCase):
     def test_repair_flips_capitalized_running(self):
         path = write_project("c-caps-run.md", status="Running",
                              repo=str(make_git_repo("c-caps-run-repo")))
-        self.commit_and_push("add capitalized running project")
+        commit_and_push("add capitalized running project")
         detail = legwork_runner.repair_unwrapped({"file": path},
                                                  exit_code=1, minutes=2)
         self.assertIsNotNone(detail)
@@ -1082,7 +1133,7 @@ class TestConcurrentRunner(unittest.TestCase):
                              repo=str(make_git_repo("c-nolog-repo")))
         text = path.read_text(encoding="utf-8")
         path.write_text(text.split("## Log")[0], encoding="utf-8")
-        self.commit_and_push("add no-log project")
+        commit_and_push("add no-log project")
         legwork_runner.repair_unwrapped({"file": path}, exit_code=1,
                                         minutes=2)
         text = path.read_text(encoding="utf-8")
@@ -1096,7 +1147,7 @@ class TestConcurrentRunner(unittest.TestCase):
         # re-raising into fire_thread's net.
         path = write_project("c-crash.md",
                              repo=str(make_git_repo("c-crash-repo")))
-        self.commit_and_push("add crash project")
+        commit_and_push("add crash project")
         ok, _, details = legwork_runner.assess(path)
         self.assertTrue(ok)
         orig_claimed = legwork_runner.fire_claimed
@@ -1120,22 +1171,15 @@ class TestConcurrentRunner(unittest.TestCase):
     def test_remote_pause_arriving_with_the_pull_stops_the_tick(self):
         write_project("c-paused.md",
                       repo=str(make_git_repo("c-paused-repo")))
-        self.commit_and_push("add project behind remote pause")
-        self.remote_commit(".runner-pause-remote", "Paused via Telegram\n",
-                           "n8n: pause the runner")
-        legwork_runner.save_state(
-            {"last_heartbeat": date.today().isoformat()})
-        fired = []
-        original = legwork_runner.fire
-        legwork_runner.fire = lambda p: fired.append(p["file"].name)
+        commit_and_push("add project behind remote pause")
+        remote_commit(".runner-pause-remote", "Paused via Telegram\n",
+                      "n8n: pause the runner")
         try:
-            legwork_runner.tick()
+            fired = self.run_tick()
         finally:
-            legwork_runner.fire = original
-            legwork_runner.STATE_FILE.unlink()
             # Lift the pause for the tests that follow.
-            (SANDBOX / ".runner-pause-remote").unlink()
-            self.commit_and_push("lift remote pause")
+            (SANDBOX / ".runner-pause-remote").unlink(missing_ok=True)
+            commit_and_push("lift remote pause")
         self.assertEqual(fired, [], "a freshly pulled pause must stop firing")
 
     def test_push_with_rebase_recovers(self):
@@ -1144,17 +1188,96 @@ class TestConcurrentRunner(unittest.TestCase):
         subprocess.run(["git", "add", str(marker)], cwd=SANDBOX, check=True)
         subprocess.run(["git", *GIT_ID, "commit", "-q", "-m",
                         "local: unpushed work"], cwd=SANDBOX, check=True)
-        self.remote_commit("c-remote-note.txt", "remote work",
-                           "remote: moved first")
+        remote_commit("c-remote-note.txt", "remote work",
+                      "remote: moved first")
         self.assertTrue(legwork_runner.push_with_rebase(SANDBOX))
-        subjects = self.origin_subjects()
+        subjects = origin_subjects()
         self.assertIn("local: unpushed work", subjects)
         self.assertIn("remote: moved first", subjects)
+
+    def test_push_with_rebase_aborts_a_real_conflict(self):
+        # A same-line conflict on a tracked file: the rebase cannot apply,
+        # so push_with_rebase must abort it and report failure rather than
+        # leave the control-plane repo wedged mid-rebase, which would block
+        # every future tick.
+        marker = SANDBOX / "c-conflict.txt"
+        marker.write_text("base\n", encoding="utf-8")
+        commit_and_push("add conflict base")
+        marker.write_text("local change\n", encoding="utf-8")
+        subprocess.run(["git", "add", str(marker)], cwd=SANDBOX, check=True)
+        subprocess.run(["git", *GIT_ID, "commit", "-q", "-m",
+                        "local: conflicting work"], cwd=SANDBOX, check=True)
+        remote_commit("c-conflict.txt", "remote change\n",
+                      "remote: conflicting work")
+        try:
+            self.assertFalse(legwork_runner.push_with_rebase(SANDBOX))
+            self.assertFalse(
+                legwork_runner.rebase_in_progress(SANDBOX),
+                "a failed rebase must be aborted, not left half-applied")
+            self.assertIn(
+                "aborted a conflicted rebase",
+                legwork_runner.RUNNER_LOG.read_text(encoding="utf-8"))
+        finally:
+            # Drop the unpushable local commit so later tests see a clean,
+            # in-sync repo again.
+            subprocess.run(["git", "fetch", "-q", "origin"], cwd=SANDBOX,
+                           check=True)
+            subprocess.run(["git", "reset", "-q", "--hard", "origin/main"],
+                           cwd=SANDBOX, check=True)
+
+    def test_tick_cost_cap_reached_fires_nothing_and_alerts_once(self):
+        # The spend guard's gate in tick(), not just cost_today()'s sum:
+        # over the cap nothing fires, and the alert goes out once per day,
+        # not once per five-minute tick.
+        write_project("c-costcap.md",
+                      repo=str(make_git_repo("c-costcap-repo")))
+        commit_and_push("add cost cap project")
+        today = date.today().isoformat()
+        with open(legwork_runner.RUNNER_LOG, "w", encoding="utf-8") as fh:
+            fh.write(f"{today} 09:00:00  completed a.md: exit 0, 5 min, "
+                     f"$4.00, 12 turns\n")
+            fh.write(f"{today} 10:00:00  completed b.md: exit 0, 2 min, "
+                     f"$1.50, 3 turns\n")
+        alerts = []
+        legwork_runner.send_alert = lambda text: alerts.append(text) or True
+        orig_cap = legwork_runner.DAILY_COST_CAP
+        legwork_runner.DAILY_COST_CAP = 5.0
+        try:
+            fired = self.run_tick(keep_state=True)
+            self.assertEqual(fired, [], "over the cap, nothing may fire")
+            self.assertEqual(len(alerts), 1)
+            self.assertIn("cost cap", alerts[0])
+            fired = self.run_tick()  # second tick, same day
+            self.assertEqual(fired, [])
+            self.assertEqual(len(alerts), 1,
+                             "the cap alerts once per day, not per tick")
+        finally:
+            legwork_runner.DAILY_COST_CAP = orig_cap
+            legwork_runner.RUNNER_LOG.unlink(missing_ok=True)
+            legwork_runner.STATE_FILE.unlink(missing_ok=True)
+
+    def test_tick_under_the_cost_cap_still_fires(self):
+        write_project("c-costok.md",
+                      repo=str(make_git_repo("c-costok-repo")))
+        commit_and_push("add under-cap project")
+        today = date.today().isoformat()
+        with open(legwork_runner.RUNNER_LOG, "w", encoding="utf-8") as fh:
+            fh.write(f"{today} 09:00:00  completed a.md: exit 0, 5 min, "
+                     f"$1.00, 2 turns\n")
+        orig_cap = legwork_runner.DAILY_COST_CAP
+        legwork_runner.DAILY_COST_CAP = 50.0
+        try:
+            fired = self.run_tick()
+            self.assertIn("c-costok.md", fired,
+                          "under the cap, eligible projects still fire")
+        finally:
+            legwork_runner.DAILY_COST_CAP = orig_cap
+            legwork_runner.RUNNER_LOG.unlink(missing_ok=True)
 
     def test_repair_flips_unwrapped_session_and_pushes(self):
         path = write_project("c-repair.md", status="running",
                              repo=str(make_git_repo("c-repair-repo")))
-        self.commit_and_push("add unwrapped session project")
+        commit_and_push("add unwrapped session project")
         detail = legwork_runner.repair_unwrapped(
             {"file": path}, exit_code=1, minutes=7)
         self.assertIn("exit 1", detail)
@@ -1163,25 +1286,25 @@ class TestConcurrentRunner(unittest.TestCase):
         self.assertIn("Runner: autonomous session exited without wrapping",
                       text)
         self.assertIn("status: review",
-                      self.origin_file("projects/c-repair.md"))
+                      origin_file("projects/c-repair.md"))
 
     def test_repair_transient_requeues_instead_of_review(self):
         path = write_project("c-transient.md", status="running",
                              repo=str(make_git_repo("c-transient-repo")))
-        self.commit_and_push("add transient crash project")
+        commit_and_push("add transient crash project")
         detail = legwork_runner.repair_unwrapped(
             {"file": path}, exit_code=1, minutes=1, transient=True)
-        self.assertIn("re-queued for retry", detail)
+        self.assertIn("re-queued", detail)
         text = path.read_text(encoding="utf-8")
         self.assertIn("status: queued", text)
         self.assertIn("transient API error", text)
         self.assertIn("status: queued",
-                      self.origin_file("projects/c-transient.md"))
+                      origin_file("projects/c-transient.md"))
 
     def test_repair_skips_session_that_wrapped(self):
         path = write_project("c-wrapped.md", status="review",
                              repo=str(make_git_repo("c-wrapped-repo")))
-        self.commit_and_push("add wrapped session project")
+        commit_and_push("add wrapped session project")
         self.assertIsNone(legwork_runner.repair_unwrapped(
             {"file": path}, exit_code=0, minutes=3))
 
@@ -1191,7 +1314,7 @@ class TestConcurrentRunner(unittest.TestCase):
         # move it to review without claiming it exited without wrapping.
         path = write_project("c-wrap-running.md", status="running",
                              repo=str(make_git_repo("c-wrap-running-repo")))
-        self.commit_and_push("add wrapped-but-running project")
+        commit_and_push("add wrapped-but-running project")
         claim_head = subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=SANDBOX,
             capture_output=True, text=True).stdout.strip()
@@ -1211,7 +1334,7 @@ class TestConcurrentRunner(unittest.TestCase):
         self.assertIn("status: review", text)
         self.assertNotIn("exited without wrapping", text)
         self.assertIn("status: review",
-                      self.origin_file("projects/c-wrap-running.md"))
+                      origin_file("projects/c-wrap-running.md"))
 
     def test_fire_all_runs_sessions_in_parallel(self):
         barrier = threading.Barrier(2)
@@ -1243,25 +1366,17 @@ class TestConcurrentRunner(unittest.TestCase):
         # fire the same tick, not stall.
         repo = make_git_repo("c-autocommit-repo")
         write_project("c-autocommit.md", repo=str(repo), updated="2026-06-05")
-        self.commit_and_push("add autocommit project")
+        commit_and_push("add autocommit project")
         p = SANDBOX / "projects" / "c-autocommit.md"
         p.write_text(p.read_text(encoding="utf-8") +
                      "\n- 2026-06-14: manual wrap, never committed.\n",
                      encoding="utf-8")
-        legwork_runner.save_state({"last_heartbeat": date.today().isoformat()})
-        fired = []
-        original = legwork_runner.fire
-        legwork_runner.fire = lambda pr: fired.append(pr["file"].name)
-        try:
-            legwork_runner.tick()
-        finally:
-            legwork_runner.fire = original
-            legwork_runner.STATE_FILE.unlink()
+        fired = self.run_tick()
         clean = subprocess.run(["git", "status", "--porcelain"], cwd=SANDBOX,
                                capture_output=True, text=True).stdout.strip()
         self.assertEqual(clean, "", "tracker edit should have been committed")
         self.assertIn("runner auto-commits tracker edits",
-                      self.origin_subjects())
+                      origin_subjects())
         self.assertIn("c-autocommit.md", fired,
                       "project should fire the same tick it was committed")
 
@@ -1271,31 +1386,24 @@ class TestConcurrentRunner(unittest.TestCase):
         # into the runner's commit.
         repo = make_git_repo("c-scratch-repo")
         write_project("c-scratch.md", repo=str(repo), updated="2026-06-06")
-        self.commit_and_push("add scratch project")
+        commit_and_push("add scratch project")
         p = SANDBOX / "projects" / "c-scratch.md"
         p.write_text(p.read_text(encoding="utf-8") +
                      "\n- 2026-06-15: manual wrap, never committed.\n",
                      encoding="utf-8")
         scratch = SANDBOX / "projects" / "c-scratch-note.txt"
         scratch.write_text("do not commit me\n", encoding="utf-8")
-        legwork_runner.save_state({"last_heartbeat": date.today().isoformat()})
-        original = legwork_runner.fire
-        legwork_runner.fire = lambda pr: None
-        try:
-            legwork_runner.tick()
-        finally:
-            legwork_runner.fire = original
-            legwork_runner.STATE_FILE.unlink()
+        self.run_tick(fire_stub=lambda project: None)
         status = subprocess.run(["git", "status", "--porcelain"], cwd=SANDBOX,
                                 capture_output=True, text=True).stdout
         self.assertIn("?? projects/c-scratch-note.txt", status,
                       "the scratch file must stay untracked")
         scratch.unlink()
         self.assertEqual(
-            self.origin_file("projects/c-scratch-note.txt"), "",
+            origin_file("projects/c-scratch-note.txt"), "",
             "the scratch file must not reach the remote")
         self.assertIn("manual wrap, never committed",
-                      self.origin_file("projects/c-scratch.md"),
+                      origin_file("projects/c-scratch.md"),
                       "the tracked tracker edit itself is still committed")
 
     def test_tick_blocks_on_dirty_file_outside_projects(self):
@@ -1304,20 +1412,14 @@ class TestConcurrentRunner(unittest.TestCase):
         (SANDBOX / "scripts").mkdir(exist_ok=True)
         f = SANDBOX / "scripts" / "c-dirty.txt"
         f.write_text("v1\n", encoding="utf-8")
-        self.commit_and_push("add tracked non-tracker file")
+        commit_and_push("add tracked non-tracker file")
         f.write_text("v2 uncommitted\n", encoding="utf-8")
-        legwork_runner.save_state({"last_heartbeat": date.today().isoformat()})
-        fired = []
-        original = legwork_runner.fire
-        legwork_runner.fire = lambda pr: fired.append(pr["file"].name)
         try:
-            legwork_runner.tick()
+            fired = self.run_tick()
         finally:
-            legwork_runner.fire = original
             # Revert so later tests are not blocked by this dirty file.
             f.write_text("v1\n", encoding="utf-8")
-            self.commit_and_push("revert dirty non-tracker file")
-            legwork_runner.STATE_FILE.unlink()
+            commit_and_push("revert dirty non-tracker file")
         self.assertEqual(fired, [],
                          "a dirty file outside projects/ must stall firing")
 
@@ -1327,17 +1429,8 @@ class TestConcurrentRunner(unittest.TestCase):
         write_project("c-tick-b.md", repo=str(shared), updated="2026-06-02")
         write_project("c-tick-c.md", repo=str(make_git_repo("c-solo-repo")),
                       updated="2026-06-03")
-        self.commit_and_push("add tick fan-out projects")
-        legwork_runner.save_state(
-            {"last_heartbeat": date.today().isoformat()})
-        fired = []
-        original = legwork_runner.fire
-        legwork_runner.fire = lambda p: fired.append(p["file"].name)
-        try:
-            legwork_runner.tick()
-        finally:
-            legwork_runner.fire = original
-            legwork_runner.STATE_FILE.unlink()
+        commit_and_push("add tick fan-out projects")
+        fired = self.run_tick()
         self.assertIn("c-tick-a.md", fired)
         self.assertIn("c-tick-c.md", fired)
         self.assertNotIn("c-tick-b.md", fired,
@@ -1356,7 +1449,10 @@ class TestConcurrentRunner(unittest.TestCase):
         evil = SANDBOX / "scripts" / "c-evil.py"
         evil.parent.mkdir(exist_ok=True)
         evil.write_text("# tampered\n", encoding="utf-8")
-        subprocess.run(["git", "add", "-A"], cwd=SANDBOX, check=True)
+        # Stage only the tampered file: the reset below rolls this commit
+        # back, and a sweeping add -A would take other tests' still-untracked
+        # project files down with it.
+        subprocess.run(["git", "add", str(evil)], cwd=SANDBOX, check=True)
         subprocess.run(["git", *GIT_ID, "commit", "-q", "-m", "evil edit"],
                        cwd=SANDBOX, check=True)
         try:
@@ -1376,7 +1472,7 @@ class TestConcurrentRunner(unittest.TestCase):
         legwork_runner.send_alert = lambda text: calls.append(text) or True
         tracker = SANDBOX / "projects" / "c-audit-ok.md"
         tracker.write_text("---\nname: ok\n---\n", encoding="utf-8")
-        subprocess.run(["git", "add", "-A"], cwd=SANDBOX, check=True)
+        subprocess.run(["git", "add", str(tracker)], cwd=SANDBOX, check=True)
         subprocess.run(["git", *GIT_ID, "commit", "-q", "-m", "tracker edit"],
                        cwd=SANDBOX, check=True)
         try:
@@ -1400,7 +1496,7 @@ class TestConcurrentRunner(unittest.TestCase):
     def test_local_review_applies_verdict_and_pushes(self):
         repo = make_git_repo("c-review-repo")
         path = write_project("c-review.md", status="review", repo=str(repo))
-        self.commit_and_push("add local-review project")
+        commit_and_push("add local-review project")
         restore = self._stub_review(
             {"verdict": "pass", "summary": "looks done", "confidence": 0.95})
         try:
@@ -1408,14 +1504,14 @@ class TestConcurrentRunner(unittest.TestCase):
                 {"file": path, "repo_path": repo}, pre_head=None, detail=None)
         finally:
             restore()
-        published = self.origin_file("projects/c-review.md")
+        published = origin_file("projects/c-review.md")
         self.assertIn("status: queued", published, "pass requeues on the remote")
         self.assertIn("Reviewer passed: looks done", published)
 
     def test_local_review_escalate_flips_and_writes_brief(self):
         repo = make_git_repo("c-review-esc-repo")
         path = write_project("c-review-esc.md", status="review", repo=str(repo))
-        self.commit_and_push("add escalate project")
+        commit_and_push("add escalate project")
         restore = self._stub_review(
             {"verdict": "escalate", "summary": "needs a human",
              "decision_brief": {"attempted": "a", "uncertain": "u",
@@ -1426,7 +1522,7 @@ class TestConcurrentRunner(unittest.TestCase):
                 {"file": path, "repo_path": repo}, pre_head=None, detail=None)
         finally:
             restore()
-        published = self.origin_file("projects/c-review-esc.md")
+        published = origin_file("projects/c-review-esc.md")
         self.assertIn("status: escalated", published)
         self.assertIn("DECISION NEEDED", published)
         # An escalated project is never eligible to fire.
@@ -1437,14 +1533,14 @@ class TestConcurrentRunner(unittest.TestCase):
     def test_local_review_parks_when_call_fails(self):
         repo = make_git_repo("c-review-fail-repo")
         path = write_project("c-review-fail.md", status="queued", repo=str(repo))
-        self.commit_and_push("add review-fail project")
+        commit_and_push("add review-fail project")
         restore = self._stub_review(None)  # reviewer returned no verdict
         try:
             legwork_runner.run_local_review(
                 {"file": path, "repo_path": repo}, pre_head=None, detail=None)
         finally:
             restore()
-        published = self.origin_file("projects/c-review-fail.md")
+        published = origin_file("projects/c-review-fail.md")
         self.assertIn("status: review", published,
                       "a failed reviewer call parks the project for a human")
         self.assertIn("parked for human pickup", published)
@@ -1452,21 +1548,21 @@ class TestConcurrentRunner(unittest.TestCase):
     def test_local_review_skips_terminal_status(self):
         repo = make_git_repo("c-review-done-repo")
         path = write_project("c-review-done.md", status="done", repo=str(repo))
-        self.commit_and_push("add done project")
+        commit_and_push("add done project")
         restore = self._stub_review({"verdict": "pass", "summary": "x"})
         try:
             legwork_runner.run_local_review(
                 {"file": path, "repo_path": repo}, pre_head=None, detail=None)
         finally:
             restore()
-        published = self.origin_file("projects/c-review-done.md")
+        published = origin_file("projects/c-review-done.md")
         self.assertIn("status: done", published, "done must not be resurrected")
         self.assertNotIn("Reviewer passed", published)
 
     def test_local_review_revise_installs_fix_on_remote(self):
         repo = make_git_repo("c-review-rev-repo")
         path = write_project("c-review-rev.md", status="review", repo=str(repo))
-        self.commit_and_push("add revise project")
+        commit_and_push("add revise project")
         restore = self._stub_review(
             {"verdict": "revise", "summary": "off by one",
              "fix_prompt": "Read PROJECT.md.\n\nTask: fix the off-by-one.\n\n"
@@ -1476,7 +1572,7 @@ class TestConcurrentRunner(unittest.TestCase):
                 {"file": path, "repo_path": repo}, pre_head=None, detail=None)
         finally:
             restore()
-        published = self.origin_file("projects/c-review-rev.md")
+        published = origin_file("projects/c-review-rev.md")
         self.assertIn("status: queued", published)
         self.assertIn("fix the off-by-one", published)
         self.assertIn("Reviewer revise: off by one", published)
@@ -1484,7 +1580,7 @@ class TestConcurrentRunner(unittest.TestCase):
     def test_local_review_parks_unactionable_revise(self):
         repo = make_git_repo("c-review-noop-repo")
         path = write_project("c-review-noop.md", status="queued", repo=str(repo))
-        self.commit_and_push("add unactionable revise project")
+        commit_and_push("add unactionable revise project")
         # A revise with no fix prompt must NOT blow away the wrapped prompt;
         # the project is parked at review for a human instead.
         restore = self._stub_review(
@@ -1494,7 +1590,7 @@ class TestConcurrentRunner(unittest.TestCase):
                 {"file": path, "repo_path": repo}, pre_head=None, detail=None)
         finally:
             restore()
-        published = self.origin_file("projects/c-review-noop.md")
+        published = origin_file("projects/c-review-noop.md")
         self.assertIn("status: review", published)
         self.assertIn("Task: do one thing.", published,
                       "the wrapped prompt must survive an unactionable revise")
@@ -1503,9 +1599,9 @@ class TestConcurrentRunner(unittest.TestCase):
     def test_park_for_review_skips_non_inflight(self):
         repo = make_git_repo("c-park-skip-repo")
         path = write_project("c-park-skip.md", status="escalated", repo=str(repo))
-        self.commit_and_push("add already-escalated project")
+        commit_and_push("add already-escalated project")
         legwork_runner.park_for_review({"file": path})
-        published = self.origin_file("projects/c-park-skip.md")
+        published = origin_file("projects/c-park-skip.md")
         self.assertIn("status: escalated", published,
                       "park must not touch a project that is not in flight")
         self.assertNotIn("parked for human pickup", published)
@@ -1519,7 +1615,7 @@ class TestConcurrentRunner(unittest.TestCase):
         subprocess.run(["git", *GIT_ID, "commit", "-q", "--allow-empty",
                         "-m", "session work"], cwd=repo, check=True)
         path = write_project("c-payload.md", status="review", repo=str(repo))
-        self.commit_and_push("add payload project")
+        commit_and_push("add payload project")
         payload = legwork_runner.local_review_payload(
             {"file": path, "repo_path": repo}, pre, detail=None)
         self.assertEqual(payload["repo"], "c-payload")
@@ -1532,6 +1628,199 @@ class TestConcurrentRunner(unittest.TestCase):
         recovered = legwork_runner.local_review_payload(
             {"file": path, "repo_path": repo}, pre, detail="exited")
         self.assertEqual(recovered["end_reason"], "runner-recovery")
+
+
+class TestFireArgv(unittest.TestCase):
+    """fire()'s argv construction, exercised end to end through a fake
+    `claude` shim on PATH: the --settings guard, the allowedTools ladder,
+    the directive-driven --model/--effort flags and the session timeout.
+    A one-line regression here silently changes what a fired session is
+    permitted to do, so the exact argv is pinned."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.bin_dir = TMP / "fake-bin"
+        cls.bin_dir.mkdir(exist_ok=True)
+        helper = cls.bin_dir / "claude_shim.py"
+        helper.write_text(
+            "import json, os, sys, time\n"
+            "with open(os.environ['FAKE_CLAUDE_ARGV'], 'w') as fh:\n"
+            "    json.dump(sys.argv[1:], fh)\n"
+            "sleep = float(os.environ.get('FAKE_CLAUDE_SLEEP', '0'))\n"
+            "if sleep:\n"
+            "    time.sleep(sleep)\n"
+            "print(json.dumps({'type': 'result', 'is_error': False,\n"
+            "                  'num_turns': 3, 'total_cost_usd': 0.05,\n"
+            "                  'result': 'done'}))\n",
+            encoding="utf-8")
+        shim = cls.bin_dir / "claude"
+        shim.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{helper}" "$@"\n',
+                        encoding="utf-8")
+        shim.chmod(0o755)
+
+    def setUp(self):
+        self.argv_file = self.bin_dir / f"argv-{self.id().split('.')[-1]}.json"
+        os.environ["FAKE_CLAUDE_ARGV"] = str(self.argv_file)
+        self._path = os.environ["PATH"]
+        os.environ["PATH"] = f"{self.bin_dir}:{self._path}"
+        self._send_alert = legwork_runner.send_alert
+        legwork_runner.send_alert = lambda text: True
+
+    def tearDown(self):
+        legwork_runner.send_alert = self._send_alert
+        os.environ["PATH"] = self._path
+        del os.environ["FAKE_CLAUDE_ARGV"]
+        legwork_runner.GUARD_SETTINGS.unlink(missing_ok=True)
+
+    def fire_and_read_argv(self, fname, prompt=None):
+        path = write_project(fname, repo=str(make_git_repo(fname[:-3] + "-repo")),
+                             prompt=prompt)
+        commit_and_push(f"add {fname}")
+        ok, reason, details = legwork_runner.assess(path)
+        self.assertTrue(ok, reason)
+        outcome = legwork_runner.fire(details)
+        self.assertIsNotNone(outcome, "the shim session must complete")
+        import json as _json
+        return _json.loads(self.argv_file.read_text(encoding="utf-8"))
+
+    def after(self, argv, flag):
+        self.assertIn(flag, argv)
+        return argv[argv.index(flag) + 1]
+
+    def test_argv_pins_the_permission_ladder(self):
+        legwork_runner.write_guard_settings()
+        argv = self.fire_and_read_argv(
+            "f-argv.md",
+            prompt=("Read PROJECT.md.\n\nTask: one thing.\nModel: haiku\n"
+                    "Effort: low\n\nDone when: done.\n\nFinal step: run "
+                    "/wrap to update the tracker and mint the next prompt."))
+        self.assertEqual(self.after(argv, "--permission-mode"), "acceptEdits")
+        self.assertEqual(self.after(argv, "--add-dir"),
+                         str(legwork_runner.LEGWORK_DIR))
+        self.assertEqual(self.after(argv, "--settings"),
+                         str(legwork_runner.GUARD_SETTINGS))
+        allowed = argv[argv.index("--allowedTools") + 1:argv.index("--model")]
+        self.assertEqual(allowed, [
+            "Bash(git:*)", "Bash(mkdir:*)",
+            "Bash(python3 scripts/build_dashboard.py:*)",
+            f"Bash(python3 {legwork_runner.LEGWORK_DIR}/scripts/"
+            f"build_dashboard.py:*)",
+        ])
+        self.assertEqual(self.after(argv, "--model"), "haiku")
+        self.assertEqual(self.after(argv, "--effort"), "low")
+        prompt_arg = self.after(argv, "-p")
+        self.assertIn("Autonomous legwork session", prompt_arg)
+        self.assertIn("Task: one thing.", prompt_arg)
+        self.assertNotIn("Model: haiku", prompt_arg,
+                         "directives are extracted, not leaked to the session")
+
+    def test_argv_omits_optional_flags_when_unconfigured(self):
+        # No guard file and no directives: the ladder must not emit an
+        # empty --settings, --model or --effort.
+        legwork_runner.GUARD_SETTINGS.unlink(missing_ok=True)
+        argv = self.fire_and_read_argv("f-plain.md")
+        self.assertNotIn("--settings", argv)
+        self.assertNotIn("--model", argv)
+        self.assertNotIn("--effort", argv)
+        self.assertEqual(self.after(argv, "--permission-mode"), "acceptEdits")
+        self.assertIn("--allowedTools", argv)
+
+    def test_session_past_the_timeout_is_terminated(self):
+        path = write_project("f-slow.md",
+                             repo=str(make_git_repo("f-slow-repo")))
+        commit_and_push("add slow project")
+        ok, reason, details = legwork_runner.assess(path)
+        self.assertTrue(ok, reason)
+        os.environ["FAKE_CLAUDE_SLEEP"] = "30"
+        orig = (legwork_runner.SESSION_TIMEOUT, legwork_runner.GRACE)
+        legwork_runner.SESSION_TIMEOUT, legwork_runner.GRACE = 1, 5
+        started = time.time()
+        try:
+            legwork_runner.fire(details)
+        finally:
+            legwork_runner.SESSION_TIMEOUT, legwork_runner.GRACE = orig
+            del os.environ["FAKE_CLAUDE_SLEEP"]
+        self.assertLess(time.time() - started, 20,
+                        "the timeout must terminate the session, not wait it out")
+        log_text = legwork_runner.RUNNER_LOG.read_text(encoding="utf-8")
+        self.assertIn("timeout: f-slow.md terminated", log_text)
+        self.assertIn("status: review", path.read_text(encoding="utf-8"),
+                      "a timed-out session parks for review")
+
+
+class TestLockLifecycle(unittest.TestCase):
+    """acquire_lock/release_lock and main()'s wiring around them: a dead or
+    garbage lock is reclaimed, a live within-budget holder blocks the tick,
+    and a wedged live holder is reclaimed past LOCK_MAX_AGE with one alert.
+    A bug on either side stalls the queue or double-fires it."""
+
+    def setUp(self):
+        self.lock = legwork_runner.LOCK_FILE
+        self.lock.unlink(missing_ok=True)
+        self.alerts = []
+        self._send_alert = legwork_runner.send_alert
+        legwork_runner.send_alert = \
+            lambda text: self.alerts.append(text) or True
+
+    def tearDown(self):
+        legwork_runner.send_alert = self._send_alert
+        self.lock.unlink(missing_ok=True)
+
+    def test_acquire_then_release_roundtrip(self):
+        self.assertTrue(legwork_runner.acquire_lock())
+        pid = self.lock.read_text(encoding="utf-8").split()[0]
+        self.assertEqual(pid, str(os.getpid()))
+        self.assertFalse(legwork_runner.acquire_lock(),
+                         "a live within-budget holder must block")
+        legwork_runner.release_lock()
+        self.assertFalse(self.lock.exists())
+
+    def test_dead_pid_lock_is_reclaimed(self):
+        proc = subprocess.Popen(["sleep", "0"])
+        proc.wait()  # a real PID that is now certainly dead
+        self.lock.write_text(f"{proc.pid} {time.time()}", encoding="utf-8")
+        self.assertTrue(legwork_runner.acquire_lock())
+        self.assertEqual(self.lock.read_text(encoding="utf-8").split()[0],
+                         str(os.getpid()),
+                         "the reclaimed lock belongs to this run")
+
+    def test_garbage_lock_is_reclaimed(self):
+        for garbage in ("not a pid", ""):
+            self.lock.write_text(garbage, encoding="utf-8")
+            self.assertTrue(legwork_runner.acquire_lock(), repr(garbage))
+            self.lock.unlink()
+
+    def test_wedged_live_lock_is_reclaimed_past_max_age(self):
+        held_since = time.time() - (legwork_runner.LOCK_MAX_AGE + 60)
+        self.lock.write_text(f"{os.getpid()} {held_since}", encoding="utf-8")
+        self.assertTrue(legwork_runner.acquire_lock())
+        self.assertEqual(len(self.alerts), 1, "reclaiming a wedged lock alerts")
+        self.assertIn("reclaim", self.alerts[0])
+
+    def test_live_lock_within_budget_blocks_quietly(self):
+        self.lock.write_text(f"{os.getpid()} {time.time()}", encoding="utf-8")
+        self.assertFalse(legwork_runner.acquire_lock())
+        self.assertEqual(self.alerts, [], "a normal long session is not alerted")
+
+    def test_main_respects_the_lock_and_releases_it(self):
+        ticks = []
+        orig_tick = legwork_runner.tick
+        orig_argv = sys.argv
+        legwork_runner.tick = lambda dry_run=False: ticks.append(1)
+        sys.argv = ["legwork_runner.py"]
+        try:
+            self.lock.write_text(f"{os.getpid()} {time.time()}",
+                                 encoding="utf-8")
+            legwork_runner.main()
+            self.assertEqual(ticks, [], "a held lock must skip the tick")
+            self.lock.unlink()
+            legwork_runner.main()
+            self.assertEqual(ticks, [1], "a free lock ticks exactly once")
+            self.assertFalse(self.lock.exists(),
+                             "main releases its own lock afterwards")
+        finally:
+            legwork_runner.tick = orig_tick
+            sys.argv = orig_argv
 
 
 class TestDashboard(unittest.TestCase):
@@ -1756,8 +2045,10 @@ class TestHooks(unittest.TestCase):
             url="http://127.0.0.1:9/x")
         tail = self.hook_log_tail()
         # Dead port -> http=000 -> the failed POST logs "post-failed:", not
-        # "sent:"; the stem prefix is what this test pins.
-        self.assertIn("t-renamed  post-failed:", tail)
+        # "sent:"; the resolved stem is what this test pins (assert the two
+        # tokens separately, not the incidental spacing between them).
+        self.assertIn("t-renamed", tail)
+        self.assertIn("post-failed:", tail)
         self.assertNotIn("t-alias-repo", tail)
 
     def test_end_sends_and_consumes_marker(self):
@@ -1800,7 +2091,8 @@ class TestHooks(unittest.TestCase):
             f'{{"session_id":"hk-7","cwd":"{drift}","reason":"exit"}}',
             url="http://127.0.0.1:9/x")
         tail = self.hook_log_tail()
-        self.assertIn("t-drift  post-failed:", tail)
+        self.assertIn("t-drift", tail)
+        self.assertIn("post-failed:", tail)
         self.assertNotIn("no changes this session", tail)
         self.assertNotIn("t-drift-elsewhere", tail)
 
@@ -2039,6 +2331,87 @@ class TestInstaller(unittest.TestCase):
         head = legwork_install.masthead(ascii_ui)
         self.assertNotIn("\033", head)
         self.assertIn("+", head)
+
+    @staticmethod
+    def _args(**kw):
+        import argparse
+        ns = argparse.Namespace(yes=False, with_commands=False,
+                                with_launchd=False, with_hooks=False)
+        ns.__dict__.update(kw)
+        return ns
+
+    def test_flag_truth_table_for_the_outside_the_repo_steps(self):
+        # The --yes footgun fix, pinned: a non-interactive run never touches
+        # anything outside the repo (force=False skips the step) unless the
+        # matching --with-* flag opts in; interactive runs ask (None).
+        args = self._args
+        cases = [
+            (args(yes=True), True, (False, False, False)),
+            (args(yes=True, with_commands=True), True, (True, False, False)),
+            (args(yes=True, with_launchd=True), True, (False, True, False)),
+            (args(yes=True, with_hooks=True), True, (False, False, True)),
+            (args(yes=True, with_commands=True, with_launchd=True,
+                  with_hooks=True), True, (True, True, True)),
+            (args(), True, (None, None, None)),  # interactive: each step asks
+            (args(with_launchd=True), True, (None, True, None)),
+            (args(), False, (False, False, False)),  # piped stdin == --yes
+            (args(with_hooks=True), False, (False, False, True)),
+        ]
+        for ns, interactive, expected in cases:
+            self.assertEqual(
+                legwork_install.plan_forces(ns, interactive), expected,
+                f"args={ns} interactive={interactive}")
+
+    def test_main_yes_wires_the_skip_forces_into_the_steps(self):
+        # main(["--yes", "--with-hooks"]) end to end with the side-effect
+        # steps stubbed: the two un-flagged steps receive force=False, the
+        # flagged one True, and the run exits 0.
+        import contextlib
+        import io
+        received = {}
+        names = ("install_verbs", "install_timer", "install_hooks")
+        orig = {n: getattr(legwork_install, n)
+                for n in (*names, "write_repo_files", "run_doctor", "REPO")}
+
+        def step(name):
+            def stub(wiz, values, force=None):
+                received[name] = force
+                return []
+            return stub
+
+        for name in names:
+            setattr(legwork_install, name, step(name))
+        legwork_install.write_repo_files = lambda values: ["config (stubbed)"]
+        legwork_install.run_doctor = lambda wiz: None
+        # An empty stand-in repo: no real config is read, none written.
+        legwork_install.REPO = Path(tempfile.mkdtemp(dir=str(TMP)))
+        stdin = sys.stdin
+        sys.stdin = io.StringIO("")  # not a tty: non-interactive
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = legwork_install.main(["--yes", "--with-hooks",
+                                           "--no-color"])
+        finally:
+            sys.stdin = stdin
+            for name, value in orig.items():
+                setattr(legwork_install, name, value)
+        self.assertEqual(rc, 0)
+        self.assertEqual(received, {"install_verbs": False,
+                                    "install_timer": False,
+                                    "install_hooks": True})
+
+    def test_main_without_tty_or_yes_refuses(self):
+        import contextlib
+        import io
+        stdin = sys.stdin
+        sys.stdin = io.StringIO("")
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                rc = legwork_install.main(["--no-color"])
+        finally:
+            sys.stdin = stdin
+        self.assertEqual(rc, 2)
 
 
 def tearDownModule():
