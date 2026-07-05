@@ -19,7 +19,7 @@ Steps:
    results) to .legwork/last_test_output.txt in the repo you were working
    in, and make sure that repo gitignores .legwork/. The SessionEnd hook
    forwards this to the reviewer as test evidence.
-5. Rebuild the dashboard: python3 scripts/build_dashboard.py from the
+5. Rebuild the dashboard: python3 core/build_dashboard.py from the
    legwork repo.
 6. Commit your changes with an honest message and, when a remote exists,
    `git push`: it is shared with n8n, so never leave local tracker commits

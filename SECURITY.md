@@ -3,7 +3,7 @@
 legwork runs Claude Code without a human watching. This file describes what
 an autonomous session is allowed to do, how autonomy is granted, where
 credentials live, and the guardrails and stop switches that keep a runaway
-session bounded. The runner is `scripts/legwork_runner.py`; the claims here
+session bounded. The runner is `suite/legwork_runner.py`; the claims here
 match it.
 
 ## What the runner can do
@@ -18,8 +18,8 @@ claude -p "<prompt>" \
   --add-dir <LEGWORK_DIR> \
   --allowedTools \
     "Bash(git:*)" "Bash(mkdir:*)" \
-    "Bash(python3 scripts/build_dashboard.py:*)" \
-    "Bash(python3 <LEGWORK_DIR>/scripts/build_dashboard.py:*)"
+    "Bash(python3 core/build_dashboard.py:*)" \
+    "Bash(python3 <LEGWORK_DIR>/core/build_dashboard.py:*)"
 ```
 
 `--permission-mode acceptEdits` means file edits auto-accept in the target
@@ -47,10 +47,12 @@ model's training carries real weight in that sentence.
 Because `--add-dir <LEGWORK_DIR>` plus `acceptEdits` auto-accepts edits in
 the legwork repo too, a session could in principle edit legwork's own
 control-plane files. The runner raises the bar at the tool layer: it passes
-a `--settings` file with deny rules on `scripts/**`, `reviewer/**`,
-`reply-capture/**` and `alerts/**` under `LEGWORK_DIR` (the hook scripts
-live in `scripts/`). Those deny rules cover the Edit, Write and MultiEdit
-tools only, not Bash, so they block the direct edit path but not a
+a `--settings` file with deny rules on `core/**`, `suite/**` and
+`scripts/**` under `LEGWORK_DIR`, the whole control plane: the hooks and
+dashboard builder in `core/`, the runner, reviewer and n8n pipelines in
+`suite/`, the installer in `scripts/`. Those deny rules cover the Edit,
+Write and MultiEdit tools only, not Bash, so they block the direct edit
+path but not a
 git-mediated one: the same `Bash(git:*)` grant above could rewrite those
 files through a checkout, an apply, or shell obtained via git. The post-hoc
 audit below is the detection layer for exactly that, and it sees commits
@@ -99,10 +101,11 @@ Never commit credentials.
 - Webhook URLs (`LEGWORK_WEBHOOK_URL`, `LEGWORK_ALERT_URL`) live in the
   `config` file, which is gitignored, or in the environment. They are not in
   the repo. See `config.example`.
-- The committed n8n workflow JSONs under `reviewer/`, `reply-capture/`, and
-  `alerts/` use `REPLACE_WITH_` placeholders for credential ids, the Telegram
-  chat id, and the GitHub owner/repo. You fill those in on your own n8n
-  instance; nothing real ships in the repo.
+- The committed n8n workflow JSONs under `suite/reviewer/`,
+  `suite/reply-capture/`, and `suite/alerts/` use `REPLACE_WITH_`
+  placeholders for credential ids, the Telegram chat id, and the GitHub
+  owner/repo. You fill those in on your own n8n instance; nothing real
+  ships in the repo.
 - The GitHub write-back token (used by the reply-capture pipeline to commit
   decisions and minted prompts through the Contents API) is a fine-grained,
   repo-scoped personal access token. It is held only as an n8n credential. It
@@ -123,8 +126,8 @@ anyone who learns the bot's handle could drive your queue.
 
 Do not activate it without an allowlist. Restrict the trigger to your own
 Telegram user id (the message's `from.id`) before turning the workflow on;
-reply-capture/SETUP.md has the step. The same applies to any other Telegram
-trigger you ever point at the bot.
+suite/reply-capture/SETUP.md has the step. The same applies to any other
+Telegram trigger you ever point at the bot.
 
 ## Guardrails
 

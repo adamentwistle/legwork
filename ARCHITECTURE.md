@@ -45,11 +45,11 @@ file holds frontmatter (status, repo, autonomy and so on), an optional
 block, and an append-only `## Log`. Everything else is derived from these
 files or acts on them.
 
-`scripts/build_dashboard.py` reads every project file and regenerates
+`core/build_dashboard.py` reads every project file and regenerates
 `dashboard/index.html` wholesale. The html is a build artifact. Nothing is
 hand-edited there; you change a project file and rebuild.
 
-`scripts/legwork_runner.py` runs every five minutes under launchd or cron. On
+`suite/legwork_runner.py` runs every five minutes under launchd or cron. On
 each tick it pulls the legwork repo, then assesses every project file. It
 fires every eligible project at once, one headless `claude -p` session each.
 Eligible means status `queued`, `autonomy: loop` in the frontmatter, a
@@ -63,9 +63,9 @@ tool allowlist (git, mkdir, the dashboard rebuild). It reads the project file,
 does the work in the target repo, commits, and wraps the tracker.
 
 Two Claude Code hooks bracket the session.
-`scripts/session_start_hook.sh` records the target repo's HEAD keyed by session
+`core/session_start_hook.sh` records the target repo's HEAD keyed by session
 id, so the end of the session can report only what this session changed.
-`scripts/session_end_hook.sh` gathers session-scoped git evidence (the diff and
+`core/session_end_hook.sh` gathers session-scoped git evidence (the diff and
 commits since the recorded HEAD) plus the project's tracker entry, and POSTs it
 to `LEGWORK_WEBHOOK_URL`. When `LEGWORK_WEBHOOK_URL` is unset the end hook
 rebuilds `dashboard/index.html` instead (and logs the outcome), so a
@@ -93,12 +93,36 @@ the verdict straight back to the project file. The reviewer-by-exception loop
 then runs with no n8n, no Telegram and no GitHub PAT. See "Local reviewer"
 below.
 
+## Repository layout
+
+The tree is split along the product's two levels, and the split is a
+dependency rule, not just filing:
+
+- `core/` is the complete level-1 product: `legwork_common.py` (the shared
+  parsing base), `build_dashboard.py`, both session hooks, and the verbs
+  (`core/commands/`, `core/skills/`). It is self-sufficient: copy `core/`
+  out of the repo and the manual loop still imports and runs. The
+  in-checkout `.claude/commands` and `.claude/skills` entries are symlinks
+  into `core/`, so there is one editable source for the verbs.
+- `suite/` is the autonomy layer: the runner, the local reviewer, the
+  launchd plist template, and the n8n pipelines (`suite/reviewer/`,
+  `suite/reply-capture/`, `suite/alerts/`). suite imports from core, never
+  the reverse.
+- `scripts/` holds `legwork_install.py`, the wizard behind `./install.sh`.
+  It serves both levels, so it belongs to neither.
+
+CI enforces the direction of that arrow: a blocking job copies `core/`
+alone out of the checkout (no `suite/`, no `scripts/`), imports it, builds
+a dashboard from the example projects, and runs the webhook-less SessionEnd
+hook end to end. If `core/` ever grows an import or path reference into
+`suite/`, the gate fails.
+
 ## Components
 
 ### Projects (`projects/*.md`)
 
 The source of truth. One markdown file per project. The format is defined in
-`.claude/skills/legwork-tracker/SKILL.md`:
+`core/skills/legwork-tracker/SKILL.md`:
 
 - Frontmatter with one-line values: `name`, `category`, `status`, `energy`,
   `description`, `repo`, `updated`, and the optional keys `autonomy`,
@@ -114,7 +138,7 @@ Statuses are a fixed set: `queued`, `running`, `review`, `escalated`, `done`,
 `icebox`. legwork gitignores `/projects/` so you keep your own projects in a
 private repo; `examples/projects/` holds fake samples.
 
-### Dashboard builder (`scripts/build_dashboard.py`)
+### Dashboard builder (`core/build_dashboard.py`)
 
 Stdlib only. It reads simple frontmatter, the first fenced block under
 `## Next prompt`, and the bullets under `## Log` from every project file, then
@@ -125,14 +149,14 @@ escalated projects, computes a freshness pill from the newest of the
 frontmatter date and the latest log entry, and renders a changelog of every
 dated log line. The html is a build artifact and is gitignored.
 
-### Runner (`scripts/legwork_runner.py`)
+### Runner (`suite/legwork_runner.py`)
 
 The runner. Run by launchd or cron every five minutes, or by hand:
 
 ```
-python3 scripts/legwork_runner.py            one tick
-python3 scripts/legwork_runner.py --dry-run  show eligibility, change nothing
-python3 scripts/legwork_runner.py --doctor   preflight checklist, change nothing
+python3 suite/legwork_runner.py            one tick
+python3 suite/legwork_runner.py --dry-run  show eligibility, change nothing
+python3 suite/legwork_runner.py --doctor   preflight checklist, change nothing
 ```
 
 Zero dependencies. It reads config at startup via `load_config()`, which loads
@@ -140,7 +164,7 @@ KEY=VALUE lines from a `config` file (or `$LEGWORK_CONFIG`) into the
 environment, with real environment variables winning. See "The runner" below
 for eligibility, parallelism, the permission model, and failure handling.
 
-### Hooks (`scripts/session_start_hook.sh`, `scripts/session_end_hook.sh`)
+### Hooks (`core/session_start_hook.sh`, `core/session_end_hook.sh`)
 
 Claude Code hooks that bracket every session.
 
@@ -162,13 +186,13 @@ resume. Every invocation is logged to `hook.log`. If a session ends without
 the hook firing (for example an account whose config carries no hooks), the
 runner posts the review request itself, so the loop closes either way.
 
-### launchd agent (`scripts/com.legwork.runner.plist`)
+### launchd agent (`suite/com.legwork.runner.plist`)
 
 A launchd agent template with `__LEGWORK_DIR__` and `__PYTHON__` placeholders.
 `StartInterval` defaults to 300 seconds (every five minutes). Substitute the
 placeholders, drop it in `~/Library/LaunchAgents/`, and load it.
 
-### Reviewer pipeline (`reviewer/`)
+### Reviewer pipeline (`suite/reviewer/`)
 
 The optional review pipeline as an importable n8n workflow.
 
@@ -187,11 +211,11 @@ public-facing, credentials or auth, destructive or hard-to-reverse operations,
 evidence that contradicts the stated task, and self-modification of the
 pipeline.
 
-### Local reviewer (`scripts/legwork_review.py`)
+### Local reviewer (`suite/legwork_review.py`)
 
 The zero-dependency, no-n8n equivalent of the reviewer pipeline, enabled with
 `LEGWORK_LOCAL_REVIEW`. It carries the same rubric (a verbatim copy of the one
-in `reviewer/n8n-build-node.js`, kept in sync) and reads the same evidence
+in `suite/reviewer/n8n-build-node.js`, kept in sync) and reads the same evidence
 shape, so it triages identically; the difference is only where it runs. After
 a finished session the runner builds the evidence itself (the session-scoped
 diff and commits from the target repo's pre-fire HEAD, the project's tracker
@@ -214,7 +238,7 @@ project at `review` for a human rather than risking a refire loop. When
 `LEGWORK_ALERT_URL` is also set, the verdict letter is sent to Telegram too;
 otherwise the dashboard is the surface.
 
-### Reply-capture pipeline (`reply-capture/`)
+### Reply-capture pipeline (`suite/reply-capture/`)
 
 The optional Telegram pipeline.
 
@@ -231,7 +255,7 @@ machine directly, and the runner picks changes up on its next tick. The
 write-back token is a fine-grained, repo-scoped PAT held only as an n8n
 credential, never in the repo.
 
-### Alerts (`alerts/`)
+### Alerts (`suite/alerts/`)
 
 The optional runner-alerts n8n workflow (`n8n-alerts-workflow.json`). It
 receives plain text on `LEGWORK_ALERT_URL` and forwards it to Telegram. The
@@ -242,12 +266,14 @@ an audit alert when a session window touches the legwork repo outside
 `projects/` or `dashboard/`. With `LEGWORK_ALERT_URL` unset, all of these are
 quietly skipped.
 
-### Skill and commands (`.claude/`)
+### Skill and commands (`core/commands/`, `core/skills/`)
 
-The legwork-tracker skill (`.claude/skills/legwork-tracker/SKILL.md`) defines
+The legwork-tracker skill (`core/skills/legwork-tracker/SKILL.md`) defines
 the project file format, the status set, the Vision shape, the prompt-minting
 rules, and the wrap procedure. It is what mints and updates project files at
-the end of every session. The commands under `.claude/commands/` are the
+the end of every session. The repo's `.claude/commands` and `.claude/skills`
+are symlinks to these directories, so the verbs work inside the checkout
+from the same single source. The commands under `core/commands/` are the
 verbs: `/add` (start a project), `/log` (update without a work session),
 `/pickup` (reload context), `/shelve` (icebox), `/vision` (capture the standing
 brief and optionally grant autonomy), and `/wrap` (close out a session and mint
@@ -323,8 +349,9 @@ permission checks are bypassed.
 
 Because `--add-dir <LEGWORK_DIR>` lets a session edit the legwork repo, the
 runner also passes a `--settings` file with Edit/Write deny rules on the
-control plane under `LEGWORK_DIR` (`scripts/**`, `reviewer/**`,
-`reply-capture/**`, `alerts/**`, and the hook scripts). This blocks a worker
+control plane under `LEGWORK_DIR` (`core/**`, `suite/**` and `scripts/**`:
+the hooks and dashboard builder, the runner and its pipelines, and the
+installer). This blocks a worker
 session from rewriting the runner, hooks, or reviewer at the tool layer,
 independent of any webhook. `audit_session_window()` remains a second,
 post-hoc layer over the same control plane (see below).
@@ -384,7 +411,7 @@ These hold across the system. Breaking one breaks an assumption the rest of the
 pieces rely on.
 
 - `dashboard/index.html` is a build artifact. Never hand-edit it. Change a
-  project file and regenerate with `python3 scripts/build_dashboard.py`. The
+  project file and regenerate with `python3 core/build_dashboard.py`. The
   file is gitignored.
 - `build_dashboard.py` stays stdlib-only. No third-party dependencies.
 - Project logs are append-only. Prepend a dated bullet; never rewrite or delete
@@ -406,9 +433,10 @@ pieces rely on.
   touches the legwork repo outside `projects/` and `dashboard/` raises an
   alert.
 - Self-modification of the control plane is resisted at the tool layer. The
-  runner passes `--settings` deny rules on `scripts/**`, `reviewer/**`,
-  `reply-capture/**` and `alerts/**` under `LEGWORK_DIR` (the hook scripts
-  live in `scripts/`), blocking the Edit, Write and MultiEdit tools on those
+  runner passes `--settings` deny rules on `core/**`, `suite/**` and
+  `scripts/**` under `LEGWORK_DIR` (the hooks and dashboard builder, the
+  runner and its pipelines, and the
+  installer), blocking the Edit, Write and MultiEdit tools on those
   paths regardless of any webhook. The deny does not cover Bash, so a
   git-mediated write remains possible; `audit_session_window()` is the
   detection layer, recording any committed control-plane touch in

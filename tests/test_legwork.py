@@ -1,6 +1,6 @@
 """Tests for the legwork runner, dashboard builder and hooks.
 
-Stdlib only, like everything in scripts/. Run from the repo root:
+Stdlib only, like everything under core/ and suite/. Run from the repo root:
 
     python3 -m unittest discover -s tests -v
 
@@ -37,6 +37,10 @@ os.environ["LEGWORK_DIR"] = str(SANDBOX)
 os.environ["LEGWORK_CONFIG"] = os.devnull
 os.environ["GIT_CONFIG_GLOBAL"] = os.devnull
 os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
+# core/ is the shared base, suite/ imports from it, scripts/ holds the
+# installer; all three are import roots for the suite.
+sys.path.insert(0, str(REPO / "core"))
+sys.path.insert(0, str(REPO / "suite"))
 sys.path.insert(0, str(REPO / "scripts"))
 
 import build_dashboard  # noqa: E402
@@ -567,8 +571,8 @@ class TestHelpers(unittest.TestCase):
             legwork_runner.porcelain_path(" M projects/alpha.md"),
             "projects/alpha.md")
         self.assertEqual(
-            legwork_runner.porcelain_path("A  scripts/legwork_runner.py"),
-            "scripts/legwork_runner.py")
+            legwork_runner.porcelain_path("A  suite/legwork_runner.py"),
+            "suite/legwork_runner.py")
         self.assertEqual(
             legwork_runner.porcelain_path("R  old.md -> projects/new.md"),
             "projects/new.md")
@@ -711,15 +715,18 @@ class TestAuditedFixes(unittest.TestCase):
             legwork_runner.GUARD_SETTINGS.unlink(missing_ok=True)
         # Claude Code reads a single leading "/" as project-relative; an
         # absolute deny must be "//" or it silently matches nothing. A real
-        # session confirmed "//" blocks a scripts/ write; pin it here so the
-        # format cannot regress unnoticed.
+        # session confirmed "//" blocks a control-plane write; pin it here so
+        # the format cannot regress unnoticed.
         self.assertTrue(deny)
         for rule in deny:
             inside = rule.split("(", 1)[1].rstrip(")")
             self.assertTrue(inside.startswith("//"),
                             f"deny rule must be an absolute // path: {rule}")
-        self.assertTrue(any(r.startswith(("Edit(", "Write("))
-                            and "/scripts/**" in r for r in deny))
+        # The whole control plane is covered: core/ (hooks, dashboard
+        # builder), suite/ (runner, reviewer, n8n) and scripts/ (installer).
+        for sub in ("/core/**", "/suite/**", "/scripts/**"):
+            self.assertTrue(any(r.startswith(("Edit(", "Write("))
+                                and sub in r for r in deny), sub)
 
 
 class TestLocalReview(unittest.TestCase):
@@ -1409,8 +1416,8 @@ class TestConcurrentRunner(unittest.TestCase):
     def test_tick_blocks_on_dirty_file_outside_projects(self):
         # A dirty tracked file outside projects/ must still stall the tick;
         # only tracker-only edits are auto-committed.
-        (SANDBOX / "scripts").mkdir(exist_ok=True)
-        f = SANDBOX / "scripts" / "c-dirty.txt"
+        (SANDBOX / "suite").mkdir(exist_ok=True)
+        f = SANDBOX / "suite" / "c-dirty.txt"
         f.write_text("v1\n", encoding="utf-8")
         commit_and_push("add tracked non-tracker file")
         f.write_text("v2 uncommitted\n", encoding="utf-8")
@@ -1446,7 +1453,7 @@ class TestConcurrentRunner(unittest.TestCase):
             capture_output=True, text=True).stdout.strip()
         calls = []
         legwork_runner.send_alert = lambda text: calls.append(text) or True
-        evil = SANDBOX / "scripts" / "c-evil.py"
+        evil = SANDBOX / "suite" / "c-evil.py"
         evil.parent.mkdir(exist_ok=True)
         evil.write_text("# tampered\n", encoding="utf-8")
         # Stage only the tampered file: the reset below rolls this commit
@@ -1459,7 +1466,7 @@ class TestConcurrentRunner(unittest.TestCase):
             legwork_runner.audit_session_window(
                 {"file": SANDBOX / "projects" / "c-audit.md"}, claim_head)
             self.assertTrue(calls, "control-plane edit should alert")
-            self.assertIn("scripts/c-evil.py", calls[0])
+            self.assertIn("suite/c-evil.py", calls[0])
         finally:
             subprocess.run(["git", "reset", "-q", "--hard", claim_head],
                            cwd=SANDBOX, check=True)
@@ -1702,8 +1709,8 @@ class TestFireArgv(unittest.TestCase):
         allowed = argv[argv.index("--allowedTools") + 1:argv.index("--model")]
         self.assertEqual(allowed, [
             "Bash(git:*)", "Bash(mkdir:*)",
-            "Bash(python3 scripts/build_dashboard.py:*)",
-            f"Bash(python3 {legwork_runner.LEGWORK_DIR}/scripts/"
+            "Bash(python3 core/build_dashboard.py:*)",
+            f"Bash(python3 {legwork_runner.LEGWORK_DIR}/core/"
             f"build_dashboard.py:*)",
         ])
         self.assertEqual(self.after(argv, "--model"), "haiku")
@@ -1933,8 +1940,8 @@ class TestRunnerGuards(unittest.TestCase):
 
 
 class TestHooks(unittest.TestCase):
-    START = str(REPO / "scripts" / "session_start_hook.sh")
-    END = str(REPO / "scripts" / "session_end_hook.sh")
+    START = str(REPO / "core" / "session_start_hook.sh")
+    END = str(REPO / "core" / "session_end_hook.sh")
 
     @classmethod
     def setUpClass(cls):
@@ -1978,14 +1985,14 @@ class TestHooks(unittest.TestCase):
     def test_end_without_webhook_rebuilds_the_dashboard(self):
         # The lite path: no webhook means no reviewer to notify, so the
         # hook rebuilds the dashboard instead. Exercised with the real
-        # builder copied into the sandbox's scripts/, so the rebuild runs
+        # builder copied into the sandbox's core/, so the rebuild runs
         # against sandbox projects and never the contributor's repo.
         import shutil
-        scripts = SANDBOX / "scripts"
-        scripts.mkdir(exist_ok=True)
+        core = SANDBOX / "core"
+        core.mkdir(exist_ok=True)
         try:
             for mod in ("build_dashboard.py", "legwork_common.py"):
-                shutil.copyfile(REPO / "scripts" / mod, scripts / mod)
+                shutil.copyfile(REPO / "core" / mod, core / mod)
             out = SANDBOX / "dashboard" / "index.html"
             self.run_hook(self.START,
                           f'{{"session_id":"hk-lite","cwd":"{self.work}"}}')
@@ -2003,11 +2010,11 @@ class TestHooks(unittest.TestCase):
                 (SANDBOX / ".session-heads" / "hk-lite").exists(),
                 "the lite path still consumes the session marker")
         finally:
-            shutil.rmtree(scripts, ignore_errors=True)
+            shutil.rmtree(core, ignore_errors=True)
             shutil.rmtree(SANDBOX / "dashboard", ignore_errors=True)
 
     def test_end_without_webhook_and_no_builder_fails_quietly(self):
-        # No webhook and no scripts/build_dashboard.py under LEGWORK_DIR
+        # No webhook and no core/build_dashboard.py under LEGWORK_DIR
         # (this sandbox): the rebuild cannot run, the hook logs the skip
         # and still exits 0 -- a broken hook must never block work.
         payload = f'{{"session_id":"hk-2","cwd":"{self.work}","reason":"exit"}}'
@@ -2158,7 +2165,7 @@ class TestInstaller(unittest.TestCase):
             template, "/Users/me/legwork", "/usr/bin/python3", 600)
         self.assertNotIn("__LEGWORK_DIR__", out)
         self.assertNotIn("__PYTHON__", out)
-        self.assertIn("/Users/me/legwork/scripts/legwork_runner.py", out)
+        self.assertIn("/Users/me/legwork/suite/legwork_runner.py", out)
         self.assertIn("/usr/bin/python3", out)
         self.assertIn("<integer>600</integer>", out)
         self.assertNotIn("<integer>300</integer>", out)
@@ -2245,10 +2252,10 @@ class TestInstaller(unittest.TestCase):
         self.assertEqual(len(end), 1)
         self.assertEqual(
             start[0]["hooks"][0]["command"],
-            "/Users/me/legwork/scripts/session_start_hook.sh")
+            "/Users/me/legwork/core/session_start_hook.sh")
         self.assertEqual(
             end[0]["hooks"][0]["command"],
-            "/Users/me/legwork/scripts/session_end_hook.sh")
+            "/Users/me/legwork/core/session_end_hook.sh")
 
     def test_merge_hooks_is_idempotent_and_preserves_others(self):
         base = {"model": "opus", "hooks": {"SessionStart": [
@@ -2262,7 +2269,7 @@ class TestInstaller(unittest.TestCase):
 
     def test_plan_verb_installs_covers_commands_and_skill(self):
         dest = Path("/tmp/fake-home/.claude")
-        pairs = legwork_install.plan_verb_installs(REPO / ".claude", dest)
+        pairs = legwork_install.plan_verb_installs(REPO / "core", dest)
         names = {src.name for src, _ in pairs}
         for verb in ("add.md", "wrap.md", "pickup.md", "vision.md",
                      "log.md", "shelve.md"):
@@ -2337,7 +2344,7 @@ class TestInstaller(unittest.TestCase):
         line = legwork_install.render_crontab_line(
             "/Users/me/My Projects/legwork", "/usr/bin/python3",
             "*/5 * * * *")
-        self.assertIn("'/Users/me/My Projects/legwork/scripts/"
+        self.assertIn("'/Users/me/My Projects/legwork/suite/"
                       "legwork_runner.py'", line)
         line = legwork_install.render_crontab_line(
             "/Users/me/pct%dir/legwork", "/usr/bin/python3", "*/5 * * * *")
@@ -2352,7 +2359,28 @@ class TestInstaller(unittest.TestCase):
             entries = moved["hooks"][event]
             self.assertEqual(len(entries), 1, "re-pointed, not duplicated")
             self.assertEqual(entries[0]["hooks"][0]["command"],
-                             f"/new/legwork/scripts/{script}")
+                             f"/new/legwork/core/{script}")
+
+    def test_merge_hooks_repoints_pre_split_scripts_entries(self):
+        # A settings.json written before the core/ split points at
+        # <dir>/scripts/session_*_hook.sh. The match is by script filename,
+        # so a re-install must re-point those entries at core/, not
+        # duplicate them.
+        base = {"hooks": {
+            "SessionStart": [{"hooks": [{
+                "type": "command",
+                "command": "/me/legwork/scripts/session_start_hook.sh"}]}],
+            "SessionEnd": [{"hooks": [{
+                "type": "command",
+                "command": "/me/legwork/scripts/session_end_hook.sh"}]}],
+        }}
+        merged = legwork_install.merge_hooks(base, "/me/legwork")
+        for event, script in (("SessionStart", "session_start_hook.sh"),
+                              ("SessionEnd", "session_end_hook.sh")):
+            entries = merged["hooks"][event]
+            self.assertEqual(len(entries), 1, "re-pointed, not duplicated")
+            self.assertEqual(entries[0]["hooks"][0]["command"],
+                             f"/me/legwork/core/{script}")
 
     def test_render_config_persists_tick_minutes(self):
         cfg = legwork_install.render_config({

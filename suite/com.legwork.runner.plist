@@ -7,7 +7,7 @@
   For example:
     sed -e 's#__LEGWORK_DIR__#'"$HOME"'/legwork#g' \
         -e 's#__PYTHON__#/usr/bin/python3#g' \
-        scripts/com.legwork.runner.plist > ~/Library/LaunchAgents/com.legwork.runner.plist
+        suite/com.legwork.runner.plist > ~/Library/LaunchAgents/com.legwork.runner.plist
     launchctl load ~/Library/LaunchAgents/com.legwork.runner.plist
   StartInterval is in seconds (300 = every 5 minutes); change it to taste.
 -->
@@ -19,7 +19,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>__PYTHON__</string>
-        <string>__LEGWORK_DIR__/scripts/legwork_runner.py</string>
+        <string>__LEGWORK_DIR__/suite/legwork_runner.py</string>
     </array>
     <key>StartInterval</key>
     <integer>300</integer>

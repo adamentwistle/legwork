@@ -66,7 +66,7 @@ here), Escalate when (decisions that always go back to the human), Taste
 (preferences that make the work feel right).
 
 `autonomy: loop` in the frontmatter opts the project into the runner
-(scripts/legwork_runner.py, fired by launchd every five minutes): queued
+(suite/legwork_runner.py, fired by launchd every five minutes): queued
 prompts launch as headless sessions in that repo. Headless sessions get file
 edits and git, nothing more by default; the repo's own .claude/settings.json
 allow rules grant its test and build commands, and the /vision interview is
@@ -117,7 +117,7 @@ move on, never error on the missing remote.
    escalations. If you genuinely ran no commands, say so in one line rather
    than leaving stale output from a previous session.
 8. Rebuild the dashboard from the legwork repo:
-   `python3 scripts/build_dashboard.py`
+   `python3 core/build_dashboard.py`
 9. Commit your changes with an honest message, then `git push` when the
    repo has a remote: it is shared with n8n and other machines, so never
    leave local tracker commits unpushed. Two graceful degradations: with no
