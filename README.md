@@ -8,6 +8,17 @@ legwork is a project queue for Claude Code that survives you walking away. Each 
 
 <sub>The dashboard is one static HTML file, rebuilt from your project files by a standard-library Python script. No server, no dependencies. Light is the default; a blackboard <a href="docs/dashboard-dark.png">dark theme</a> is one toggle away.</sub>
 
+## Install
+
+The fastest way in — from inside Claude Code, add the marketplace and install the plugin:
+
+```
+/plugin marketplace add adamentwistle/legwork
+/plugin install legwork@legwork
+```
+
+That gives you the six slash commands (`/add`, `/wrap`, `/pickup`, `/log`, `/shelve`, `/vision`) and the legwork-tracker skill in every repo on your machine, backed by a queue in `~/legwork` (set `LEGWORK_DIR` to move it). The plugin is this repo's [`core/`](core/) directory itself — one editable source, nothing copied. For the self-rebuilding dashboard and the optional level-2 runner, clone the repo and run the wizard instead — see [Quickstart](#quickstart).
+
 ## The loop
 
 The core of legwork is a habit, not a daemon: never end a session without writing down what the next session should do.

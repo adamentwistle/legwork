@@ -1,0 +1,15 @@
+{
+  "name": "legwork",
+  "owner": {
+    "name": "Adam Entwistle",
+    "url": "https://github.com/adamentwistle"
+  },
+  "description": "The legwork manual loop, packaged as a one-line-install Claude Code plugin. The plugin is the repo's core/ directory itself: one editable source, zero drift, zero autonomy code in the artifact.",
+  "plugins": [
+    {
+      "name": "legwork",
+      "source": "./core",
+      "description": "Project queue for Claude Code: /add, /wrap, /pickup, /log, /shelve, /vision and the legwork-tracker skill, plus a static dashboard. The lite level-1 loop; autonomy (the runner + reviewer) is a re-run of ./install.sh away."
+    }
+  ]
+}
