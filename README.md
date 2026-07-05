@@ -67,7 +67,7 @@ Graduating is re-running `./install.sh` in the same checkout and picking level 2
 
 Running headless? `./install.sh --yes` accepts every default and writes only the in-repo config; a fresh clone defaults to level 1 (`--lite` pins it). The outside-the-repo steps are opt-in via `--with-commands`, `--with-launchd` and `--with-hooks` — `--with-launchd` implies level 2, while `--with-hooks` works at either level.
 
-Then the first five minutes: run `claude` in any repo you are working on, `/add <project>` to queue it, do some work, `/wrap` to close out, and open `dashboard/index.html` in the legwork checkout. Come back another day with `/pickup <project>`. Verify the install any time with `python3 scripts/legwork_runner.py --doctor`.
+Then the first five minutes: run `claude` in any repo you are working on, `/add <project>` to queue it, do some work, `/wrap` to close out, and open `dashboard/index.html` in the legwork checkout. Come back another day with `/pickup <project>`. Verify the install any time with `python3 suite/legwork_runner.py --doctor`.
 
 > **Make this repo your tracker.** A fresh clone gitignores `/projects/`, so your real queue stays out of any public fork by accident. When you want your queue in version control (the level 2 runner requires it; the verbs commit and push when it is there), point the checkout at a private remote of your own and delete the `/projects/` and `/dashboard/index.html` lines from `.gitignore`. [SETUP.md](SETUP.md) walks through it.
 

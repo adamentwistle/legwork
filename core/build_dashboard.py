@@ -3,7 +3,7 @@
 
 Zero dependencies. Run from anywhere:
 
-    python3 scripts/build_dashboard.py
+    python3 core/build_dashboard.py
 
 Reads simple frontmatter (key: value lines between --- markers), the first
 fenced block under '## Next prompt', and bullet lines under '## Log'.

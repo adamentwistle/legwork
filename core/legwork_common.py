@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Shared helpers for the legwork scripts.
 
-Stdlib only, like everything in scripts/. The runner and the dashboard
-builder both parse the same project-file shape (frontmatter, the Next prompt
-fenced block, dated values), and the runner and installer share the same
-config-file KEY=VALUE rules, so that parsing lives here once instead of being
-copied into each script. These scripts run with their own directory on
-sys.path[0], so `from legwork_common import ...` resolves whether they are
-run directly (python3 scripts/<x>.py), imported by the tests, or fired by
-launchd. Keep this module dependency-free.
+Stdlib only, like everything under core/ and suite/. The runner and the
+dashboard builder both parse the same project-file shape (frontmatter, the
+Next prompt fenced block, dated values), and the runner and installer share
+the same config-file KEY=VALUE rules, so that parsing lives here once instead
+of being copied into each script. This module is the shared base of the whole
+dependency graph: core/ scripts sit beside it (sys.path[0] covers a direct
+run), and the suite/ scripts and the installer put core/ on sys.path before
+importing it: suite imports from core, never the reverse. Keep this module
+dependency-free and free of suite/ imports.
 """
 
 import re

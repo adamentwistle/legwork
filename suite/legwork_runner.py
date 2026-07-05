@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Fire queued legwork prompts as headless Claude Code sessions.
 
-Zero dependencies, like everything in scripts/. Run by launchd every five
-minutes (com.legwork.runner), or by hand:
+Zero dependencies, like everything under core/ and suite/. Run by launchd
+every five minutes (com.legwork.runner), or by hand:
 
-    python3 scripts/legwork_runner.py            one tick
-    python3 scripts/legwork_runner.py --dry-run  show eligibility, change nothing
-    python3 scripts/legwork_runner.py --doctor   preflight checklist, change nothing
+    python3 suite/legwork_runner.py            one tick
+    python3 suite/legwork_runner.py --dry-run  show eligibility, change nothing
+    python3 suite/legwork_runner.py --doctor   preflight checklist, change nothing
 
 One tick fires every eligible project at once, one session in flight per
 project: target-repo sessions run fully parallel in worker threads, while
@@ -38,8 +38,8 @@ Anything more (test runners, builds, deploys) is granted per repo by the
 human, in that repo's own .claude/settings.json allow rules; everything else
 is denied and the session is expected to say so and wrap honestly. No
 permission checks are bypassed. A per-session --settings file denies the
-Edit/Write tools on the legwork control plane (scripts/, reviewer/, the n8n
-pipelines); Bash is not covered, so the deny blocks the direct edit path
+Edit/Write tools on the legwork control plane (core/, suite/ and scripts/);
+Bash is not covered, so the deny blocks the direct edit path
 while audit_session_window detects committed control-plane touches post-hoc.
 SECURITY.md spells out the boundary honestly.
 
@@ -104,7 +104,7 @@ it just skips the review post and the Telegram alerts. As an alternative to
 the n8n webhook, set LEGWORK_LOCAL_REVIEW to triage each session in-process
 with a `claude -p` call (REVIEWER_MODEL, default claude-sonnet-4-6) and write
 the pass/revise/escalate verdict straight back to the project file, so the
-reviewer-by-exception loop runs with no n8n; see scripts/legwork_review.py.
+reviewer-by-exception loop runs with no n8n; see suite/legwork_review.py.
 """
 
 import json
@@ -121,8 +121,13 @@ import urllib.request
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-import legwork_review
-from legwork_common import (
+# suite/ imports from core/, never the reverse. A direct run (or launchd)
+# puts only suite/ at sys.path[0], so core/, the shared base, goes right
+# after it before the legwork imports below resolve.
+sys.path.insert(1, str(Path(__file__).resolve().parent.parent / "core"))
+
+import legwork_review  # noqa: E402
+from legwork_common import (  # noqa: E402
     COST_RE, PROMPT_RE, days_since, iter_config_pairs, parse_frontmatter)
 
 
@@ -1179,7 +1184,7 @@ def write_guard_settings():
     # or the deny silently matches nothing (verified by firing a real session).
     base = str(LEGWORK_DIR).lstrip("/")
     deny = []
-    for sub in ("scripts", "reviewer", "reply-capture", "alerts"):
+    for sub in ("core", "suite", "scripts"):
         path = f"//{base}/{sub}/**"
         for tool in ("Edit", "Write", "MultiEdit"):
             deny.append(f"{tool}({path})")
@@ -1251,15 +1256,15 @@ def fire_claimed(project, claude_path, claim_head, started):
         "--add-dir", str(LEGWORK_DIR),
     ]
     if guard:
-        # Deny the edit tools on the legwork control plane (scripts/,
-        # reviewer/, the n8n pipelines). Bash(git:*) is not covered, so this
-        # blocks the direct path only; the post-fire audit is the detector.
+        # Deny the edit tools on the legwork control plane (core/, suite/
+        # and scripts/). Bash(git:*) is not covered, so this blocks the
+        # direct path only; the post-fire audit is the detector.
         argv += ["--settings", guard]
     argv += [
         "--allowedTools",
         "Bash(git:*)", "Bash(mkdir:*)",
-        "Bash(python3 scripts/build_dashboard.py:*)",
-        f"Bash(python3 {LEGWORK_DIR}/scripts/build_dashboard.py:*)",
+        "Bash(python3 core/build_dashboard.py:*)",
+        f"Bash(python3 {LEGWORK_DIR}/core/build_dashboard.py:*)",
     ]
     if project["model"]:
         argv += ["--model", project["model"]]
@@ -1367,7 +1372,7 @@ def rebuild_dashboard():
     """Safety net: the session's own wrap may lack permission to rebuild."""
     with WRITE_LOCK:
         subprocess.run(
-            [sys.executable, str(LEGWORK_DIR / "scripts" / "build_dashboard.py")],
+            [sys.executable, str(LEGWORK_DIR / "core" / "build_dashboard.py")],
             cwd=LEGWORK_DIR, capture_output=True, timeout=60,
         )
         changed = run_git(["status", "--porcelain", "dashboard"], LEGWORK_DIR)
@@ -1618,7 +1623,7 @@ def doctor():
     check("legwork repo is a git repo", (LEGWORK_DIR / ".git").exists())
     check("projects/ exists", PROJECTS_DIR.is_dir(), str(PROJECTS_DIR))
     check("dashboard builder present",
-          (LEGWORK_DIR / "scripts" / "build_dashboard.py").is_file())
+          (LEGWORK_DIR / "core" / "build_dashboard.py").is_file())
     if (LEGWORK_DIR / ".git").exists():
         check("legwork git status readable",
               run_git(["status", "--porcelain"], LEGWORK_DIR).returncode == 0)

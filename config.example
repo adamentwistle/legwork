@@ -1,7 +1,7 @@
 # Legwork configuration.
 #
 # Copy this file to `config` (same directory) and edit. `config` is gitignored.
-# scripts/legwork_runner.py loads it at startup, so launchd (which does not
+# suite/legwork_runner.py loads it at startup, so launchd (which does not
 # read your shell profile), cron and manual runs share one source of truth.
 # Real environment variables always override the file. Values may use $HOME
 # and ~, which are expanded. Lines are KEY=VALUE; # starts a comment.
@@ -38,11 +38,11 @@ LEGWORK_DAILY_CAP=8
 # no webhook is configured), the runner triages each finished session in-process
 # with a `claude -p` call and writes the pass/revise/escalate verdict straight
 # back to the project file, so reviewer-by-exception runs without n8n. The
-# webhook wins if both are set. See scripts/legwork_review.py.
+# webhook wins if both are set. See suite/legwork_review.py.
 # LEGWORK_LOCAL_REVIEW=1
 
 # The model the reviewer call uses, for BOTH the local reviewer (read by the
-# runner) and the n8n pipeline (read by reviewer/n8n-build-node.js). A full id
+# runner) and the n8n pipeline (read by suite/reviewer/n8n-build-node.js). A full id
 # or a short alias. Default: claude-sonnet-4-6.
 # REVIEWER_MODEL=claude-sonnet-4-6
 
@@ -56,5 +56,5 @@ LEGWORK_DAILY_CAP=8
 # CLAUDE_CONFIG_DIR_WORK=$HOME/.claude-legwork-work
 
 # --- Applied outside the runner (documented here so config lives in one place)
-# The launchd tick interval lives in scripts/com.legwork.runner.plist
+# The launchd tick interval lives in suite/com.legwork.runner.plist
 # (StartInterval, seconds). Default: 300 (every 5 minutes).

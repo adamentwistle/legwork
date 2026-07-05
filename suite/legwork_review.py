@@ -14,21 +14,29 @@ owns the git writes; this module decides what the verdict means and how the
 project file should change, so the decision logic is unit-testable against
 fixtures without touching a repo or the network.
 
-Stdlib only, like everything in scripts/. The rubric below is kept in sync
-with reviewer/n8n-build-node.js (the n8n copy) and reviewer/rubric.md (the
-readable reference); the three say the same thing so the local and n8n
-reviewers triage identically.
+Stdlib only, like everything under core/ and suite/. The rubric below is
+kept in sync with suite/reviewer/n8n-build-node.js (the n8n copy) and
+suite/reviewer/rubric.md (the readable reference); the three say the same
+thing so the local and n8n reviewers triage identically.
 """
 
 import json
 import re
 import subprocess
+import sys
+from pathlib import Path
 
-from legwork_common import parse_frontmatter
+# suite/ imports from core/, never the reverse. The runner (same directory)
+# normally imports this module with core/ already on sys.path; this bootstrap
+# keeps the import below working when the module is loaded on its own.
+sys.path.insert(1, str(Path(__file__).resolve().parent.parent / "core"))
+
+from legwork_common import parse_frontmatter  # noqa: E402
 
 # The reviewer system prompt. Verbatim copy of the RUBRIC in
-# reviewer/n8n-build-node.js so the local and n8n reviewers judge identically;
-# edit both (and the readable mirror in reviewer/rubric.md) together.
+# suite/reviewer/n8n-build-node.js so the local and n8n reviewers judge
+# identically; edit both (and the readable mirror in suite/reviewer/rubric.md)
+# together.
 RUBRIC = """You are the reviewer in a personal agent pipeline. A Claude Code work session has just ended. You receive evidence: repo, branch, last commit, diff stat, uncommitted file names, test output if any, and the project's tracker entry when one exists. The tracker entry contains the prompt this session was meant to execute, including a Done when line. Your job is triage, not full code review. Reply with JSON only, no prose, no markdown fences.
 
 Verdicts:
@@ -43,7 +51,7 @@ Judging against intent:
 
 Infrastructure exits are not broken environments. When end_reason is runner-recovery, the runner closed the session, not a /wrap, and a test_output that begins with RUNNER: is the runner's note rather than a test result. It means the session may have been cut short by infrastructure: an API overload or 5xx, a usage limit, or the harness exiting before the wrap hook fired. Do not read that note as a broken environment, a broken repo, or a failed setup, and do not treat an empty diff or absent commits as proof the work was bad: nothing was attempted, or the work never reached a commit. Judge the real commits, diff and tests on their merits. If this session's commits and a real diff show the task done, pass; if nothing was committed, prefer revise with a fix prompt that restates the original task and its Done when so a later session retries it. Escalate only if the original task itself forces it under the policy below, never because the runner reported the exit.
 
-Always escalate, regardless of confidence, when the work touches money, payments, billing or transfers; anything deployed, published, sent or public-facing; credentials, secrets or auth; destructive or hard-to-reverse operations; the evidence contradicts the tracker entry's task; the project has already failed review repeatedly, meaning the tracker entry's Log shows two or more prior reviewer 'revise' cycles, since a task that keeps failing review needs a human, not another automatic retry; the session modifies the legwork pipeline itself, meaning the repo under review is legwork and the diff touches its hooks, reviewer rubric, n8n workflow or dashboard build script (scripts/ or reviewer/), since self modification of the pipeline always escalates; or the diff is empty while the commit claims real work. Never pass on prose alone.
+Always escalate, regardless of confidence, when the work touches money, payments, billing or transfers; anything deployed, published, sent or public-facing; credentials, secrets or auth; destructive or hard-to-reverse operations; the evidence contradicts the tracker entry's task; the project has already failed review repeatedly, meaning the tracker entry's Log shows two or more prior reviewer 'revise' cycles, since a task that keeps failing review needs a human, not another automatic retry; the session modifies the legwork pipeline itself, meaning the repo under review is legwork and the diff touches its hooks, reviewer rubric, n8n workflow or dashboard build script (core/, suite/ or scripts/), since self modification of the pipeline always escalates; or the diff is empty while the commit claims real work. Never pass on prose alone.
 
 session_commits lists the commits made during this session; attribute only those to the session. last_commit may predate the session and must not be judged as this session's work. Weigh evidence over narrative. When torn between pass and revise, choose revise. When torn between revise and escalate, choose escalate.
 

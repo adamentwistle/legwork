@@ -210,5 +210,5 @@ trigger instead, or use a second bot.
   import, and change them again if the remote ever moves.
 - The minter uses claude-sonnet-4-6, the same model and credential as the
   reviewer. The system prompt mirrors the prompt shape rules in
-  `.claude/skills/legwork-tracker/SKILL.md`; keep them aligned if the rules
+  `core/skills/legwork-tracker/SKILL.md`; keep them aligned if the rules
   change.

@@ -1,7 +1,7 @@
 # macOS
 .DS_Store
 
-# Python bytecode from running scripts/
+# Python bytecode from running the Python under core/, suite/ and scripts/
 __pycache__/
 
 # Local config: your private copy of config.example, read by the runner.

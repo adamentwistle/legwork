@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Interactive installer for legwork, the autonomous project queue.
 
-Zero dependencies, like everything in scripts/. Run it from the repo root,
-normally through the wrapper:
+Zero dependencies, like everything under core/ and suite/. It lives in
+scripts/ because it serves both levels: it installs core/, the lite manual
+loop, and optionally activates suite/, the autonomy layer, on top. Run it
+from the repo root, normally through the wrapper:
 
     ./install.sh                 the visual wizard
     python3 scripts/legwork_install.py        same thing, directly
@@ -60,10 +62,15 @@ import sys
 from pathlib import Path
 from xml.sax.saxutils import escape as xml_escape
 
-from legwork_common import iter_config_pairs
-
 REPO = Path(__file__).resolve().parent.parent
-PLIST_TEMPLATE = REPO / "scripts" / "com.legwork.runner.plist"
+
+# The shared config-file parsing lives in core/, the base of the dependency
+# graph, which a direct run of this script does not have on sys.path.
+sys.path.insert(1, str(REPO / "core"))
+
+from legwork_common import iter_config_pairs  # noqa: E402
+
+PLIST_TEMPLATE = REPO / "suite" / "com.legwork.runner.plist"
 START_HOOK = "session_start_hook.sh"
 END_HOOK = "session_end_hook.sh"
 PLIST_NAME = "com.legwork.runner.plist"
@@ -115,7 +122,7 @@ def render_crontab_line(legwork_dir, python_bin, schedule):
     so the installer can find and replace its own line idempotently. Paths
     are shell-quoted (a space would split the command) and `%` is escaped,
     since cron reads a bare % as end-of-command plus stdin."""
-    runner = Path(legwork_dir) / "scripts" / "legwork_runner.py"
+    runner = Path(legwork_dir) / "suite" / "legwork_runner.py"
     log = Path(legwork_dir) / ".runner-logs" / "cron.log"
     command = (f"{shlex.quote(str(python_bin))} {shlex.quote(str(runner))} "
                f">> {shlex.quote(str(log))} 2>&1")
@@ -137,7 +144,7 @@ def render_config(v):
     w = out.append
     w("# Legwork configuration. Written by scripts/legwork_install.py.")
     w("#")
-    w("# This file is gitignored. scripts/legwork_runner.py loads it at")
+    w("# This file is gitignored. suite/legwork_runner.py loads it at")
     w("# startup, so launchd, cron and manual runs share one source of truth.")
     w("# Real environment variables override anything set here. Values may use")
     w("# $HOME and ~, which are expanded. Lines are KEY=VALUE; # is a comment.")
@@ -188,7 +195,7 @@ def render_config(v):
     elif mode == "local":
         w("# Local reviewer: no n8n. The runner triages each finished session")
         w("# in-process with a `claude -p` call and writes the verdict back to")
-        w("# the project file. See scripts/legwork_review.py.")
+        w("# the project file. See suite/legwork_review.py.")
         w("LEGWORK_LOCAL_REVIEW=1")
     else:
         w("# No reviewer: the runner still fires sessions and they still wrap;")
@@ -246,17 +253,19 @@ def review_mode_default(existing):
     return 0
 
 
-def plan_verb_installs(repo_claude_dir, dest_base):
+def plan_verb_installs(verbs_root, dest_base):
     """(source, destination) pairs that install the interactive verbs
-    user-level: every `.claude/commands/*.md` plus the whole legwork-tracker
+    user-level: every `core/commands/*.md` plus the whole legwork-tracker
     skill, mirrored under `<dest_base>/commands` and `<dest_base>/skills`.
-    Read-only: computes the copy plan, copies nothing."""
-    repo_claude_dir = Path(repo_claude_dir)
+    `verbs_root` is the directory holding commands/ and skills/, core/ in
+    this repo (the in-checkout .claude entries symlink to it). Read-only:
+    computes the copy plan, copies nothing."""
+    verbs_root = Path(verbs_root)
     dest_base = Path(dest_base)
     pairs = []
-    for src in sorted((repo_claude_dir / "commands").glob("*.md")):
+    for src in sorted((verbs_root / "commands").glob("*.md")):
         pairs.append((src, dest_base / "commands" / src.name))
-    skills = repo_claude_dir / "skills"
+    skills = verbs_root / "skills"
     skill = skills / "legwork-tracker"
     for src in sorted(p for p in skill.rglob("*") if p.is_file()):
         pairs.append((src, dest_base / "skills" / src.relative_to(skills)))
@@ -268,12 +277,14 @@ def merge_hooks(settings, legwork_dir):
     and SessionEnd hooks registered. Idempotent: an entry already pointing at
     our hook script for that event is re-pointed at the current legwork dir
     (so a moved checkout does not leave hooks aimed at the dead old path)
-    rather than duplicated, and unrelated hooks are never disturbed."""
+    rather than duplicated, and unrelated hooks are never disturbed. The
+    match is by script filename, so an entry from before the core/ split
+    (.../scripts/session_*_hook.sh) is re-pointed at core/ on re-install."""
     settings = dict(settings) if settings else {}
     hooks = dict(settings.get("hooks") or {})
     for event, script in ((("SessionStart"), START_HOOK),
                           (("SessionEnd"), END_HOOK)):
-        command = str(Path(legwork_dir) / "scripts" / script)
+        command = str(Path(legwork_dir) / "core" / script)
         entries = []
         found = False
         for group in (hooks.get(event) or []):
@@ -784,7 +795,7 @@ def install_verbs(wiz, values, force=None):
             "skipped commands/skill; the verbs only work inside this "
             "checkout (see SETUP.md step 2)"))
         return actions
-    pairs = plan_verb_installs(REPO / ".claude", dest_base)
+    pairs = plan_verb_installs(REPO / "core", dest_base)
     for src, dest in pairs:
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, dest)
@@ -943,14 +954,14 @@ def closing(ui, actions, level=2):
                         "session with /wrap"))
     if level == 1:
         print("  " + ui.dim(f"{ui.arrow} build the dashboard: python3 "
-                            "scripts/build_dashboard.py"))
+                            "core/build_dashboard.py"))
         print("  " + ui.dim(f"{ui.arrow} ready for autonomy? re-run "
                             "./install.sh and pick level 2"))
     else:
         print("  " + ui.dim(f"{ui.arrow} grant autonomy per project with "
                             "/vision"))
         print("  " + ui.dim(f"{ui.arrow} verify: python3 "
-                            "scripts/legwork_runner.py --doctor"))
+                            "suite/legwork_runner.py --doctor"))
     print()
 
 
@@ -958,7 +969,7 @@ def run_doctor(wiz):
     if wiz.ask_yn("Run the preflight doctor now?", default=True):
         print()
         subprocess.run([sys.executable,
-                        str(REPO / "scripts" / "legwork_runner.py"),
+                        str(REPO / "suite" / "legwork_runner.py"),
                         "--doctor"],
                        env={**os.environ,
                             "LEGWORK_CONFIG": str(REPO / "config")})

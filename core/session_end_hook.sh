@@ -71,7 +71,7 @@ fi
 # consumed so .session-heads/ does not accumulate. Never log "sent:" here;
 # the runner matches that token to decide a review was delivered.
 if [ -z "${LEGWORK_WEBHOOK_URL:-}" ]; then
-  BUILDER="$LEGWORK_DIR/scripts/build_dashboard.py"
+  BUILDER="$LEGWORK_DIR/core/build_dashboard.py"
   if [ -f "$BUILDER" ] && python3 "$BUILDER" >/dev/null 2>&1; then
     log "$REPO_NAME  rebuilt dashboard: no webhook set, reason=${REASON:-manual}"
   else

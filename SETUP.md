@@ -57,7 +57,8 @@ lives in your n8n instance, not on this machine.
 
 ## Requirements
 
-- `python3`. Version 3.9 or newer is fine. Everything in `scripts/` is
+- `python3`. Version 3.9 or newer is fine. Everything in `core/`, `suite/`
+  and `scripts/` is
   standard library only, no pip installs. On macOS the launchd agent runs the
   runner with `/usr/bin/python3`, the system interpreter, so it does not
   depend on a shell-managed Python.
@@ -90,7 +91,7 @@ project (frontmatter, an optional `## Vision`, a `## Next prompt` fenced
 block, an append-only `## Log`). For the file format, see
 `examples/projects/`. Those are invented sample projects that show the
 frontmatter, Vision, prompt and Log layout. The full spec is in
-`.claude/skills/legwork-tracker/SKILL.md`.
+`core/skills/legwork-tracker/SKILL.md`.
 
 ### Make this repo your tracker
 
@@ -121,15 +122,16 @@ through the environment variable.
 ## 2. The commands and the skill
 
 The manual loop is six slash commands (`/add`, `/wrap`, `/pickup`, `/vision`,
-`/log`, `/shelve`) plus the legwork-tracker skill they share. They ship in
-this repo's `.claude/`, which means a fresh clone only has them inside the
+`/log`, `/shelve`) plus the legwork-tracker skill they share. Their source
+lives in `core/commands/` and `core/skills/` (the repo's `.claude/` entries
+are symlinks to them), which means a fresh clone only has them inside the
 checkout itself; a `/wrap` at the end of a session in one of your own repos
 would find nothing. Install them user-level so they work from any repo:
 
 ```
 mkdir -p ~/.claude/commands ~/.claude/skills
-cp .claude/commands/*.md ~/.claude/commands/
-cp -R .claude/skills/legwork-tracker ~/.claude/skills/
+cp core/commands/*.md ~/.claude/commands/
+cp -R core/skills/legwork-tracker ~/.claude/skills/
 ```
 
 This is the same thing the wizard's command step does. The commands find the
@@ -145,7 +147,7 @@ Copy the template and edit it:
 cp config.example config
 ```
 
-`config` is gitignored. `scripts/legwork_runner.py` reads it at startup via
+`config` is gitignored. `suite/legwork_runner.py` reads it at startup via
 `load_config()`, so launchd (which does not read your shell profile), cron and
 manual runs all share one source of truth. The file is `KEY=VALUE` lines;
 `#` starts a comment; `$HOME` and `~` are expanded.
@@ -171,12 +173,12 @@ dir whose `settings.json` needs them. If you left `CLAUDE_CONFIG_DIR` unset,
 autonomous sessions inherit your default config, so register them in
 `~/.claude/settings.json`.
 
-- `scripts/session_start_hook.sh` (SessionStart): records the repo HEAD for
+- `core/session_start_hook.sh` (SessionStart): records the repo HEAD for
   the session, so the end hook can report only what this session changed.
-- `scripts/session_end_hook.sh` (SessionEnd): with `LEGWORK_WEBHOOK_URL` set,
+- `core/session_end_hook.sh` (SessionEnd): with `LEGWORK_WEBHOOK_URL` set,
   gathers session-scoped git evidence plus the project's tracker entry and
   POSTs them to the webhook; with it unset, runs
-  `scripts/build_dashboard.py` so `dashboard/index.html` reflects what the
+  `core/build_dashboard.py` so `dashboard/index.html` reflects what the
   session just wrapped.
 
 Add this to the `settings.json` of that config dir, with `$HOME/legwork`
@@ -190,7 +192,7 @@ replaced by your `LEGWORK_DIR` if it differs:
         "hooks": [
           {
             "type": "command",
-            "command": "$HOME/legwork/scripts/session_start_hook.sh"
+            "command": "$HOME/legwork/core/session_start_hook.sh"
           }
         ]
       }
@@ -200,7 +202,7 @@ replaced by your `LEGWORK_DIR` if it differs:
         "hooks": [
           {
             "type": "command",
-            "command": "$HOME/legwork/scripts/session_end_hook.sh"
+            "command": "$HOME/legwork/core/session_end_hook.sh"
           }
         ]
       }
@@ -222,7 +224,7 @@ Linux.
 
 ### (a) launchd on macOS
 
-`scripts/com.legwork.runner.plist` is a template with two placeholders:
+`suite/com.legwork.runner.plist` is a template with two placeholders:
 `__LEGWORK_DIR__` (the absolute path to your legwork repo) and `__PYTHON__`
 (the interpreter, normally `/usr/bin/python3`). Fill them in, drop the result
 in `~/Library/LaunchAgents/`, and load it:
@@ -230,7 +232,7 @@ in `~/Library/LaunchAgents/`, and load it:
 ```
 sed -e 's#__LEGWORK_DIR__#'"$HOME"'/legwork#g' \
     -e 's#__PYTHON__#/usr/bin/python3#g' \
-    scripts/com.legwork.runner.plist > ~/Library/LaunchAgents/com.legwork.runner.plist
+    suite/com.legwork.runner.plist > ~/Library/LaunchAgents/com.legwork.runner.plist
 launchctl load ~/Library/LaunchAgents/com.legwork.runner.plist
 ```
 
@@ -250,7 +252,7 @@ launchctl unload ~/Library/LaunchAgents/com.legwork.runner.plist
 Add a crontab line that runs the runner every 5 minutes:
 
 ```
-*/5 * * * * /usr/bin/python3 $HOME/legwork/scripts/legwork_runner.py >> $HOME/legwork/.runner-logs/cron.log 2>&1
+*/5 * * * * /usr/bin/python3 $HOME/legwork/suite/legwork_runner.py >> $HOME/legwork/.runner-logs/cron.log 2>&1
 ```
 
 The cron schedule is the tick interval; change `*/5` to run more or less
@@ -270,12 +272,12 @@ the review post and the Telegram alerts are simply skipped.
 The pipeline is three importable n8n workflows. Import them into your own n8n
 instance:
 
-- `reviewer/n8n-review-workflow.json`: the reviewer. Takes the session
+- `suite/reviewer/n8n-review-workflow.json`: the reviewer. Takes the session
   evidence and returns pass / revise / escalate.
-- `reply-capture/n8n-reply-capture-workflow.json`: the Telegram reply path.
+- `suite/reply-capture/n8n-reply-capture-workflow.json`: the Telegram reply path.
   Reply to a review letter, or send slash commands, to drive the queue from
   your phone.
-- `alerts/n8n-alerts-workflow.json`: runner stall alerts and a daily
+- `suite/alerts/n8n-alerts-workflow.json`: runner stall alerts and a daily
   heartbeat.
 
 After import:
@@ -283,10 +285,10 @@ After import:
 1. Fill the `REPLACE_WITH_` placeholders in each workflow: n8n credential ids,
    your Telegram chat id, and the GitHub `owner/repo` of your legwork repo.
    The committed JSON never carries real secrets.
-2. Paste `reviewer/n8n-build-node.js` into the "Build review request" node.
+2. Paste `suite/reviewer/n8n-build-node.js` into the "Build review request" node.
    That file is the source of truth for the review rubric. The reviewer model
    comes from `REVIEWER_MODEL` (default `claude-sonnet-4-6`), applied in that
-   node. `reviewer/rubric.md` is the readable mirror.
+   node. `suite/reviewer/rubric.md` is the readable mirror.
 3. Set the webhook URLs in your `config`:
 
    ```
@@ -299,7 +301,7 @@ After import:
 
 For the Telegram side (the bot and its credential, the GitHub fine-grained
 PAT, the Anthropic key, restricting the trigger to your own Telegram user
-id, and activating), follow `reply-capture/SETUP.md`. The write-back token
+id, and activating), follow `suite/reply-capture/SETUP.md`. The write-back token
 is a fine-grained, repo-scoped PAT held only as an n8n credential, never in
 the repo.
 
@@ -314,7 +316,7 @@ python3 -m unittest discover -s tests
 The full stdlib test suite should pass.
 
 ```
-python3 scripts/build_dashboard.py
+python3 core/build_dashboard.py
 ```
 
 This regenerates `dashboard/index.html` from the top-level `projects/*.md`.
@@ -324,7 +326,7 @@ copy one into `projects/` if you want to see it on the dashboard. The html is
 a build artifact and is gitignored.
 
 ```
-python3 scripts/legwork_runner.py --dry-run
+python3 suite/legwork_runner.py --dry-run
 ```
 
 This prints each project and why it is or is not eligible to fire, and changes
@@ -335,7 +337,7 @@ one real tick by hand.
 
 ## Troubleshooting
 
-- `python3 scripts/legwork_runner.py --doctor` is the first stop: it checks
+- `python3 suite/legwork_runner.py --doctor` is the first stop: it checks
   the config, the repo layout, the `claude` binary, the git state and the
   review mode, and says what is wrong in plain lines.
 - `$LEGWORK_DIR/runner.log` is the audit trail of every tick: what fired,

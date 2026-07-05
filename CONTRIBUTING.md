@@ -25,7 +25,7 @@ These are deliberate non-goals. PRs that head this way will be declined.
 ## House rules for any change
 
 - Keep the test suite green: `python3 -m unittest discover -s tests` must pass.
-- `scripts/build_dashboard.py` and the tests stay stdlib-only. Add no new
+- `core/build_dashboard.py` and the tests stay stdlib-only. Add no new
   dependencies.
 - Plain, direct prose in code, comments, and docs. No em dashes anywhere.
 
