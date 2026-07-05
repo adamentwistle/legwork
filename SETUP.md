@@ -8,6 +8,25 @@ Read it in order. Steps 1 and 2 give you the manual loop: the queue, the
 slash commands and the dashboard, with nothing running on a timer. Steps 3
 through 5 add the level 2 runner. Step 6 is the optional n8n review pipeline.
 
+## The plugin (fastest)
+
+If you just want the manual loop — the slash commands and the tracker skill —
+the shortest path is the Claude Code plugin. From inside Claude Code:
+
+```
+/plugin marketplace add adamentwistle/legwork
+/plugin install legwork@legwork
+```
+
+This installs `core/` (the complete level-1 product) as a plugin: the six
+commands (`/add`, `/wrap`, `/pickup`, `/log`, `/shelve`, `/vision`) and the
+legwork-tracker skill, available in every repo. The plugin *is* this repo's
+`core/` directory — sourced as `./core` by the marketplace manifest at the
+repo root, so there is one editable source and nothing copied. Your queue
+defaults to `~/legwork`; set `LEGWORK_DIR` to move it. The plugin does not set
+up the self-rebuilding dashboard or the level-2 runner — for those, clone the
+repo and run the wizard below.
+
 ## The one-command install
 
 Most people should just run the wizard. From the cloned repo:

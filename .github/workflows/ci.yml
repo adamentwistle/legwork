@@ -74,17 +74,28 @@ jobs:
         run: node --check suite/reviewer/n8n-build-node.js
 
   # The strip gate for the lite artifact. core/ is the complete level-1
-  # product (common helpers, dashboard builder, hooks, commands, skill), and
-  # suite/ imports from core, never the reverse. This job proves it: core/ is
-  # copied OUT of the checkout (no suite/, no scripts/, no tests/) and then
-  # imported and run. If core/ ever grows an import or path reference into
-  # suite/, this fails. Blocking, like the test gate.
+  # product (common helpers, dashboard builder, hooks, commands, skill, and
+  # the plugin manifest), and suite/ imports from core, never the reverse.
+  # This job proves it: core/ is copied OUT of the checkout (no suite/, no
+  # scripts/, no tests/) and then imported and run. If core/ ever grows an
+  # import or path reference into suite/, this fails. The same core/ is the
+  # published Claude Code plugin (its manifest lives at
+  # core/.claude-plugin/plugin.json, sourced by the repo-root marketplace as
+  # ./core), so this gate also asserts the manifests are well-formed and that
+  # the stripped, suite-free copy is itself a complete plugin. Blocking, like
+  # the test gate.
   lite:
     name: lite (core/ alone)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      # Against the full checkout: the manifests parse, source ./core, expose
+      # exactly the level-1 command + skill surface, and reach for no suite/
+      # code. Stdlib only; runs in the main suite too.
+      - name: Validate the plugin + marketplace manifests
+        run: python3 -m unittest tests.test_plugin_manifest -v
 
       - name: Strip to core/ and a sample queue
         run: |
@@ -98,6 +109,11 @@ jobs:
           python3 -c "import sys; sys.path.insert(0, 'core'); \
             import legwork_common, build_dashboard"
           bash -n core/session_start_hook.sh core/session_end_hook.sh
+          # The stripped copy carries its own plugin manifest and no suite/:
+          # core/ alone is an installable plugin.
+          test -f core/.claude-plugin/plugin.json
+          python3 -c "import json; m=json.load(open('core/.claude-plugin/plugin.json')); assert m['name'] == 'legwork', m"
+          test ! -e suite && test ! -e scripts
 
       - name: The lite loop runs end to end
         working-directory: ${{ runner.temp }}/lite

@@ -1,0 +1,19 @@
+{
+  "name": "legwork",
+  "description": "The legwork manual loop for Claude Code: a project queue that survives you walking away. /add queues a project, /wrap logs what happened and mints the next prompt while context is hot, /pickup briefs you back in 30 seconds. One markdown file per project, a static dashboard, no server. This plugin is core/ itself — the same commands and skill the repo and installer use.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Adam Entwistle",
+    "url": "https://github.com/adamentwistle"
+  },
+  "homepage": "https://github.com/adamentwistle/legwork",
+  "repository": "https://github.com/adamentwistle/legwork",
+  "license": "MIT",
+  "keywords": [
+    "productivity",
+    "project-management",
+    "workflow",
+    "task-queue",
+    "slash-commands"
+  ]
+}
