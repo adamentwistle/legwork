@@ -117,6 +117,19 @@ a dashboard from the example projects, and runs the webhook-less SessionEnd
 hook end to end. If `core/` ever grows an import or path reference into
 `suite/`, the gate fails.
 
+`scripts/build_wedge.py` uses that same self-sufficiency to publish `core/`
+as its own standalone repository — the "wedge": the level-1 loop on its own,
+so it can be shared without a reader seeing `suite/`, the n8n JSON or the
+plist. It is a **generated build artifact**, like `dashboard/index.html`:
+one editable source (`core/`), zero drift. The output (default `dist/wedge/`,
+gitignored) is a self-contained Claude Code plugin repo — a verbatim `core/`,
+the marketplace manifest reused unchanged (it already sources `./core`), a
+generated README with the canonical-source note, and LICENSE. Because the
+copy is verbatim (the `core/` subdirectory is preserved, not flattened, so
+every `core/...` path inside the loop stays true), the zero-drift check is a
+plain byte comparison: `build_wedge.py --check`, also asserted by
+`tests/test_wedge.py`.
+
 ## Components
 
 ### Projects (`projects/*.md`)
@@ -413,6 +426,9 @@ pieces rely on.
 - `dashboard/index.html` is a build artifact. Never hand-edit it. Change a
   project file and regenerate with `python3 core/build_dashboard.py`. The
   file is gitignored.
+- The wedge repo (`dist/wedge/`, `scripts/build_wedge.py`) is a build artifact
+  of `core/`. Never hand-edit it; change `core/` and rebuild. `--check` (and
+  `tests/test_wedge.py`) hold it byte-identical to `core/`.
 - `build_dashboard.py` stays stdlib-only. No third-party dependencies.
 - Project logs are append-only. Prepend a dated bullet; never rewrite or delete
   old entries.

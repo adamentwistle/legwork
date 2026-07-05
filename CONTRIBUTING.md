@@ -28,6 +28,12 @@ These are deliberate non-goals. PRs that head this way will be declined.
 - `core/build_dashboard.py` and the tests stay stdlib-only. Add no new
   dependencies.
 - Plain, direct prose in code, comments, and docs. No em dashes anywhere.
+- `core/` is the single source for the level-1 loop. The Claude Code plugin
+  is `core/` itself, and `scripts/build_wedge.py` republishes `core/` as the
+  standalone wedge repo — both are generated, never hand-copied. Change a verb
+  or the dashboard once, in `core/`. If you edit `core/`, rerun
+  `python3 scripts/build_wedge.py` so `dist/wedge/` (a gitignored build
+  artifact) tracks it; `--check` and `tests/test_wedge.py` fail on drift.
 
 ## Running the tests
 

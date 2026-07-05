@@ -8,6 +8,11 @@ __pycache__/
 # Never commit it (it can hold webhook URLs). config.example is tracked.
 /config
 
+# The generated wedge repo: scripts/build_wedge.py output. A build artifact
+# of core/ (one editable source, zero drift), like dashboard/index.html.
+# Regenerate with `python3 scripts/build_wedge.py`; never commit or hand-edit.
+/dist/
+
 # Local secrets, per-machine. e.g. a personal GitHub PAT used to read this
 # private repo's CI run status over the REST API. Never commit.
 /.env
