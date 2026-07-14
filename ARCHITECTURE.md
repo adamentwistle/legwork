@@ -63,9 +63,9 @@ tool allowlist (git, mkdir, the dashboard rebuild). It reads the project file,
 does the work in the target repo, commits, and wraps the tracker.
 
 Two Claude Code hooks bracket the session.
-`core/session_start_hook.sh` records the target repo's HEAD keyed by session
+`core/session_start_hook.py` records the target repo's HEAD keyed by session
 id, so the end of the session can report only what this session changed.
-`core/session_end_hook.sh` gathers session-scoped git evidence (the diff and
+`core/session_end_hook.py` gathers session-scoped git evidence (the diff and
 commits since the recorded HEAD) plus the project's tracker entry, and POSTs it
 to `LEGWORK_WEBHOOK_URL`. When `LEGWORK_WEBHOOK_URL` is unset the end hook
 rebuilds `dashboard/index.html` instead (and logs the outcome), so a
@@ -177,7 +177,7 @@ KEY=VALUE lines from a `config` file (or `$LEGWORK_CONFIG`) into the
 environment, with real environment variables winning. See "The runner" below
 for eligibility, parallelism, the permission model, and failure handling.
 
-### Hooks (`core/session_start_hook.sh`, `core/session_end_hook.sh`)
+### Hooks (`core/session_start_hook.py`, `core/session_end_hook.py`)
 
 Claude Code hooks that bracket every session.
 

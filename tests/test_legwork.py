@@ -2026,11 +2026,17 @@ class TestWindowsPortability(unittest.TestCase):
         # A ":"-joined PATH on Windows is one long nonsense entry, so the
         # child session loses every tool it resolves by name -- git first,
         # which is how it commits the work it was fired to do.
-        env = legwork_runner.child_env("/usr/local/bin/claude", "personal")
-        self.assertIn(os.pathsep, env["PATH"])
+        claude = TMP / "fake-claude-dir" / "claude"
+        env = legwork_runner.child_env(str(claude), "personal")
         parts = env["PATH"].split(os.pathsep)
-        self.assertIn("/usr/local/bin", parts)
-        self.assertTrue(all(parts), "no empty PATH entries")
+        self.assertEqual(parts[0], str(claude.parent),
+                         "the claude dir leads the child PATH")
+        # The inherited PATH survives: it is where git lives.
+        for entry in os.environ.get("PATH", "").split(os.pathsep):
+            if entry:
+                self.assertIn(entry, parts, "inherited PATH entries survive")
+        if os.name != "nt":
+            self.assertIn("/opt/homebrew/bin", parts)
 
     def test_pid_state_reports_self_alive_and_a_dead_pid_dead(self):
         # The cross-platform liveness probe. On Windows os.kill() ignores the
@@ -2131,7 +2137,19 @@ class TestHooks(unittest.TestCase):
         subprocess.run(["git", *GIT_ID, "commit", "-q", "--allow-empty",
                         "-m", "init"], cwd=cls.work, check=True)
 
-    def run_hook(self, script, payload, url=None):
+    def run_hook(self, script, session_id="", cwd=None, reason=None, url=None):
+        """Run a hook the way Claude Code does: the payload on stdin as JSON.
+
+        Built with json.dumps, never string interpolation -- a Windows cwd is
+        full of backslashes, and "C:\\Users\\..." interpolated into a JSON
+        string literal is an invalid \\escape. The hook would then parse an
+        empty payload and silently report session=none, which is exactly what
+        every hook test did on Windows before this."""
+        payload = {"session_id": session_id}
+        if cwd is not None:
+            payload["cwd"] = str(cwd)
+        if reason is not None:
+            payload["reason"] = reason
         env = dict(os.environ)
         env["LEGWORK_DIR"] = str(SANDBOX)
         env.pop("LEGWORK_WEBHOOK_URL", None)
@@ -2140,8 +2158,8 @@ class TestHooks(unittest.TestCase):
         # sys.executable, never "python3": on Windows that name is a 0-byte
         # Store stub, and this is exactly how the installed hook spells it.
         return subprocess.run(
-            [sys.executable, script], input=payload, text=True, env=env,
-            capture_output=True, timeout=60)
+            [sys.executable, script], input=json.dumps(payload), text=True,
+            env=env, capture_output=True, timeout=60)
 
     def hook_log_tail(self):
         log = SANDBOX / "hook.log"
@@ -2154,8 +2172,7 @@ class TestHooks(unittest.TestCase):
         stale.write_text("x", encoding="utf-8")
         old = time.time() - 4 * 86400
         os.utime(stale, (old, old))
-        payload = f'{{"session_id":"hk-1","cwd":"{self.work}"}}'
-        self.run_hook(self.START, payload)
+        self.run_hook(self.START, "hk-1", self.work)
         head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.work,
                               capture_output=True, text=True).stdout.strip()
         marker = (heads / "hk-1").read_text(encoding="utf-8").strip()
@@ -2178,12 +2195,9 @@ class TestHooks(unittest.TestCase):
             for mod in ("build_dashboard.py", "legwork_common.py"):
                 shutil.copyfile(REPO / "core" / mod, core / mod)
             out = SANDBOX / "dashboard" / "index.html"
-            self.run_hook(self.START,
-                          f'{{"session_id":"hk-lite","cwd":"{self.work}"}}')
-            self.run_hook(
-                self.END,
-                f'{{"session_id":"hk-lite","cwd":"{self.work}","reason":"exit"}}',
-                url=None)
+            self.run_hook(self.START, "hk-lite", self.work)
+            self.run_hook(self.END, "hk-lite", self.work, reason="exit",
+                          url=None)
             tail = self.hook_log_tail()
             self.assertIn("rebuilt dashboard", tail)
             # The runner matches "sent:" to decide a review was delivered;
@@ -2201,15 +2215,15 @@ class TestHooks(unittest.TestCase):
         # No webhook and no core/build_dashboard.py under LEGWORK_DIR
         # (this sandbox): the rebuild cannot run, the hook logs the skip
         # and still exits 0 -- a broken hook must never block work.
-        payload = f'{{"session_id":"hk-2","cwd":"{self.work}","reason":"exit"}}'
-        result = self.run_hook(self.END, payload, url=None)
+        result = self.run_hook(self.END, "hk-2", self.work, reason="exit",
+                               url=None)
         self.assertEqual(result.returncode, 0)
         self.assertIn("dashboard rebuild failed", self.hook_log_tail())
 
     def test_end_skips_on_clear_even_without_webhook(self):
         # A clear/resume ending is a restart, not a finish: no rebuild.
-        payload = f'{{"session_id":"hk-3b","cwd":"{self.work}","reason":"clear"}}'
-        self.run_hook(self.END, payload, url=None)
+        self.run_hook(self.END, "hk-3b", self.work, reason="clear",
+                      url=None)
         self.assertIn("skipped: reason=clear", self.hook_log_tail())
 
     def test_end_logs_sent_on_2xx(self):
@@ -2233,14 +2247,11 @@ class TestHooks(unittest.TestCase):
         thread = threading.Thread(target=srv.serve_forever, daemon=True)
         thread.start()
         try:
-            self.run_hook(self.START,
-                          f'{{"session_id":"hk-ok","cwd":"{self.work}"}}')
+            self.run_hook(self.START, "hk-ok", self.work)
             subprocess.run(["git", *GIT_ID, "commit", "-q", "--allow-empty",
                             "-m", "work"], cwd=self.work, check=True)
-            self.run_hook(
-                self.END,
-                f'{{"session_id":"hk-ok","cwd":"{self.work}","reason":"exit"}}',
-                url=f"http://127.0.0.1:{port}/x")
+            self.run_hook(self.END, "hk-ok", self.work, reason="exit",
+                          url=f"http://127.0.0.1:{port}/x")
             tail = self.hook_log_tail()
             self.assertIn("sent:", tail)
             self.assertIn("http=200", tail)
@@ -2249,15 +2260,13 @@ class TestHooks(unittest.TestCase):
             srv.server_close()
 
     def test_end_skips_on_clear(self):
-        payload = f'{{"session_id":"hk-3","cwd":"{self.work}","reason":"clear"}}'
-        self.run_hook(self.END, payload, url="http://127.0.0.1:9/x")
+        self.run_hook(self.END, "hk-3", self.work, reason="clear",
+                      url="http://127.0.0.1:9/x")
         self.assertIn("skipped: reason=clear", self.hook_log_tail())
 
     def test_end_skips_when_session_changed_nothing(self):
-        payload = f'{{"session_id":"hk-4","cwd":"{self.work}"}}'
-        self.run_hook(self.START, payload)
-        self.run_hook(self.END,
-                      f'{{"session_id":"hk-4","cwd":"{self.work}","reason":"exit"}}',
+        self.run_hook(self.START, "hk-4", self.work)
+        self.run_hook(self.END, "hk-4", self.work, reason="exit",
                       url="http://127.0.0.1:9/x")
         self.assertIn("no changes this session", self.hook_log_tail())
 
@@ -2268,13 +2277,11 @@ class TestHooks(unittest.TestCase):
         subprocess.run(["git", *GIT_ID, "commit", "-q", "--allow-empty",
                         "-m", "init"], cwd=repo, check=True)
         write_project("t-renamed.md", status="running", repo=str(repo))
-        self.run_hook(self.START, f'{{"session_id":"hk-6","cwd":"{repo}"}}')
+        self.run_hook(self.START, "hk-6", repo)
         subprocess.run(["git", *GIT_ID, "commit", "-q", "--allow-empty",
                         "-m", "work"], cwd=repo, check=True)
-        self.run_hook(
-            self.END,
-            f'{{"session_id":"hk-6","cwd":"{repo}","reason":"exit"}}',
-            url="http://127.0.0.1:9/x")
+        self.run_hook(self.END, "hk-6", repo, reason="exit",
+                      url="http://127.0.0.1:9/x")
         tail = self.hook_log_tail()
         # Dead port -> http=000 -> the failed POST logs "post-failed:", not
         # "sent:"; the resolved stem is what this test pins (assert the two
@@ -2284,12 +2291,10 @@ class TestHooks(unittest.TestCase):
         self.assertNotIn("t-alias-repo", tail)
 
     def test_end_sends_and_consumes_marker(self):
-        payload = f'{{"session_id":"hk-5","cwd":"{self.work}"}}'
-        self.run_hook(self.START, payload)
+        self.run_hook(self.START, "hk-5", self.work)
         subprocess.run(["git", *GIT_ID, "commit", "-q", "--allow-empty",
                         "-m", "work"], cwd=self.work, check=True)
-        self.run_hook(self.END,
-                      f'{{"session_id":"hk-5","cwd":"{self.work}","reason":"exit"}}',
+        self.run_hook(self.END, "hk-5", self.work, reason="exit",
                       url="http://127.0.0.1:9/x")
         tail = self.hook_log_tail()
         # A failed POST (dead port -> http=000) logs "post-failed:", so the
@@ -2310,7 +2315,7 @@ class TestHooks(unittest.TestCase):
         subprocess.run(["git", *GIT_ID, "commit", "-q", "--allow-empty",
                         "-m", "init"], cwd=repo, check=True)
         write_project("t-drift.md", status="running", repo=str(repo))
-        self.run_hook(self.START, f'{{"session_id":"hk-7","cwd":"{repo}"}}')
+        self.run_hook(self.START, "hk-7", repo)
         subprocess.run(["git", *GIT_ID, "commit", "-q", "--allow-empty",
                         "-m", "build the thing"], cwd=repo, check=True)
         # End with the cwd pointing at a different repo than the session
@@ -2318,10 +2323,8 @@ class TestHooks(unittest.TestCase):
         drift = make_git_repo("t-drift-elsewhere")
         subprocess.run(["git", *GIT_ID, "commit", "-q", "--allow-empty",
                         "-m", "init"], cwd=drift, check=True)
-        self.run_hook(
-            self.END,
-            f'{{"session_id":"hk-7","cwd":"{drift}","reason":"exit"}}',
-            url="http://127.0.0.1:9/x")
+        self.run_hook(self.END, "hk-7", drift, reason="exit",
+                      url="http://127.0.0.1:9/x")
         tail = self.hook_log_tail()
         self.assertIn("t-drift", tail)
         self.assertIn("post-failed:", tail)

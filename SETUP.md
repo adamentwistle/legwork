@@ -192,16 +192,23 @@ dir whose `settings.json` needs them. If you left `CLAUDE_CONFIG_DIR` unset,
 autonomous sessions inherit your default config, so register them in
 `~/.claude/settings.json`.
 
-- `core/session_start_hook.sh` (SessionStart): records the repo HEAD for
+- `core/session_start_hook.py` (SessionStart): records the repo HEAD for
   the session, so the end hook can report only what this session changed.
-- `core/session_end_hook.sh` (SessionEnd): with `LEGWORK_WEBHOOK_URL` set,
+- `core/session_end_hook.py` (SessionEnd): with `LEGWORK_WEBHOOK_URL` set,
   gathers session-scoped git evidence plus the project's tracker entry and
   POSTs them to the webhook; with it unset, runs
   `core/build_dashboard.py` so `dashboard/index.html` reflects what the
   session just wrapped.
 
 Add this to the `settings.json` of that config dir, with `$HOME/legwork`
-replaced by your `LEGWORK_DIR` if it differs:
+replaced by your `LEGWORK_DIR` if it differs, and `/usr/bin/python3` by your
+interpreter (on Windows, `C:\\path\\to\\python.exe` — there is no python3
+there, only a stub that exits 9009).
+
+Both hooks must be **shell-form** entries: one `command` string naming the
+interpreter and the script. An exec-form `args` entry never fires, and one
+sitting beside a valid hook silently voids the entire hooks block with no
+error at all.
 
 ```json
 {
@@ -211,7 +218,7 @@ replaced by your `LEGWORK_DIR` if it differs:
         "hooks": [
           {
             "type": "command",
-            "command": "$HOME/legwork/core/session_start_hook.sh"
+            "command": "/usr/bin/python3 $HOME/legwork/core/session_start_hook.py"
           }
         ]
       }
@@ -221,7 +228,7 @@ replaced by your `LEGWORK_DIR` if it differs:
         "hooks": [
           {
             "type": "command",
-            "command": "$HOME/legwork/core/session_end_hook.sh"
+            "command": "/usr/bin/python3 $HOME/legwork/core/session_end_hook.py"
           }
         ]
       }
@@ -396,7 +403,7 @@ rm -r ~/.claude/skills/legwork-tracker
 
 Then open the `settings.json` you registered the hooks in (`~/.claude/` or
 your dedicated `CLAUDE_CONFIG_DIR`) and remove the two entries whose
-`command` ends in `session_start_hook.sh` / `session_end_hook.sh`. Finally
+`command` ends in `session_start_hook.py` / `session_end_hook.py`. Finally
 delete the checkout, which takes `config`, `projects/` and every log with
 it; if you made the repo your tracker, your queue also lives on your private
 remote.
