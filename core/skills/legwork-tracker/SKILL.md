@@ -126,7 +126,8 @@ move on, never error on the missing remote.
    escalations. If you genuinely ran no commands, say so in one line rather
    than leaving stale output from a previous session.
 8. Rebuild the dashboard from the legwork repo:
-   `python3 core/build_dashboard.py`
+   `python3 core/build_dashboard.py` — on Windows use `python`, as there is
+   no python3 there beyond a stub that exits 9009 without running anything.
 9. Commit your changes with an honest message, then `git push` when the
    repo has a remote: it is shared with n8n and other machines, so never
    leave local tracker commits unpushed. Two graceful degradations: with no

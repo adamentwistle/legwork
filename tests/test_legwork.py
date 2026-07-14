@@ -11,6 +11,7 @@ the real legwork repo, the webhook, or the network (the send test posts
 to a dead local port and asserts the logged http=000).
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -1751,12 +1752,18 @@ class TestFireArgv(unittest.TestCase):
         self.assertEqual(self.after(argv, "--settings"),
                          str(legwork_runner.GUARD_SETTINGS))
         allowed = argv[argv.index("--allowedTools") + 1:argv.index("--model")]
-        self.assertEqual(allowed, [
-            "Bash(git:*)", "Bash(mkdir:*)",
-            "Bash(python3 core/build_dashboard.py:*)",
-            f"Bash(python3 {legwork_runner.LEGWORK_DIR}/core/"
-            f"build_dashboard.py:*)",
-        ])
+        builder = "core/build_dashboard.py"
+        root = legwork_runner.LEGWORK_DIR
+        expected = ["Bash(git:*)", "Bash(mkdir:*)"]
+        # Every interpreter name a session might type, relative and absolute.
+        # The skill says `python3`; on Windows that is the 0-byte Store stub
+        # and a session must type `python` instead, so an allowlist naming
+        # only python3 would silently refuse the rebuild there.
+        for exe in dict.fromkeys(["python3", "python", sys.executable]):
+            expected.append(f"Bash({exe} {builder}:*)")
+            expected.append(f"Bash({exe} {root}/{builder}:*)")
+        self.assertEqual(allowed, expected)
+        self.assertIn(f"Bash(python {builder}:*)", allowed)
         self.assertEqual(self.after(argv, "--model"), "haiku")
         self.assertEqual(self.after(argv, "--effort"), "low")
         prompt_arg = self.after(argv, "-p")
@@ -1983,9 +1990,140 @@ class TestRunnerGuards(unittest.TestCase):
         self.assertFalse(lock.exists(), "our own lock is released")
 
 
+class TestWindowsPortability(unittest.TestCase):
+    """The platform-specific rules, each pinned to what firing a real session
+    on native Windows actually proved. Two fixes that were reasoned out from
+    the docs (exec-form hooks; an as_posix()+"//" deny rule) were DISPROVEN on
+    the box, so these tests pin observed behaviour, not inference."""
+
+    def test_guard_deny_rules_drop_the_prefix_on_windows(self):
+        # POSIX: a leading "/" reads as project-root-relative, so an absolute
+        # path needs "//". Windows: "E:/..." is already drive-absolute, and
+        # the "//E:/..." spelling matches NOTHING -- the guard silently goes
+        # void and a fired session can rewrite the runner that fired it.
+        import pathlib
+        with mock.patch.object(legwork_runner.os, "name", "nt"), \
+                mock.patch.object(legwork_runner, "LEGWORK_DIR",
+                                  pathlib.PureWindowsPath(r"E:\dev\legwork")):
+            legwork_runner.write_guard_settings()
+        deny = json.loads(legwork_runner.GUARD_SETTINGS.read_text(
+            encoding="utf-8"))["permissions"]["deny"]
+        self.assertIn("Edit(E:/dev/legwork/core/**)", deny)
+        self.assertIn("Write(E:/dev/legwork/suite/**)", deny)
+        for rule in deny:
+            self.assertNotIn("//", rule, "the // prefix is void on Windows")
+
+    def test_guard_deny_rules_keep_the_prefix_on_posix(self):
+        with mock.patch.object(legwork_runner.os, "name", "posix"), \
+                mock.patch.object(legwork_runner, "LEGWORK_DIR",
+                                  Path("/home/me/legwork")):
+            legwork_runner.write_guard_settings()
+        deny = json.loads(legwork_runner.GUARD_SETTINGS.read_text(
+            encoding="utf-8"))["permissions"]["deny"]
+        self.assertIn("Edit(//home/me/legwork/core/**)", deny)
+
+    def test_child_env_path_uses_the_platform_separator(self):
+        # A ":"-joined PATH on Windows is one long nonsense entry, so the
+        # child session loses every tool it resolves by name -- git first,
+        # which is how it commits the work it was fired to do.
+        env = legwork_runner.child_env("/usr/local/bin/claude", "personal")
+        self.assertIn(os.pathsep, env["PATH"])
+        parts = env["PATH"].split(os.pathsep)
+        self.assertIn("/usr/local/bin", parts)
+        self.assertTrue(all(parts), "no empty PATH entries")
+
+    def test_pid_state_reports_self_alive_and_a_dead_pid_dead(self):
+        # The cross-platform liveness probe. On Windows os.kill() ignores the
+        # signal and calls TerminateProcess, so a naive os.kill(pid, 0) would
+        # KILL the live lock holder it is asking about; a dead pid there also
+        # raises plain OSError, not ProcessLookupError, so the stale-lock
+        # path would escape uncaught and take the runner down.
+        self.assertEqual(legwork_runner.pid_state(os.getpid()), "alive")
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        self.assertEqual(legwork_runner.pid_state(dead.pid), "dead")
+
+    def test_acquire_lock_reclaims_a_dead_holders_lock(self):
+        lock = legwork_runner.LOCK_FILE
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        lock.write_text(f"{dead.pid} {time.time()}", encoding="utf-8")
+        try:
+            self.assertTrue(legwork_runner.acquire_lock(),
+                            "a dead holder's lock is stale and reclaimable")
+            self.assertEqual(lock.read_text().split()[0], str(os.getpid()))
+        finally:
+            lock.unlink(missing_ok=True)
+
+    def test_acquire_lock_refuses_while_the_holder_is_alive(self):
+        lock = legwork_runner.LOCK_FILE
+        lock.write_text(f"{os.getpid()} {time.time()}", encoding="utf-8")
+        try:
+            self.assertFalse(legwork_runner.acquire_lock(),
+                             "a live holder's lock must not be stolen")
+        finally:
+            lock.unlink(missing_ok=True)
+
+    def test_write_lf_never_emits_crlf(self):
+        # Python text mode translates "\n" to os.linesep, so a plain
+        # write_text() CRLF-ifies these files on Windows. They are git-tracked
+        # and shared with the other machine, where core.autocrlf=true, so a
+        # CRLF rewrite turns every claim() into a whole-file diff.
+        import legwork_common
+        target = TMP / "lf-probe.md"
+        legwork_common.write_lf(target, "---\nname: x\n---\n\nbody\n")
+        raw = target.read_bytes()
+        self.assertNotIn(b"\r\n", raw)
+        self.assertEqual(raw, b"---\nname: x\n---\n\nbody\n")
+
+    def test_python_exe_is_never_the_literal_python3(self):
+        import legwork_common
+        self.assertEqual(legwork_common.python_exe(), sys.executable)
+        self.assertNotEqual(legwork_common.python_exe(), "python3")
+
+    def test_schtasks_argv_ticks_every_n_minutes_and_replaces(self):
+        argv = legwork_install.render_schtasks_argv(
+            r"E:\dev\legwork", r"C:\Python312\python.exe", 5)
+        self.assertEqual(argv[:4], ["schtasks", "/create", "/tn",
+                                    legwork_install.TASK_NAME])
+        self.assertEqual(argv[argv.index("/sc") + 1], "minute")
+        self.assertEqual(argv[argv.index("/mo") + 1], "5")
+        # /f replaces a task of the same name: the task name is the identity,
+        # so this is what makes a re-install idempotent rather than a second
+        # task ticking beside the first.
+        self.assertIn("/f", argv)
+        command = argv[argv.index("/tr") + 1]
+        self.assertIn(r"legwork_runner.py", command)
+        self.assertNotIn("python3", command)
+
+    def test_schtasks_argv_expresses_long_intervals_in_hours(self):
+        # Task Scheduler caps /mo at 1439 for a minute schedule, so a daily
+        # tick has to switch units rather than pass an out-of-range value.
+        argv = legwork_install.render_schtasks_argv(
+            r"E:\dev\legwork", r"C:\Python312\python.exe", 1440)
+        self.assertEqual(argv[argv.index("/sc") + 1], "hourly")
+        self.assertEqual(argv[argv.index("/mo") + 1], "24")
+
+    def test_pythonw_is_preferred_so_no_console_flashes_each_tick(self):
+        fake = TMP / "fakepy"
+        fake.mkdir(exist_ok=True)
+        (fake / "python.exe").write_text("", encoding="utf-8")
+        (fake / "pythonw.exe").write_text("", encoding="utf-8")
+        self.assertEqual(legwork_install.pythonw_for(str(fake / "python.exe")),
+                         str(fake / "pythonw.exe"))
+        # No pythonw beside it: fall back rather than invent a dead path.
+        lone = TMP / "lonepy"
+        lone.mkdir(exist_ok=True)
+        (lone / "python.exe").write_text("", encoding="utf-8")
+        self.assertEqual(legwork_install.pythonw_for(str(lone / "python.exe")),
+                         str(lone / "python.exe"))
+        self.assertEqual(legwork_install.pythonw_for("/usr/bin/python3"),
+                         "/usr/bin/python3")
+
+
 class TestHooks(unittest.TestCase):
-    START = str(REPO / "core" / "session_start_hook.sh")
-    END = str(REPO / "core" / "session_end_hook.sh")
+    START = str(REPO / "core" / "session_start_hook.py")
+    END = str(REPO / "core" / "session_end_hook.py")
 
     @classmethod
     def setUpClass(cls):
@@ -1999,8 +2137,10 @@ class TestHooks(unittest.TestCase):
         env.pop("LEGWORK_WEBHOOK_URL", None)
         if url is not None:
             env["LEGWORK_WEBHOOK_URL"] = url
+        # sys.executable, never "python3": on Windows that name is a 0-byte
+        # Store stub, and this is exactly how the installed hook spells it.
         return subprocess.run(
-            ["bash", script], input=payload, text=True, env=env,
+            [sys.executable, script], input=payload, text=True, env=env,
             capture_output=True, timeout=60)
 
     def hook_log_tail(self):
@@ -2289,17 +2429,20 @@ class TestInstaller(unittest.TestCase):
         self.assertNotIn("bad line no equals", parsed)
 
     def test_merge_hooks_adds_both_events_from_empty(self):
-        merged = legwork_install.merge_hooks({}, "/Users/me/legwork")
-        start = merged["hooks"]["SessionStart"]
-        end = merged["hooks"]["SessionEnd"]
-        self.assertEqual(len(start), 1)
-        self.assertEqual(len(end), 1)
-        self.assertEqual(
-            start[0]["hooks"][0]["command"],
-            "/Users/me/legwork/core/session_start_hook.sh")
-        self.assertEqual(
-            end[0]["hooks"][0]["command"],
-            "/Users/me/legwork/core/session_end_hook.sh")
+        merged = legwork_install.merge_hooks(
+            {}, "/Users/me/legwork", python="/usr/bin/python3")
+        for event, script in (("SessionStart", "session_start_hook.py"),
+                              ("SessionEnd", "session_end_hook.py")):
+            entries = merged["hooks"][event]
+            self.assertEqual(len(entries), 1)
+            hook = entries[0]["hooks"][0]
+            # Shell form: one `command` string naming the interpreter and the
+            # script. Exec-form `args` never fires and voids the whole block.
+            self.assertEqual(hook["type"], "command")
+            self.assertNotIn("args", hook)
+            self.assertIsInstance(hook["command"], str)
+            self.assertIn("/usr/bin/python3", hook["command"])
+            self.assertIn(f"/Users/me/legwork/core/{script}", hook["command"])
 
     def test_merge_hooks_is_idempotent_and_preserves_others(self):
         base = {"model": "opus", "hooks": {"SessionStart": [
@@ -2396,35 +2539,72 @@ class TestInstaller(unittest.TestCase):
         self.assertNotIn("pct%dir", line.replace("pct\\%dir", ""))
 
     def test_merge_hooks_repoints_after_repo_move(self):
-        base = legwork_install.merge_hooks({}, "/old/legwork")
-        moved = legwork_install.merge_hooks(base, "/new/legwork")
-        for event, script in (("SessionStart", "session_start_hook.sh"),
-                              ("SessionEnd", "session_end_hook.sh")):
+        base = legwork_install.merge_hooks(
+            {}, "/old/legwork", python="/usr/bin/python3")
+        moved = legwork_install.merge_hooks(
+            base, "/new/legwork", python="/usr/bin/python3")
+        for event, script in (("SessionStart", "session_start_hook.py"),
+                              ("SessionEnd", "session_end_hook.py")):
             entries = moved["hooks"][event]
             self.assertEqual(len(entries), 1, "re-pointed, not duplicated")
-            self.assertEqual(entries[0]["hooks"][0]["command"],
-                             f"/new/legwork/core/{script}")
+            command = entries[0]["hooks"][0]["command"]
+            self.assertIn(f"/new/legwork/core/{script}", command)
+            self.assertNotIn("/old/legwork", command)
 
-    def test_merge_hooks_repoints_pre_split_scripts_entries(self):
-        # A settings.json written before the core/ split points at
-        # <dir>/scripts/session_*_hook.sh. The match is by script filename,
-        # so a re-install must re-point those entries at core/, not
-        # duplicate them.
+    def test_merge_hooks_repoints_pre_split_and_bash_entries(self):
+        # Two historical spellings of our own hook: the pre-core/-split
+        # <dir>/scripts/session_*_hook.sh, and the bash <dir>/core/*.sh that
+        # the Python hooks replaced. The match is by script STEM, so one
+        # re-install re-points both at the current .py hook. Matching the
+        # filename would leave the dead .sh entry registered beside the new
+        # .py one, and the stale hook would fire on every session forever.
         base = {"hooks": {
             "SessionStart": [{"hooks": [{
                 "type": "command",
                 "command": "/me/legwork/scripts/session_start_hook.sh"}]}],
             "SessionEnd": [{"hooks": [{
                 "type": "command",
-                "command": "/me/legwork/scripts/session_end_hook.sh"}]}],
+                "command": "/me/legwork/core/session_end_hook.sh"}]}],
         }}
-        merged = legwork_install.merge_hooks(base, "/me/legwork")
-        for event, script in (("SessionStart", "session_start_hook.sh"),
-                              ("SessionEnd", "session_end_hook.sh")):
+        merged = legwork_install.merge_hooks(
+            base, "/me/legwork", python="/usr/bin/python3")
+        for event, script in (("SessionStart", "session_start_hook.py"),
+                              ("SessionEnd", "session_end_hook.py")):
             entries = merged["hooks"][event]
             self.assertEqual(len(entries), 1, "re-pointed, not duplicated")
-            self.assertEqual(entries[0]["hooks"][0]["command"],
-                             f"/me/legwork/core/{script}")
+            command = entries[0]["hooks"][0]["command"]
+            self.assertIn(f"/me/legwork/core/{script}", command)
+            self.assertNotIn(".sh", command)
+
+    def test_merge_hooks_rewrites_exec_form_entry_to_shell_form(self):
+        # An exec-form `args` entry does not fire, and one sitting beside a
+        # valid hook silently voids the entire hooks block with no error
+        # (verified live on Claude Code 2.1.209). A re-install must convert
+        # our own entry back to a shell-form `command` string.
+        base = {"hooks": {"SessionEnd": [{"hooks": [{
+            "type": "command",
+            "args": ["python", "/me/legwork/core/session_end_hook.py"]}]}]}}
+        merged = legwork_install.merge_hooks(
+            base, "/me/legwork", python="/usr/bin/python3")
+        entries = merged["hooks"]["SessionEnd"]
+        self.assertEqual(len(entries), 1, "re-pointed, not duplicated")
+        hook = entries[0]["hooks"][0]
+        self.assertNotIn("args", hook)
+        self.assertIn("/me/legwork/core/session_end_hook.py", hook["command"])
+
+    def test_detect_python_never_returns_the_windows_python3_stub(self):
+        # On Windows the Python installer never creates python3.exe, so the
+        # name resolves to a 0-byte Store stub that exits 9009 -- and
+        # shutil.which() RETURNS that stub instead of falling through. Wiring
+        # the timer or a hook to it produces a launcher that can never run.
+        stub = r"C:\Users\me\AppData\Local\Microsoft\WindowsApps\python3.EXE"
+        with mock.patch.object(legwork_install.os, "name", "nt"), \
+                mock.patch.object(legwork_install.shutil, "which",
+                                  return_value=stub), \
+                mock.patch.object(legwork_install.sys, "executable",
+                                  r"C:\Python312\python.exe"):
+            self.assertEqual(legwork_install.detect_python(),
+                             r"C:\Python312\python.exe")
 
     def test_render_config_persists_tick_minutes(self):
         cfg = legwork_install.render_config({
