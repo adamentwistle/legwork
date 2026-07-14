@@ -59,7 +59,7 @@ import shlex
 import shutil
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from xml.sax.saxutils import escape as xml_escape
 
 REPO = Path(__file__).resolve().parent.parent
@@ -121,9 +121,13 @@ def render_crontab_line(legwork_dir, python_bin, schedule):
     """The crontab line that ticks the runner, tagged with a marker comment
     so the installer can find and replace its own line idempotently. Paths
     are shell-quoted (a space would split the command) and `%` is escaped,
-    since cron reads a bare % as end-of-command plus stdin."""
-    runner = Path(legwork_dir) / "suite" / "legwork_runner.py"
-    log = Path(legwork_dir) / ".runner-logs" / "cron.log"
+    since cron reads a bare % as end-of-command plus stdin.
+
+    PurePosixPath, not Path: a crontab line is always destined for a POSIX
+    system, so it must render POSIX separators no matter which platform
+    rendered it -- on Windows a plain Path() would emit backslashes."""
+    runner = PurePosixPath(legwork_dir) / "suite" / "legwork_runner.py"
+    log = PurePosixPath(legwork_dir) / ".runner-logs" / "cron.log"
     command = (f"{shlex.quote(str(python_bin))} {shlex.quote(str(runner))} "
                f">> {shlex.quote(str(log))} 2>&1")
     command = command.replace("%", "\\%")
