@@ -537,6 +537,21 @@ def assess(path):
     if not (repo_path / ".git").exists():
         return False, f"repo {repo_path} is not a git repository", None
 
+    # account: picks the Claude profile. Both an unpinned account: and an
+    # account: whose CLAUDE_CONFIG_DIR_<NAME> is unset fall back to
+    # CLAUDE_CONFIG_DIR -- the personal one -- so a work project can fire under
+    # the personal identity with nothing in the log to say so. Refuse instead:
+    # firing under the wrong account is worse than not firing.
+    account = meta.get("account", "").lower()
+    if meta.get("category", "").lower() == "work" and account != "work":
+        return False, ("category: work needs account: work "
+                       "(would fire under the personal profile)"), None
+    if account and account != "personal" \
+            and not os.environ.get(f"CLAUDE_CONFIG_DIR_{account.upper()}"):
+        return False, (f"account '{account}' has no CLAUDE_CONFIG_DIR_"
+                       f"{account.upper()} set "
+                       "(would fire under the default profile)"), None
+
     blocked = meta.get("blocked_on", "")
     if blocked:
         return False, f"blocked_on: {blocked[:48]}", None

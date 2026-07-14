@@ -18,6 +18,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -131,15 +132,18 @@ def make_git_repo(name):
 
 def write_project(fname, status="queued", autonomy="loop", vision=True,
                   repo="", prompt=None, blocked_on="", updated="2026-06-01",
-                  log_lines=None, fire_once=""):
+                  log_lines=None, fire_once="", category="personal",
+                  account=""):
     if prompt is None:
         prompt = ("Read PROJECT.md.\n\nTask: do one thing.\n\n"
                   "Done when: the thing is verifiably done.\n\n"
                   "Final step: run /wrap to update the tracker and mint "
                   "the next prompt.")
-    lines = ["---", f"name: {Path(fname).stem}", "category: personal",
+    lines = ["---", f"name: {Path(fname).stem}", f"category: {category}",
              f"status: {status}", "energy: light", "description: test",
              f"repo: {repo or 'none'}", f"updated: {updated}"]
+    if account:
+        lines.append(f"account: {account}")
     if autonomy:
         lines.append(f"autonomy: {autonomy}")
     if blocked_on:
@@ -311,6 +315,46 @@ class TestAssess(unittest.TestCase):
         ok, reason, _ = legwork_runner.assess(path)
         self.assertFalse(ok)
         self.assertIn("dirty", reason)
+
+    def test_work_category_without_account_refused(self):
+        # The template defaults to category: work and leaves account: unset,
+        # which silently falls back to the personal profile. Refuse.
+        repo = make_git_repo("t-work-noacct-repo")
+        path = write_project("t-work-noacct.md", repo=str(repo),
+                             category="work")
+        ok, reason, _ = legwork_runner.assess(path)
+        self.assertFalse(ok)
+        self.assertIn("needs account: work", reason)
+
+    def test_fire_once_does_not_bypass_account_guard(self):
+        # fire_once stands in for the autonomy opt-in, not for firing under
+        # the right identity.
+        repo = make_git_repo("t-work-fire-repo")
+        path = write_project("t-work-fire.md", repo=str(repo),
+                             category="work", autonomy="",
+                             fire_once="2026-07-14")
+        ok, reason, _ = legwork_runner.assess(path)
+        self.assertFalse(ok)
+        self.assertIn("needs account: work", reason)
+
+    def test_account_without_matching_config_dir_refused(self):
+        repo = make_git_repo("t-acct-nodir-repo")
+        path = write_project("t-acct-nodir.md", repo=str(repo),
+                             category="work", account="work")
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CLAUDE_CONFIG_DIR_WORK", None)
+            ok, reason, _ = legwork_runner.assess(path)
+        self.assertFalse(ok)
+        self.assertIn("CLAUDE_CONFIG_DIR_WORK", reason)
+
+    def test_work_project_with_account_and_config_dir_is_eligible(self):
+        repo = make_git_repo("t-work-ok-repo")
+        path = write_project("t-work-ok.md", repo=str(repo),
+                             category="work", account="work")
+        with mock.patch.dict(os.environ,
+                             {"CLAUDE_CONFIG_DIR_WORK": "/tmp/.claude-work"}):
+            ok, reason, _ = legwork_runner.assess(path)
+        self.assertTrue(ok, reason)
 
     def test_eligible_with_directives(self):
         repo = make_git_repo("t-ok-repo")
