@@ -1,6 +1,7 @@
 ---
 name: Recipe Box
 category: work
+account: work
 status: review
 energy: medium
 description: A static-site generator that turns markdown recipes into a browsable site.
