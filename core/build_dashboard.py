@@ -28,7 +28,8 @@ import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from legwork_common import COST_RE, parse_frontmatter, PROMPT_RE, parse_date
+from legwork_common import (
+    COST_RE, parse_frontmatter, PROMPT_RE, parse_date, write_lf)
 
 ROOT = Path(__file__).resolve().parent.parent
 PROJECTS_DIR = ROOT / "projects"
@@ -1195,7 +1196,7 @@ def main():
         if parsed:
             projects.append(parsed)
     OUT_FILE.parent.mkdir(exist_ok=True)
-    OUT_FILE.write_text(build(projects), encoding="utf-8")
+    write_lf(OUT_FILE, build(projects))
     print(f"Wrote {OUT_FILE} ({len(projects)} projects)")
 
 

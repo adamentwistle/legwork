@@ -27,10 +27,25 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-if ! command -v python3 >/dev/null 2>&1; then
-    echo "legwork install: python3 is required but was not found on PATH." >&2
+# Find an interpreter that actually RUNS, not merely one that resolves.
+# Under Git Bash on Windows `command -v python3` succeeds and hands back a
+# 0-byte Microsoft Store stub that exits 9009 without running anything, so
+# each candidate has to be probed rather than trusted.
+py=""
+for candidate in python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1 \
+       && "$candidate" -c 'import sys; sys.exit(0)' >/dev/null 2>&1; then
+        py="$candidate"
+        break
+    fi
+done
+
+if [ -z "$py" ]; then
+    echo "legwork install: a working python3 was not found on PATH." >&2
     echo "Install Python 3.9+ and re-run ./install.sh" >&2
+    echo "On Windows, run the wizard directly instead:" >&2
+    echo "    python scripts\\legwork_install.py" >&2
     exit 1
 fi
 
-exec python3 "$here/scripts/legwork_install.py" "$@"
+exec "$py" "$here/scripts/legwork_install.py" "$@"

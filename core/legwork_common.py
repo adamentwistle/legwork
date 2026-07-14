@@ -12,8 +12,11 @@ importing it: suite imports from core, never the reverse. Keep this module
 dependency-free and free of suite/ imports.
 """
 
+import os
 import re
+import sys
 from datetime import date
+from pathlib import Path
 
 # The Next prompt is the first fenced block under the "## Next prompt"
 # heading. Shared verbatim by the runner (eligibility) and the dashboard
@@ -85,3 +88,69 @@ def iter_config_pairs(text):
             continue
         key, _, value = line.partition("=")
         yield key.strip(), value.strip().strip('"').strip("'")
+
+
+# The repo root: this module lives at <root>/core/legwork_common.py, and the
+# runner, the hooks and the dashboard builder all sit one level below it too.
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def load_config():
+    """Load KEY=VALUE lines from a config file into the environment, so
+    launchd and Task Scheduler (neither reads your shell profile), cron and
+    manual runs share one source of truth. Real environment variables always
+    win over the file. The file is looked for at $LEGWORK_CONFIG, else a
+    `config` file beside the repo root; a missing file is fine. $VARS and ~
+    are expanded so the file stays machine-agnostic. See config.example.
+
+    This lives in core/ rather than in the runner because the hooks need the
+    same resolution: they run from a Claude session, which on no platform is
+    guaranteed to have seen a shell profile export (and on Windows there is
+    no profile to export from at all)."""
+    candidates = []
+    env_path = os.environ.get("LEGWORK_CONFIG")
+    if env_path:
+        candidates.append(Path(env_path))
+    candidates.append(ROOT / "config")
+    for path in candidates:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for key, value in iter_config_pairs(text):
+            os.environ.setdefault(
+                key, os.path.expanduser(os.path.expandvars(value)))
+        break
+
+
+def legwork_dir():
+    """The legwork checkout to operate on: $LEGWORK_DIR (real env or config),
+    else the root of the checkout this file belongs to. That fallback beats a
+    hardcoded ~/legwork -- the code is already sitting in the answer -- and it
+    is what makes a hook correct in a non-interactive context that never saw
+    a shell export. Call load_config() first so the config file is folded in."""
+    return Path(os.environ.get("LEGWORK_DIR") or ROOT)
+
+
+def write_lf(path, text):
+    """Write text with LF line endings on every platform.
+
+    Python's text mode translates "\\n" to os.linesep on write, so a plain
+    write_text() rewrites a file with CRLF on Windows. These files (the
+    tracker markdown, the dashboard) are git-tracked and shared with the
+    other machines and with n8n, and a Windows checkout commonly runs
+    core.autocrlf=true -- so a CRLF rewrite turns every claim() into a
+    whole-file diff and a conflict against the machine that wrote it LF."""
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(text)
+
+
+def python_exe():
+    """The interpreter to spawn a child legwork script with.
+
+    Always sys.executable, never the string "python3". On Windows the Python
+    installer never creates a python3.exe, so `python3` resolves to a 0-byte
+    Microsoft Store stub that exits 9009 with "Python was not found" --
+    permanently, and shutil.which("python3") happily RETURNS that stub rather
+    than falling through. Verified on Windows 11 26200 with Python 3.12.10."""
+    return sys.executable or "python"

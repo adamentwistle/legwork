@@ -71,8 +71,8 @@ sys.path.insert(1, str(REPO / "core"))
 from legwork_common import iter_config_pairs  # noqa: E402
 
 PLIST_TEMPLATE = REPO / "suite" / "com.legwork.runner.plist"
-START_HOOK = "session_start_hook.sh"
-END_HOOK = "session_end_hook.sh"
+START_HOOK = "session_start_hook.py"
+END_HOOK = "session_end_hook.py"
 PLIST_NAME = "com.legwork.runner.plist"
 DEFAULT_REVIEWER_MODEL = "claude-sonnet-4-6"
 
@@ -131,6 +131,51 @@ def render_crontab_line(legwork_dir, python_bin, schedule):
 
 
 CRON_MARKER = "# legwork runner"
+TASK_NAME = "LegworkRunner"
+
+
+def pythonw_for(python_bin):
+    """The windowless interpreter beside `python_bin` (pythonw.exe), or
+    `python_bin` unchanged when there is none.
+
+    Task Scheduler runs its action in an interactive session, so python.exe
+    pops a console window onto the desktop on every tick -- once every five
+    minutes, forever. pythonw.exe is the same interpreter built against the
+    GUI subsystem, so it allocates no console. It ships with the standard
+    python.org Windows installer but not with every distribution, hence the
+    fallback."""
+    path = Path(python_bin)
+    if path.name.lower().startswith("python") and path.suffix.lower() == ".exe":
+        candidate = path.with_name("pythonw" + path.name[len("python"):])
+        if candidate.exists():
+            return str(candidate)
+    return str(python_bin)
+
+
+def render_schtasks_argv(legwork_dir, python_bin, minutes, task_name=TASK_NAME):
+    """The schtasks argv registering the runner tick on native Windows.
+
+    Windows has no cron and no launchd: `/sc minute /mo N` is the native
+    every-N-minutes trigger. Task Scheduler caps `/mo` for minute schedules
+    at 1439 (a day), so anything longer is expressed in whole hours instead.
+    `/f` replaces an existing task of the same name, which is what makes a
+    re-install idempotent -- there is no marker-comment trick to play here,
+    the task name IS the identity.
+
+    Note the task runs only while this user is logged on: registering it to
+    run logged-off needs a stored password (`/ru` + `/rp`), which the wizard
+    will not ask for. That matches how the personal box is actually used."""
+    runner = Path(legwork_dir) / "suite" / "legwork_runner.py"
+    # One quoted string, the way cmd will read it back: the interpreter path
+    # holds spaces on a default Windows install (\AppData\Local\Programs\).
+    command = subprocess.list2cmdline([pythonw_for(python_bin), str(runner)])
+    minutes = max(1, int(minutes))
+    if minutes < 1440:
+        schedule = ["/sc", "minute", "/mo", str(minutes)]
+    else:
+        schedule = ["/sc", "hourly", "/mo", str(max(1, round(minutes / 60)))]
+    return ["schtasks", "/create", "/tn", task_name, "/tr", command,
+            *schedule, "/f"]
 
 
 def render_config(v):
@@ -272,19 +317,29 @@ def plan_verb_installs(verbs_root, dest_base):
     return pairs
 
 
-def merge_hooks(settings, legwork_dir):
+def merge_hooks(settings, legwork_dir, python=None):
     """Return a copy of a Claude settings dict with the legwork SessionStart
     and SessionEnd hooks registered. Idempotent: an entry already pointing at
     our hook script for that event is re-pointed at the current legwork dir
     (so a moved checkout does not leave hooks aimed at the dead old path)
-    rather than duplicated, and unrelated hooks are never disturbed. The
-    match is by script filename, so an entry from before the core/ split
-    (.../scripts/session_*_hook.sh) is re-pointed at core/ on re-install."""
+    rather than duplicated, and unrelated hooks are never disturbed.
+
+    The match is by script STEM (`session_end_hook`), not by full filename, so
+    one re-install re-points every historical spelling of our own hook at the
+    current one: the pre-core/-split `.../scripts/session_*_hook.sh` and the
+    bash `.sh` hooks the Python ones replaced. Matching the filename would
+    leave the dead `.sh` entry registered beside the new `.py` one, and the
+    stale hook would fire (or fail) on every session forever.
+
+    Our re-pointed entry is also forced back to shell form: an exec-form
+    `args` entry never fires, and one sitting beside a valid hook silently
+    voids the whole hooks block."""
     settings = dict(settings) if settings else {}
     hooks = dict(settings.get("hooks") or {})
-    for event, script in ((("SessionStart"), START_HOOK),
-                          (("SessionEnd"), END_HOOK)):
-        command = str(Path(legwork_dir) / "core" / script)
+    for event, script in (("SessionStart", START_HOOK),
+                          ("SessionEnd", END_HOOK)):
+        stem = Path(script).stem
+        command = hook_command(legwork_dir, script, python)
         entries = []
         found = False
         for group in (hooks.get(event) or []):
@@ -293,8 +348,12 @@ def merge_hooks(settings, legwork_dir):
                 inner = []
                 for hook in group.get("hooks") or []:
                     hook = dict(hook)
-                    if script in str(hook.get("command", "")):
+                    if stem in str(hook.get("command", "")) or \
+                            stem in " ".join(str(a) for a in
+                                             (hook.get("args") or [])):
                         found = True
+                        hook.pop("args", None)
+                        hook["type"] = "command"
                         hook["command"] = command
                     inner.append(hook)
                 group["hooks"] = inner
@@ -581,14 +640,45 @@ class Wizard:
 # ---------------------------------------------------------------------------
 
 def detect_python():
-    """The interpreter the timer should run. macOS launchd is happiest with
-    the system python (it does not depend on a shell-managed Python), so we
-    prefer /usr/bin/python3 when it exists, then this interpreter."""
-    system = Path("/usr/bin/python3")
-    if system.exists():
-        return str(system)
-    found = shutil.which("python3")
-    return found or sys.executable
+    """The interpreter the timer and the hooks should run. macOS launchd is
+    happiest with the system python (it does not depend on a shell-managed
+    Python), so we prefer /usr/bin/python3 when it exists, then this
+    interpreter.
+
+    Windows never consults `python3`: its Python installer does not create a
+    python3.exe, so the name resolves to the 0-byte Microsoft Store stub which
+    exits 9009 with "Python was not found" -- and shutil.which() RETURNS that
+    stub rather than falling through, which would wire the timer and the hooks
+    to a launcher that can never run them. sys.executable is the interpreter
+    already running this installer, so it is known-good by construction.
+    Verified on Windows 11 26200 with Python 3.12.10."""
+    if os.name != "nt":
+        system = Path("/usr/bin/python3")
+        if system.exists():
+            return str(system)
+        found = shutil.which("python3")
+        if found:
+            return found
+    return sys.executable or "python"
+
+
+def hook_command(legwork_dir, script, python=None):
+    """The shell-form `command` string for one Claude hook entry.
+
+    Shell-form, not exec-form `args`: on Claude Code 2.1.209 an `args` entry
+    never fires, and one sitting beside a valid hook silently voids the whole
+    hooks block with no error (verified live on native Windows, via both a
+    config-dir settings.json and --settings).
+
+    The interpreter is spelled out rather than leaning on the script itself
+    being runnable: a bare .py path depends on file association on Windows and
+    on a +x bit plus a shebang on POSIX, and the obvious shebang (`python3`)
+    is the Store stub on Windows."""
+    parts = [python or detect_python(),
+             str(Path(legwork_dir) / "core" / script)]
+    # Quote for the shell that will actually read the string.
+    return (subprocess.list2cmdline(parts) if os.name == "nt"
+            else shlex.join(parts))
 
 
 def collect_values(wiz, existing, level=2):
@@ -812,15 +902,45 @@ def install_verbs(wiz, values, force=None):
 
 
 def install_timer(wiz, values, force=None):
-    """Install and load the launchd agent (macOS) or a crontab line (Linux),
-    asking before the system-level action. `force` (see _confirm) lets a
-    non-interactive run skip it, or accept it with --with-launchd, without a
-    prompt. Returns action strings."""
+    """Install and load the launchd agent (macOS), a scheduled task
+    (Windows) or a crontab line (Linux), asking before the system-level
+    action. `force` (see _confirm) lets a non-interactive run skip it, or
+    accept it with --with-launchd, without a prompt. Returns action
+    strings."""
     ui = wiz.ui
     actions = []
     legwork_dir = os.path.expanduser(os.path.expandvars(values["legwork_dir"]))
     python_bin = values.get("python_bin") or detect_python()
     interval_seconds = values["interval_minutes"] * 60
+
+    if os.name == "nt":
+        argv = render_schtasks_argv(legwork_dir, python_bin,
+                                    values["interval_minutes"])
+        if not _confirm(wiz, force,
+                        f"Register the '{TASK_NAME}' scheduled task now "
+                        f"(ticks every {values['interval_minutes']} min)?"):
+            actions.append(ui.dim("skipped the scheduled task; register it "
+                                  "yourself with:"))
+            actions.append(ui.dim("  " + subprocess.list2cmdline(argv)))
+            return actions
+        try:
+            result = subprocess.run(argv, capture_output=True, text=True)
+        except OSError as exc:
+            actions.append(ui.warnc(
+                f"{ui.warn} could not run schtasks ({exc}); register the "
+                f"task yourself:\n  {subprocess.list2cmdline(argv)}"))
+            return actions
+        if result.returncode == 0:
+            actions.append(ui.good(f"{ui.check} registered scheduled task "
+                                   f"{TASK_NAME}"))
+            actions.append(ui.dim("  it ticks only while you are logged on; "
+                                  "see SETUP.md step 5c"))
+        else:
+            actions.append(ui.warnc(
+                f"{ui.warn} schtasks failed: "
+                f"{(result.stderr or result.stdout).strip() or 'see output'}; "
+                f"register it yourself:\n  {subprocess.list2cmdline(argv)}"))
+        return actions
 
     if sys.platform == "darwin":
         if not _confirm(wiz, force,

@@ -128,35 +128,12 @@ sys.path.insert(1, str(Path(__file__).resolve().parent.parent / "core"))
 
 import legwork_review  # noqa: E402
 from legwork_common import (  # noqa: E402
-    COST_RE, PROMPT_RE, days_since, iter_config_pairs, parse_frontmatter)
-
-
-def load_config():
-    """Load KEY=VALUE lines from a config file into the environment, so
-    launchd (which does not read your shell profile), cron and manual runs
-    share one source of truth. Real environment variables always win over the
-    file. The file is looked for at $LEGWORK_CONFIG, else a `config` file
-    beside the repo root; a missing file is fine. $VARS and ~ are expanded so
-    the file stays machine-agnostic. See config.example for the template."""
-    candidates = []
-    env_path = os.environ.get("LEGWORK_CONFIG")
-    if env_path:
-        candidates.append(Path(env_path))
-    candidates.append(Path(__file__).resolve().parent.parent / "config")
-    for path in candidates:
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        for key, value in iter_config_pairs(text):
-            os.environ.setdefault(
-                key, os.path.expanduser(os.path.expandvars(value)))
-        break
-
+    COST_RE, PROMPT_RE, days_since, legwork_dir, load_config,
+    parse_frontmatter, python_exe, write_lf)
 
 load_config()
 
-LEGWORK_DIR = Path(os.environ.get("LEGWORK_DIR", Path.home() / "legwork"))
+LEGWORK_DIR = legwork_dir()
 PROJECTS_DIR = LEGWORK_DIR / "projects"
 RUNNER_LOG = LEGWORK_DIR / "runner.log"
 TRANSCRIPTS = LEGWORK_DIR / ".runner-logs"
@@ -655,8 +632,18 @@ def child_env(claude_path, account):
     if WEBHOOK_URL:
         env["LEGWORK_WEBHOOK_URL"] = WEBHOOK_URL
     env["LEGWORK_DIR"] = str(LEGWORK_DIR)
-    extra = f"{Path(claude_path).parent}:/usr/local/bin:/opt/homebrew/bin"
-    env["PATH"] = f"{extra}:{env.get('PATH', '/usr/bin:/bin')}"
+    # os.pathsep, not ":": Windows separates PATH with ";", so a ":"-joined
+    # PATH is one long nonsense entry and the child session loses every tool
+    # it resolves by name -- git first, which is how it commits its own work.
+    # The Homebrew/local dirs only exist on macOS/Linux; on Windows the
+    # inherited PATH is already the whole story.
+    extra = [str(Path(claude_path).parent)]
+    if os.name != "nt":
+        extra += ["/usr/local/bin", "/opt/homebrew/bin"]
+        inherited = env.get("PATH", "/usr/bin:/bin")
+    else:
+        inherited = env.get("PATH", "")
+    env["PATH"] = os.pathsep.join([*extra, inherited]).strip(os.pathsep)
     return env
 
 
@@ -682,7 +669,7 @@ def claim(project):
         # claim so the project cannot fire again without the human.
         flipped = re.sub(r"^fire_once:[^\n]*\n", "", flipped, count=1,
                          flags=re.M)
-        path.write_text(flipped, encoding="utf-8")
+        write_lf(path, flipped)
         run_git(["add", str(path)], LEGWORK_DIR)
         run_git(["commit", "-m", f"legwork: runner fires {path.stem}"],
                 LEGWORK_DIR)
@@ -785,7 +772,7 @@ def apply_local_review(project, verdict):
         if not applied:
             return False
         new_text, _new_status, _detail = applied
-        path.write_text(new_text, encoding="utf-8")
+        write_lf(path, new_text)
         run_git(["add", str(path)], LEGWORK_DIR)
         run_git(["commit", "-m",
                  f"legwork: reviewer {verdict['verdict']} {path.stem}"],
@@ -817,7 +804,7 @@ def park_for_review(project, reason="local review could not produce an "
         if new == text:  # no ## Log section to prepend under
             new = text.rstrip() + "\n\n## Log\n\n" + bullet
         text = new
-        path.write_text(text, encoding="utf-8")
+        write_lf(path, text)
         run_git(["add", str(path)], LEGWORK_DIR)
         run_git(["commit", "-m",
                  f"legwork: park {path.stem} for review (reviewer call failed)"],
@@ -1044,7 +1031,7 @@ def repair_unwrapped(project, exit_code, minutes, claim_head=None,
         if new == text:  # no ## Log section to prepend under
             new = text.rstrip() + "\n\n## Log\n\n" + bullet
         text = new
-        path.write_text(text, encoding="utf-8")
+        write_lf(path, text)
         run_git(["add", str(path)], LEGWORK_DIR)
         run_git(["commit", "-m", subject], LEGWORK_DIR)
         if not push_with_rebase(LEGWORK_DIR):
@@ -1195,12 +1182,20 @@ def write_guard_settings():
     review webhook wired. The post-hoc audit_session_window() stays as a second
     layer. Best-effort: a write failure just falls back to that audit."""
     # Claude Code permission rules read a single leading "/" as relative to
-    # the project root; an absolute filesystem path must be prefixed with "//"
+    # the project root, so a POSIX absolute path must be prefixed with "//"
     # or the deny silently matches nothing (verified by firing a real session).
-    base = str(LEGWORK_DIR).lstrip("/")
+    # A Windows path is drive-absolute ("E:/...") and already unambiguous, so
+    # there the prefix must be DROPPED: the "//E:/..." spelling matches
+    # nothing and the guard is void. Verified live on Windows against a
+    # no-deny control that proved the probe could write: only the prefix-less
+    # spellings blocked it.
+    if os.name == "nt":
+        base, prefix = LEGWORK_DIR.as_posix(), ""
+    else:
+        base, prefix = str(LEGWORK_DIR).lstrip("/"), "//"
     deny = []
     for sub in ("core", "suite", "scripts"):
-        path = f"//{base}/{sub}/**"
+        path = f"{prefix}{base}/{sub}/**"
         for tool in ("Edit", "Write", "MultiEdit"):
             deny.append(f"{tool}({path})")
     try:
@@ -1275,12 +1270,17 @@ def fire_claimed(project, claude_path, claim_head, started):
         # and scripts/). Bash(git:*) is not covered, so this blocks the
         # direct path only; the post-fire audit is the detector.
         argv += ["--settings", guard]
-    argv += [
-        "--allowedTools",
-        "Bash(git:*)", "Bash(mkdir:*)",
-        "Bash(python3 core/build_dashboard.py:*)",
-        f"Bash(python3 {LEGWORK_DIR}/core/build_dashboard.py:*)",
-    ]
+    argv += ["--allowedTools", "Bash(git:*)", "Bash(mkdir:*)"]
+    # Allow every spelling of the interpreter a session might reasonably type
+    # to rebuild the dashboard. The skill says `python3`, which is right on
+    # macOS/Linux but is the 0-byte Store stub on Windows, where a session
+    # must use `python`. An allowlist entry that matches nothing the session
+    # actually runs fails silently -- the rebuild is just refused -- so list
+    # both names plus this runner's own absolute interpreter.
+    builder = "core/build_dashboard.py"
+    for exe in dict.fromkeys(["python3", "python", python_exe()]):
+        for target in (builder, f"{LEGWORK_DIR}/{builder}"):
+            argv.append(f"Bash({exe} {target}:*)")
     if project["model"]:
         argv += ["--model", project["model"]]
     if project["effort"]:
@@ -1399,6 +1399,51 @@ def rebuild_dashboard():
                 log("dashboard rebuild push failed")
 
 
+def pid_state(pid):
+    """Whether the lock holder is still running: "dead", "alive", or "denied"
+    (alive, but owned by another user, so we must not reclaim its lock).
+
+    Never os.kill(pid, 0) on Windows. os.kill() there ignores the signal
+    number for everything but CTRL_C/CTRL_BREAK_EVENT and calls
+    TerminateProcess, so the liveness CHECK would kill the live runner it is
+    asking about -- and a dead pid raises a plain OSError rather than
+    ProcessLookupError, so the stale-lock path would escape uncaught and take
+    the runner down. Verified on Windows 11 26200."""
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+            return "alive"
+        except ProcessLookupError:
+            return "dead"
+        except PermissionError:
+            return "denied"
+        except OSError:
+            return "dead"
+
+    import ctypes
+    from ctypes import wintypes
+
+    ERROR_ACCESS_DENIED = 5
+    STILL_ACTIVE = 259
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = kernel32.OpenProcess(
+        PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        # Access denied means the pid exists but belongs to someone else;
+        # anything else (invalid parameter) means there is no such process.
+        return ("denied" if ctypes.get_last_error() == ERROR_ACCESS_DENIED
+                else "dead")
+    try:
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return "alive"  # cannot tell; treat as alive and never reclaim
+        return "alive" if code.value == STILL_ACTIVE else "dead"
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def acquire_lock():
     try:
         fd = os.open(LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -1413,12 +1458,11 @@ def acquire_lock():
         except (ValueError, OSError, IndexError):
             LOCK_FILE.unlink(missing_ok=True)  # unreadable/garbage lock
             return acquire_lock()
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        state = pid_state(pid)
+        if state == "dead":
             LOCK_FILE.unlink(missing_ok=True)  # stale lock from a dead run
             return acquire_lock()
-        except PermissionError:
+        if state == "denied":
             return False  # alive and owned by another user
         # Holder is alive. Within the time budget this is a normal long
         # session; past LOCK_MAX_AGE the runner itself is wedged, so reclaim
