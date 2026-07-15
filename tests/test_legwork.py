@@ -758,15 +758,25 @@ class TestAuditedFixes(unittest.TestCase):
                 encoding="utf-8"))["permissions"]["deny"]
         finally:
             legwork_runner.GUARD_SETTINGS.unlink(missing_ok=True)
-        # Claude Code reads a single leading "/" as project-relative; an
-        # absolute deny must be "//" or it silently matches nothing. A real
-        # session confirmed "//" blocks a control-plane write; pin it here so
-        # the format cannot regress unnoticed.
+        # Claude Code reads a single leading "/" as project-relative, so a
+        # POSIX absolute deny must be "//" or it silently matches nothing. A
+        # Windows path is drive-absolute and must NOT be prefixed -- "//E:/.."
+        # matches nothing there. Both spellings were confirmed by firing real
+        # sessions; pin them so neither can regress unnoticed.
+        # See TestWindowsPortability for the per-platform rules in isolation.
         self.assertTrue(deny)
         for rule in deny:
             inside = rule.split("(", 1)[1].rstrip(")")
-            self.assertTrue(inside.startswith("//"),
-                            f"deny rule must be an absolute // path: {rule}")
+            if os.name == "nt":
+                self.assertFalse(inside.startswith("//"),
+                                 f"a drive-absolute deny takes no // prefix: "
+                                 f"{rule}")
+                self.assertRegex(inside, r"^[A-Za-z]:/",
+                                 f"deny rule must be drive-absolute: {rule}")
+            else:
+                self.assertTrue(inside.startswith("//"),
+                                f"deny rule must be an absolute // path: "
+                                f"{rule}")
         # The whole control plane is covered: core/ (hooks, dashboard
         # builder), suite/ (runner, reviewer, n8n) and scripts/ (installer).
         for sub in ("/core/**", "/suite/**", "/scripts/**"):
@@ -1705,16 +1715,25 @@ class TestFireArgv(unittest.TestCase):
             "                  'num_turns': 3, 'total_cost_usd': 0.05,\n"
             "                  'result': 'done'}))\n",
             encoding="utf-8")
-        shim = cls.bin_dir / "claude"
-        shim.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{helper}" "$@"\n',
-                        encoding="utf-8")
-        shim.chmod(0o755)
+        # find_claude() resolves the binary with shutil.which(), so the shim
+        # has to be something which() will find AND the OS will execute: a
+        # .cmd on Windows (an extension-less /bin/sh script is neither).
+        if os.name == "nt":
+            shim = cls.bin_dir / "claude.cmd"
+            shim.write_text(f'@echo off\r\n"{sys.executable}" "{helper}" %*\r\n',
+                            encoding="utf-8")
+        else:
+            shim = cls.bin_dir / "claude"
+            shim.write_text(
+                f'#!/bin/sh\nexec "{sys.executable}" "{helper}" "$@"\n',
+                encoding="utf-8")
+            shim.chmod(0o755)
 
     def setUp(self):
         self.argv_file = self.bin_dir / f"argv-{self.id().split('.')[-1]}.json"
         os.environ["FAKE_CLAUDE_ARGV"] = str(self.argv_file)
         self._path = os.environ["PATH"]
-        os.environ["PATH"] = f"{self.bin_dir}:{self._path}"
+        os.environ["PATH"] = f"{self.bin_dir}{os.pathsep}{self._path}"
         self._send_alert = legwork_runner.send_alert
         legwork_runner.send_alert = lambda text: True
 
@@ -1834,7 +1853,8 @@ class TestLockLifecycle(unittest.TestCase):
         self.assertFalse(self.lock.exists())
 
     def test_dead_pid_lock_is_reclaimed(self):
-        proc = subprocess.Popen(["sleep", "0"])
+        # sys.executable, not "sleep": Windows has no sleep binary.
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
         proc.wait()  # a real PID that is now certainly dead
         self.lock.write_text(f"{proc.pid} {time.time()}", encoding="utf-8")
         self.assertTrue(legwork_runner.acquire_lock())
@@ -2445,7 +2465,10 @@ class TestInstaller(unittest.TestCase):
             self.assertNotIn("args", hook)
             self.assertIsInstance(hook["command"], str)
             self.assertIn("/usr/bin/python3", hook["command"])
-            self.assertIn(f"/Users/me/legwork/core/{script}", hook["command"])
+            # Path(), not a POSIX literal: the hook path is native to the
+            # machine being installed on, so it is backslashed on Windows.
+            self.assertIn(str(Path("/Users/me/legwork") / "core" / script),
+                          hook["command"])
 
     def test_merge_hooks_is_idempotent_and_preserves_others(self):
         base = {"model": "opus", "hooks": {"SessionStart": [
@@ -2551,8 +2574,8 @@ class TestInstaller(unittest.TestCase):
             entries = moved["hooks"][event]
             self.assertEqual(len(entries), 1, "re-pointed, not duplicated")
             command = entries[0]["hooks"][0]["command"]
-            self.assertIn(f"/new/legwork/core/{script}", command)
-            self.assertNotIn("/old/legwork", command)
+            self.assertIn(str(Path("/new/legwork") / "core" / script), command)
+            self.assertNotIn(str(Path("/old/legwork")), command)
 
     def test_merge_hooks_repoints_pre_split_and_bash_entries(self):
         # Two historical spellings of our own hook: the pre-core/-split
@@ -2576,7 +2599,7 @@ class TestInstaller(unittest.TestCase):
             entries = merged["hooks"][event]
             self.assertEqual(len(entries), 1, "re-pointed, not duplicated")
             command = entries[0]["hooks"][0]["command"]
-            self.assertIn(f"/me/legwork/core/{script}", command)
+            self.assertIn(str(Path("/me/legwork") / "core" / script), command)
             self.assertNotIn(".sh", command)
 
     def test_merge_hooks_rewrites_exec_form_entry_to_shell_form(self):
@@ -2593,7 +2616,8 @@ class TestInstaller(unittest.TestCase):
         self.assertEqual(len(entries), 1, "re-pointed, not duplicated")
         hook = entries[0]["hooks"][0]
         self.assertNotIn("args", hook)
-        self.assertIn("/me/legwork/core/session_end_hook.py", hook["command"])
+        self.assertIn(str(Path("/me/legwork") / "core" / "session_end_hook.py"),
+                      hook["command"])
 
     def test_detect_python_never_returns_the_windows_python3_stub(self):
         # On Windows the Python installer never creates python3.exe, so the
