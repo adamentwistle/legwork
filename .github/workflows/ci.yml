@@ -64,11 +64,13 @@ jobs:
           python3 -m json.tool suite/reply-capture/n8n-reply-capture-workflow.json > /dev/null
           python3 -m json.tool suite/reviewer/n8n-review-workflow.json > /dev/null
 
-      - name: Bash syntax (installer + hooks)
+      - name: Bash syntax (installer)
+        run: bash -n install.sh
+
+      - name: Hook syntax (the hooks are Python now)
         run: |
-          bash -n install.sh
-          bash -n core/session_start_hook.sh
-          bash -n core/session_end_hook.sh
+          python3 -m py_compile core/session_start_hook.py \
+                                core/session_end_hook.py
 
       - name: Node syntax (reviewer build node)
         run: node --check suite/reviewer/n8n-build-node.js
@@ -108,7 +110,8 @@ jobs:
         run: |
           python3 -c "import sys; sys.path.insert(0, 'core'); \
             import legwork_common, build_dashboard"
-          bash -n core/session_start_hook.sh core/session_end_hook.sh
+          python3 -m py_compile core/session_start_hook.py \
+                               core/session_end_hook.py
           # The stripped copy carries its own plugin manifest and no suite/:
           # core/ alone is an installable plugin.
           test -f core/.claude-plugin/plugin.json
@@ -128,7 +131,7 @@ jobs:
           rm -rf dashboard
           printf '{"session_id":"ci-lite","cwd":"%s","reason":"exit"}' "$PWD" \
             | env -u LEGWORK_WEBHOOK_URL LEGWORK_DIR="$PWD" \
-              bash core/session_end_hook.sh
+              python3 core/session_end_hook.py
           test -s dashboard/index.html
           grep "rebuilt dashboard" hook.log
 
