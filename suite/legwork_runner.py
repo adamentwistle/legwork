@@ -169,11 +169,15 @@ STATE_FILE = LEGWORK_DIR / ".runner-state.json"
 # default config. A project's account: <name> maps to CLAUDE_CONFIG_DIR_<NAME>
 # (uppercased); see account_config_dir().
 DEFAULT_CONFIG_DIR = os.environ.get("CLAUDE_CONFIG_DIR", "")
-CLAUDE_FALLBACKS = [
-    Path.home() / ".local/bin/claude",
-    Path("/opt/homebrew/bin/claude"),
-    Path("/usr/local/bin/claude"),
-]
+# Where to look for the claude binary when it is not on PATH. Windows has no
+# /usr/local and spells the executable with an extension, so the POSIX names
+# can never match there.
+CLAUDE_FALLBACKS = (
+    [Path.home() / ".local" / "bin" / "claude.exe"] if os.name == "nt" else
+    [Path.home() / ".local/bin/claude",
+     Path("/opt/homebrew/bin/claude"),
+     Path("/usr/local/bin/claude")]
+)
 
 # Config values that failed to parse. Garbage in a cap must not raise at
 # import and kill every tick with no log line; the bad value falls back to
