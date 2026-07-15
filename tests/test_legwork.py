@@ -13,6 +13,7 @@ to a dead local port and asserts the logged http=000).
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -2119,6 +2120,23 @@ class TestWindowsPortability(unittest.TestCase):
         import legwork_common
         self.assertEqual(legwork_common.python_exe(), sys.executable)
         self.assertNotEqual(legwork_common.python_exe(), "python3")
+
+    def test_hook_command_is_posix_quoted_for_the_bash_that_runs_it(self):
+        # Claude Code runs a hook command through bash on every platform --
+        # on Windows that is Git Bash, reporting itself as /usr/bin/bash. A
+        # Windows-quoted string reaches it with the backslashes eaten as
+        # escapes and dies as "C:Usersaae-rdp...: command not found", which
+        # is exactly what a real session on the box did before this.
+        command = legwork_install.hook_command(
+            r"C:\Users\me\legwork", "session_end_hook.py",
+            python=r"C:\Python312\python.exe")
+        self.assertNotIn(r"C:\Python312\python.exe C:\Users", command,
+                         "an unquoted backslash path is eaten by bash")
+        # Round-trip it the way bash would: the two argv entries must survive.
+        parts = shlex.split(command)
+        self.assertEqual(parts, [r"C:\Python312\python.exe",
+                                 str(Path(r"C:\Users\me\legwork") / "core" /
+                                     "session_end_hook.py")])
 
     def test_schtasks_argv_ticks_every_n_minutes_and_replaces(self):
         argv = legwork_install.render_schtasks_argv(
