@@ -1744,15 +1744,28 @@ class TestFireArgv(unittest.TestCase):
         legwork_runner.GUARD_SETTINGS.unlink(missing_ok=True)
 
     def fire_and_read_argv(self, fname, prompt=None):
+        """The argv fire() would build, taken from the pure builder.
+
+        Not captured from the shim on PATH: a shim can only be a .cmd on
+        Windows, which routes through cmd.exe and truncates the multi-line
+        -p prompt at its first newline. The real claude.exe is spawned by
+        CreateProcess with no shell in between and receives it intact
+        (verified live), so capturing through the shim would pin cmd.exe's
+        mangling rather than what the runner actually builds."""
         path = write_project(fname, repo=str(make_git_repo(fname[:-3] + "-repo")),
                              prompt=prompt)
         commit_and_push(f"add {fname}")
         ok, reason, details = legwork_runner.assess(path)
         self.assertTrue(ok, reason)
-        outcome = legwork_runner.fire(details)
-        self.assertIsNotNone(outcome, "the shim session must complete")
-        import json as _json
-        return _json.loads(self.argv_file.read_text(encoding="utf-8"))
+        guard = (str(legwork_runner.GUARD_SETTINGS)
+                 if legwork_runner.GUARD_SETTINGS.exists() else None)
+        full_prompt = legwork_runner.PREAMBLE.format(
+            project_file=str(details["file"]),
+            brief_line=(legwork_runner.VISION_BRIEF if details.get("has_vision")
+                        else legwork_runner.ONESHOT_BRIEF),
+            prompt=details["prompt"])
+        return legwork_runner.build_fire_argv(
+            "claude", full_prompt, details, guard)
 
     def after(self, argv, flag):
         self.assertIn(flag, argv)

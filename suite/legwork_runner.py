@@ -1236,6 +1236,44 @@ def fire(project):
         raise
 
 
+def build_fire_argv(claude_path, prompt, project, guard):
+    """The argv for one fired session. Pure: no side effects, no spawning, so
+    what a session is permitted to do can be pinned by a test directly rather
+    than inferred from whatever a shim on PATH managed to capture.
+
+    (It has to be inferrable that way: a shim can only be a .cmd on Windows,
+    which routes through cmd.exe and truncates the multi-line -p prompt at its
+    first newline. The real claude.exe is spawned by CreateProcess with no
+    shell in between, which carries the prompt intact -- verified live.)"""
+    argv = [
+        claude_path, "-p", prompt,
+        "--output-format", "stream-json", "--verbose",
+        "--permission-mode", "acceptEdits",
+        "--add-dir", str(LEGWORK_DIR),
+    ]
+    if guard:
+        # Deny the edit tools on the legwork control plane (core/, suite/
+        # and scripts/). Bash(git:*) is not covered, so this blocks the
+        # direct path only; the post-fire audit is the detector.
+        argv += ["--settings", guard]
+    argv += ["--allowedTools", "Bash(git:*)", "Bash(mkdir:*)"]
+    # Allow every spelling of the interpreter a session might reasonably type
+    # to rebuild the dashboard. The skill says `python3`, which is right on
+    # macOS/Linux but is the 0-byte Store stub on Windows, where a session
+    # must use `python`. An allowlist entry that matches nothing the session
+    # actually runs fails silently -- the rebuild is just refused -- so list
+    # both names plus this runner's own absolute interpreter.
+    builder = "core/build_dashboard.py"
+    for exe in dict.fromkeys(["python3", "python", python_exe()]):
+        for target in (builder, f"{LEGWORK_DIR}/{builder}"):
+            argv.append(f"Bash({exe} {target}:*)")
+    if project["model"]:
+        argv += ["--model", project["model"]]
+    if project["effort"]:
+        argv += ["--effort", project["effort"]]
+    return argv
+
+
 def fire_claimed(project, claude_path, claim_head, started):
     """The post-claim work: run the session, classify the outcome, repair,
     review and audit. Split out of fire() so a crash anywhere in here still
@@ -1263,32 +1301,7 @@ def fire_claimed(project, claude_path, claim_head, started):
     log(f"fired {project['file'].name} in {project['repo_path']}"
         f"{chosen} (transcript {transcript.name})")
     guard = str(GUARD_SETTINGS) if GUARD_SETTINGS.exists() else None
-    argv = [
-        claude_path, "-p", prompt,
-        "--output-format", "stream-json", "--verbose",
-        "--permission-mode", "acceptEdits",
-        "--add-dir", str(LEGWORK_DIR),
-    ]
-    if guard:
-        # Deny the edit tools on the legwork control plane (core/, suite/
-        # and scripts/). Bash(git:*) is not covered, so this blocks the
-        # direct path only; the post-fire audit is the detector.
-        argv += ["--settings", guard]
-    argv += ["--allowedTools", "Bash(git:*)", "Bash(mkdir:*)"]
-    # Allow every spelling of the interpreter a session might reasonably type
-    # to rebuild the dashboard. The skill says `python3`, which is right on
-    # macOS/Linux but is the 0-byte Store stub on Windows, where a session
-    # must use `python`. An allowlist entry that matches nothing the session
-    # actually runs fails silently -- the rebuild is just refused -- so list
-    # both names plus this runner's own absolute interpreter.
-    builder = "core/build_dashboard.py"
-    for exe in dict.fromkeys(["python3", "python", python_exe()]):
-        for target in (builder, f"{LEGWORK_DIR}/{builder}"):
-            argv.append(f"Bash({exe} {target}:*)")
-    if project["model"]:
-        argv += ["--model", project["model"]]
-    if project["effort"]:
-        argv += ["--effort", project["effort"]]
+    argv = build_fire_argv(claude_path, prompt, project, guard)
     with open(transcript, "w", encoding="utf-8") as out:
         proc = subprocess.Popen(
             argv,
