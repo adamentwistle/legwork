@@ -677,12 +677,19 @@ def hook_command(legwork_dir, script, python=None):
     The interpreter is spelled out rather than leaning on the script itself
     being runnable: a bare .py path depends on file association on Windows and
     on a +x bit plus a shebang on POSIX, and the obvious shebang (`python3`)
-    is the Store stub on Windows."""
+    is the Store stub on Windows.
+
+    shlex.join on EVERY platform, Windows included. Claude Code runs a hook
+    command through bash everywhere -- on Windows that is Git Bash, which
+    reports itself as /usr/bin/bash -- so the string must be POSIX-quoted, not
+    Windows-quoted. An unquoted C:\\Users\\... reaches bash with every
+    backslash eaten as an escape and fails as "C:Usersaae-rdp...: command not
+    found"; shlex.quote wraps it in single quotes, where backslashes are
+    literal. Verified live against Git Bash: raw backslashes FAIL, quoted
+    backslashes and forward slashes both PASS."""
     parts = [python or detect_python(),
              str(Path(legwork_dir) / "core" / script)]
-    # Quote for the shell that will actually read the string.
-    return (subprocess.list2cmdline(parts) if os.name == "nt"
-            else shlex.join(parts))
+    return shlex.join(parts)
 
 
 def collect_values(wiz, existing, level=2):
