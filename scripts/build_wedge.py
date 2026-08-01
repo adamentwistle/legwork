@@ -223,13 +223,13 @@ def build_wedge(repo_root, out_dir, repo_slug=DEFAULT_WEDGE_SLUG, force=False):
     # 3. LICENSE verbatim.
     shutil.copy2(license_file, out_dir / "LICENSE")
 
-    # 4. Generated wrappers.
-    (out_dir / "README.md").write_text(
-        render_wedge_readme(repo_slug), encoding="utf-8"
-    )
-    (out_dir / ".gitignore").write_text(
-        render_wedge_gitignore(), encoding="utf-8"
-    )
+    # 4. Generated wrappers. newline="\n" so a Windows build emits the same
+    #    LF bytes as a macOS/Linux one — the published repo and the --check
+    #    byte-compare must not depend on the platform that ran the build.
+    with open(out_dir / "README.md", "w", encoding="utf-8", newline="\n") as f:
+        f.write(render_wedge_readme(repo_slug))
+    with open(out_dir / ".gitignore", "w", encoding="utf-8", newline="\n") as f:
+        f.write(render_wedge_gitignore())
 
     return sorted(p.name for p in out_dir.iterdir())
 
