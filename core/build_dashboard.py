@@ -49,8 +49,11 @@ SCODE = {
 STALE_DAYS = 14
 
 LOG_RE = re.compile(r"##\s*Log\s*\n(.*?)(?:\n##|\Z)", re.S)
-DATED_LINE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}):\s*(.+)$", re.S)
-LOG_ROW_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2}):\s*(.*)$", re.S)
+# Log lines open with an ISO date but the colon is not always adjacent:
+# "2026-07-15 (sonnet, cont. from fable): TEXT" is common. Anything between
+# the date and the rest of the line stays part of the text.
+DATED_LINE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})\b:?\s*(.+)$", re.S)
+LOG_ROW_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})\b:?\s*(.*)$", re.S)
 
 
 def parse_project(path):
@@ -70,10 +73,15 @@ def parse_project(path):
     log_match = LOG_RE.search(text)
     log_lines = []
     if log_match:
+        # A bullet may hard-wrap across physical lines (indented
+        # continuations); fold those back into their entry so the log
+        # shows whole entries, not first lines.
         for line in log_match.group(1).splitlines():
             line = line.strip()
             if line.startswith("- "):
                 log_lines.append(line[2:])
+            elif line and log_lines:
+                log_lines[-1] += " " + line
 
     status = meta.get("status", "queued").lower()
     if status not in STATUSES:
@@ -153,6 +161,10 @@ IC_CHECK = ('<svg class="ic-check" viewBox="0 0 24 24" fill="none" stroke="curre
             '<path d="M20 6 9 17l-5-5"/></svg>')
 IC_CHEVRON = ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" '
               'stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>')
+IC_EXPAND = ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" '
+             'stroke-linecap="round" stroke-linejoin="round">'
+             '<path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3'
+             'M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/></svg>')
 IC_LOCK = ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" '
            'stroke-linecap="round"><rect x="4" y="10" width="16" height="11" rx="2"/>'
            '<path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>')
@@ -245,43 +257,59 @@ def card(p, hero=False):
         blocked_block = (f'<div class="blocked-line">{IC_ALERT}'
                          f'<span><b>Blocked on:</b> {html.escape(p["blocked_on"])}</span></div>')
 
-    recent_block = ""
-    recent = log_rows(p["log"])
-    if recent:
-        recent_block = f'<div class="log-cap">Recent activity</div><div class="log">{recent}</div>'
-
-    exp_block = ""
-    foot_block = ""
-    if p["prompt"]:
+    # The pop-over source: the next prompt plus the full log, kept hidden on
+    # the card and cloned into the shared dialog when opened. Exists whenever
+    # there is anything beyond the card face to show.
+    pop_src = ""
+    if p["prompt"] or p["log_all"]:
+        prompt_part = ""
+        if p["prompt"]:
+            prompt_part = (
+                '<div class="prompt-cap"><span class="log-cap" style="margin:0;">Next prompt</span>'
+                f'<button class="btn-copy-ghost copy-src">{IC_COPY}{IC_CHECK}'
+                '<span class="copy-label">copy</span></button></div>'
+                f'<pre class="prompt">{html.escape(p["prompt"])}</pre>'
+            )
         full = log_rows(p["log_all"])
-        full_block = f'<div class="log-cap">Full log</div><div class="log">{full}</div>' if full else ""
-        exp_block = (
-            '<div class="expander"><div class="exp-body">'
-            '<div class="prompt-cap"><span class="log-cap" style="margin:0;">Next prompt</span>'
-            f'<button class="btn-copy-ghost copy-src" data-from="card">{IC_COPY}{IC_CHECK}'
-            '<span class="copy-label">copy</span></button></div>'
-            f'<pre class="prompt">{html.escape(p["prompt"])}</pre>'
-            f'{full_block}</div></div>'
-        )
+        log_part = f'<div class="log-cap">Full log</div><div class="log">{full}</div>' if full else ""
+        pop_src = f'<div class="pop-src" hidden>{prompt_part}{log_part}</div>'
+
+    # Card face: only the newest log entry, line-clamped by CSS; the full
+    # history lives in the pop-over behind "see more".
+    recent_block = ""
+    recent = log_rows(p["log"][:1])
+    if recent:
+        see_more = ('<button class="see-more pop-open">see more</button>'
+                    if pop_src else "")
+        recent_block = (f'<div class="log-cap">Recent activity</div>'
+                        f'<div class="log log-recent">{recent}</div>{see_more}')
+
+    foot_block = ""
+    if pop_src:
+        open_label = "Prompt &amp; log" if p["prompt"] else "Full log"
+        copy_btn = ""
+        if p["prompt"]:
+            copy_btn = (f'<button class="btn-copy copy-src">{IC_COPY}{IC_CHECK}'
+                        '<span class="copy-label">Copy prompt</span></button>')
         foot_block = (
             '<div class="card-foot">'
-            f'<button class="exp-toggle">{IC_CHEVRON}<span class="exp-label">Prompt &amp; log</span></button>'
+            f'<button class="exp-toggle pop-open">{IC_EXPAND}<span class="exp-label">{open_label}</span></button>'
             '<div class="foot-spacer"></div>'
-            f'<button class="btn-copy copy-src" data-from="card">{IC_COPY}{IC_CHECK}'
-            '<span class="copy-label">Copy prompt</span></button>'
+            f'{copy_btn}'
             '</div>'
         )
 
     data_prompt = html.escape(p["prompt"], quote=True)
     return (
         f'<article class="{cls}" data-status="{p["status"]}" '
-        f'data-category="{html.escape(p["category"])}" data-prompt="{data_prompt}">'
+        f'data-category="{html.escape(p["category"])}" data-prompt="{data_prompt}" '
+        f'data-name="{html.escape(p["name"], quote=True)}">'
         '<div class="card-top"><div class="card-id">'
         f'<h3 class="card-name">{html.escape(p["name"])}</h3>'
         f'<p class="card-desc">{html.escape(p["description"])}</p></div>'
         f'{status_pill(p)}</div>'
         f'<div class="badges">{pills(p)}</div>'
-        f'{_fired_line(p)}{blocked_block}{recent_block}{exp_block}{foot_block}'
+        f'{_fired_line(p)}{blocked_block}{recent_block}{pop_src}{foot_block}'
         '</article>'
     )
 
@@ -515,6 +543,18 @@ def build(projects):
 
 </main>
 
+<div class="overlay" id="overlay" hidden>
+  <div class="pop" role="dialog" aria-modal="true" aria-labelledby="popTitle">
+    <div class="pop-head">
+      <h3 class="pop-title" id="popTitle"></h3>
+      <button class="pop-close icon-btn" id="popClose" aria-label="Close">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>
+      </button>
+    </div>
+    <div class="pop-body" id="popBody"></div>
+  </div>
+</div>
+
 <footer class="foot">
   <div class="wrap">
     <span class="foot-brand">legwork</span>
@@ -533,7 +573,8 @@ HEAD_OPEN = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<meta http-equiv="refresh" content="120" />
+<!-- auto-refresh lives in the script so an open pop-over is never yanked -->
+
 <title>Legwork &mdash; project queue</title>
 <style>
 """
@@ -894,10 +935,23 @@ main{padding:var(--s10) 0 0;}
   margin-top:var(--s4);margin-bottom:var(--s2);
 }
 
-.expander{margin-top:var(--s2);}
-.exp-body{display:none;}
-.card[data-open="true"] .exp-body{display:block;animation:pop .12s ease-out;}
-@keyframes pop{from{opacity:0;transform:translateY(-3px);}to{opacity:1;transform:none;}}
+/* recent activity on the card face: one entry, clamped; "see more" opens
+   the pop-over with the full history */
+.log-recent .log-text{
+  display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:4;
+  overflow:hidden;
+}
+.see-more{
+  align-self:flex-start;margin-top:var(--s2);padding:2px 8px;
+  font-size:var(--fs-xs);font-family:var(--font-mono);font-weight:700;
+  text-transform:uppercase;letter-spacing:0.04em;
+  color:var(--ink);border:2px solid var(--ink);background:var(--paper);
+  box-shadow:2px 2px 0 0 var(--ink);
+  transition:transform .1s ease-out, box-shadow .1s ease-out, background .1s ease-out, color .1s ease-out;
+}
+.see-more:hover{background:var(--second);color:#000;}
+.see-more:active{transform:translate(2px,2px);box-shadow:none;}
+
 .prompt-cap{display:flex;align-items:center;justify-content:space-between;gap:var(--s3);margin-top:var(--s4);margin-bottom:var(--s2);}
 .prompt{
   font-family:var(--font-mono);font-size:var(--fs-sm);line-height:1.6;
@@ -916,9 +970,42 @@ main{padding:var(--s10) 0 0;}
 }
 .exp-toggle:hover{border-color:var(--ink);background:var(--paper);box-shadow:3px 3px 0 0 var(--ink);}
 .exp-toggle:active{transform:translate(3px,3px);box-shadow:none;}
-.exp-toggle svg{width:14px;height:14px;transition:transform .15s ease-out;}
-.card[data-open="true"] .exp-toggle svg{transform:rotate(180deg);}
+.exp-toggle svg{width:14px;height:14px;}
 .foot-spacer{flex:1 1 auto;}
+
+/* pop-over — one shared dialog, filled from the opening card's hidden
+   .pop-src. The backdrop is solid ink at half strength (no blur, ever). */
+.overlay{
+  position:fixed;inset:0;z-index:100;
+  display:flex;align-items:flex-start;justify-content:center;
+  padding:6vh var(--s4) var(--s8);
+  background:rgba(0,0,0,0.55);
+  overflow-y:auto;
+}
+.overlay[hidden]{display:none;}
+.pop{
+  width:min(780px, 100%);max-height:88vh;
+  display:flex;flex-direction:column;
+  background:var(--card);border:var(--bw) solid var(--ink);
+  box-shadow:var(--sh-xl);
+}
+.pop-head{
+  display:flex;align-items:center;justify-content:space-between;gap:var(--s4);
+  padding:var(--s4) var(--s5);
+  border-bottom:var(--bw) solid var(--ink);
+  background:var(--second);color:#000;flex:0 0 auto;
+}
+.pop-title{
+  font-size:var(--fs-lg);font-weight:900;text-transform:uppercase;
+  letter-spacing:-0.01em;color:#000;line-height:var(--lh-tight);
+  overflow-wrap:anywhere;
+}
+.pop-close{background:var(--card);}
+.pop-body{
+  padding:var(--s2) var(--s5) var(--s6);
+  overflow-y:auto;
+}
+.pop-body .pop-src{display:block;}
 
 .btn-copy{
   display:inline-flex;align-items:center;gap:8px;height:42px;padding:0 var(--s4);white-space:nowrap;
@@ -1045,18 +1132,48 @@ SCRIPT = """
     });
   }
 
-  /* ---- expanders ---- */
-  document.querySelectorAll(".exp-toggle").forEach(function(btn){
-    btn.addEventListener("click", function(){
-      var card = btn.closest(".card");
-      var open = card.getAttribute("data-open") === "true";
-      card.setAttribute("data-open", open ? "false" : "true");
-      var lab = btn.querySelector(".exp-label");
-      if(lab) lab.textContent = open ? "Prompt & log" : "Hide";
-    });
+  /* ---- pop-over: one shared dialog, filled from the opening card ---- */
+  var overlay = document.getElementById("overlay");
+  var popBody = document.getElementById("popBody");
+  var popTitle = document.getElementById("popTitle");
+  var popClose = document.getElementById("popClose");
+  var lastFocus = null;
+
+  function openPop(card){
+    var src = card.querySelector(".pop-src");
+    if(!src || !overlay) return;
+    popBody.innerHTML = src.innerHTML;
+    popTitle.textContent = card.getAttribute("data-name") || "";
+    overlay.setAttribute("data-prompt", card.getAttribute("data-prompt") || "");
+    lastFocus = document.activeElement;
+    overlay.hidden = false;
+    /* after unhiding: scrollTop writes are no-ops on a display:none box */
+    popBody.scrollTop = 0;
+    document.body.style.overflow = "hidden";
+    if(popClose) popClose.focus();
+  }
+  function closePop(){
+    if(!overlay || overlay.hidden) return;
+    overlay.hidden = true;
+    popBody.innerHTML = "";
+    document.body.style.overflow = "";
+    if(lastFocus && lastFocus.focus) lastFocus.focus();
+  }
+  document.addEventListener("click", function(e){
+    var opener = e.target.closest(".pop-open");
+    if(opener){
+      var card = opener.closest(".card");
+      if(card) openPop(card);
+      return;
+    }
+    if(e.target.closest("#popClose")){ closePop(); return; }
+    if(e.target === overlay){ closePop(); }
+  });
+  document.addEventListener("keydown", function(e){
+    if(e.key === "Escape") closePop();
   });
 
-  /* ---- copy prompt ---- */
+  /* ---- copy prompt (delegated: buttons live on cards and in the pop) ---- */
   function flash(btn){
     btn.classList.add("copied");
     var lab = btn.querySelector(".copy-label");
@@ -1064,14 +1181,14 @@ SCRIPT = """
     if(lab) lab.textContent = btn.classList.contains("btn-copy") ? "Copied" : "copied";
     setTimeout(function(){ btn.classList.remove("copied"); if(lab) lab.textContent = prev; }, 1600);
   }
-  document.querySelectorAll(".copy-src").forEach(function(btn){
-    btn.addEventListener("click", function(){
-      var card = btn.closest(".card");
-      var text = card ? (card.getAttribute("data-prompt") || "") : "";
-      if(navigator.clipboard && navigator.clipboard.writeText){
-        navigator.clipboard.writeText(text).then(function(){ flash(btn); }).catch(function(){ legacyCopy(text); flash(btn); });
-      } else { legacyCopy(text); flash(btn); }
-    });
+  document.addEventListener("click", function(e){
+    var btn = e.target.closest(".copy-src");
+    if(!btn) return;
+    var holder = btn.closest("[data-prompt]");
+    var text = holder ? (holder.getAttribute("data-prompt") || "") : "";
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(text).then(function(){ flash(btn); }).catch(function(){ legacyCopy(text); flash(btn); });
+    } else { legacyCopy(text); flash(btn); }
   });
   function legacyCopy(text){
     var ta = document.createElement("textarea");
@@ -1080,6 +1197,11 @@ SCRIPT = """
     try{ document.execCommand("copy"); }catch(e){}
     document.body.removeChild(ta);
   }
+
+  /* ---- auto-refresh: every 120s, but never while the pop-over is open ---- */
+  setInterval(function(){
+    if(!overlay || overlay.hidden) location.reload();
+  }, 120000);
 
   /* ---- filters ---- */
   var STATES = {

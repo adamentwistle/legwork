@@ -1947,6 +1947,35 @@ class TestDashboard(unittest.TestCase):
         self.assertIn("alpha moved.", html_out)
         self.assertIn("beta moved.", html_out)
 
+    def test_log_dates_with_annotations_still_parse(self):
+        # Real logs write "2026-07-15 (sonnet, cont. from fable): TEXT" —
+        # the date column must still populate when the colon is not
+        # adjacent to the date.
+        rows = build_dashboard.log_rows(
+            ["2026-07-15 (sonnet, cont. from fable): ARENA BATTLE"])
+        self.assertIn('>07-15<', rows)
+        self.assertIn("(sonnet, cont. from fable): ARENA BATTLE", rows)
+
+    def test_changelog_keeps_annotated_dates(self):
+        p = build_dashboard.parse_project(write_project(
+            "t-cl3.md", log_lines=["- 2026-06-03 (fable): gamma moved."]))
+        html_out = build_dashboard.changelog_html([p])
+        self.assertIn("gamma moved.", html_out)
+        self.assertIn("2026-06-03", html_out)
+
+    def test_wrapped_log_bullets_fold_into_one_entry(self):
+        # A bullet hard-wrapped across physical lines is one entry, not
+        # a first line with the rest silently dropped.
+        p = build_dashboard.parse_project(write_project(
+            "t-wrap.md",
+            log_lines=["- 2026-06-02: first line of the entry",
+                       "  and its wrapped continuation.",
+                       "- 2026-06-01: older entry."]))
+        self.assertEqual(
+            p["log_all"][0],
+            "2026-06-02: first line of the entry and its wrapped continuation.")
+        self.assertEqual(p["log_all"][1], "2026-06-01: older entry.")
+
     def test_build_smoke(self):
         projects = [build_dashboard.parse_project(write_project("t-b1.md"))]
         page = build_dashboard.build(projects)
@@ -2048,9 +2077,12 @@ class TestWindowsPortability(unittest.TestCase):
             self.assertNotIn("//", rule, "the // prefix is void on Windows")
 
     def test_guard_deny_rules_keep_the_prefix_on_posix(self):
+        # PurePosixPath, not Path: with os.name patched to "posix", Path()
+        # would resolve to PosixPath, which cannot instantiate on Windows.
+        import pathlib
         with mock.patch.object(legwork_runner.os, "name", "posix"), \
                 mock.patch.object(legwork_runner, "LEGWORK_DIR",
-                                  Path("/home/me/legwork")):
+                                  pathlib.PurePosixPath("/home/me/legwork")):
             legwork_runner.write_guard_settings()
         deny = json.loads(legwork_runner.GUARD_SETTINGS.read_text(
             encoding="utf-8"))["permissions"]["deny"]
