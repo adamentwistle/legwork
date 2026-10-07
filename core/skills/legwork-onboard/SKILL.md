@@ -40,6 +40,12 @@ Look these up yourself; never ask the user for a fact you can read:
   `export LEGWORK_DIR=<checkout>` to their shell profile; say so in step 5.
 - An existing `config` and `house-rules.md` there. On a re-run, each
   question below defaults to what they already hold.
+- The interpreter, `<python>` below: the first of `python3` and `python`
+  for which `<name> -c 'import sys'` exits 0. On macOS and Linux that is
+  `python3`. On Windows it is `python`: `python3` there is usually the
+  Microsoft Store stub, which exits 9009 without running anything. Run the
+  scripts in `orchestration/bin/` through it too, not by their `python3`
+  first line.
 - The Claude config dir: `$CLAUDE_CONFIG_DIR`, else `~/.claude`.
 - Tools: `command -v claude gh herdr hermes`, `gh auth status`, and
   whether `HERDR_ENV` is set (this session runs inside Herdr).
@@ -118,7 +124,7 @@ it.
 
 1. House rules, if they gave any: write `house-rules.md` in the legwork
    repo, one `- ` list item per rule, under a `# House rules` heading.
-2. Settings: `python3 orchestration/install.py --set KEY=VALUE ...` with
+2. Settings: `<python> orchestration/install.py --set KEY=VALUE ...` with
    every setting they chose:
    - runner: `LEGWORK_DAILY_CAP`, `LEGWORK_DAILY_COST_CAP`, and
      `LEGWORK_LOCAL_REVIEW=1` or `LEGWORK_WEBHOOK_URL` / `LEGWORK_ALERT_URL`
@@ -136,7 +142,7 @@ it.
    from this one, run this step there, since the wizard writes the config
    of the checkout it runs in. Never run it without `--yes`: it is an
    interactive wizard and will hang this session.
-4. The optional layer: `python3 orchestration/install.py --with <pieces>`,
+4. The optional layer: `<python> orchestration/install.py --with <pieces>`,
    where the pieces are the ones they chose: `shipping`, `fanout`,
    `switchboard` (always with fanout), `herdr-skill`, `usage-guard`,
    `hermes` (with `--hermes-profile <name>`). Run it with `--dry-run` first
@@ -146,9 +152,9 @@ it.
 ## 5. Check it, and hand over
 
 - Re-read `config` and confirm every setting landed. Run
-  `python3 orchestration/install.py --with <pieces> --dry-run` and confirm
+  `<python> orchestration/install.py --with <pieces> --dry-run` and confirm
   each destination now exists.
-- With orchestration: `orchestration/bin/switchboard-wait --status
+- With orchestration: `<python> orchestration/bin/switchboard-wait --status
   <checkout>:none` must exit 0.
 - With Hermes, these steps are the user's, because they change Hermes
   itself. List them, do not run them:

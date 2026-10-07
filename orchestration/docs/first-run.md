@@ -67,7 +67,8 @@ With Hermes:
    - Stay out of the orchestrator pane unless Hermes flags it as blocked.
 
 By hand: run `orchestration/bin/switchboard-wait --timeout 1800 <repo>:<pane>`
-(or `<repo>:none` without Herdr) in a spare terminal. It returns when there
+(or `<repo>:none` without Herdr) in a spare terminal; on Windows, run it
+as `python orchestration/bin/switchboard-wait ...`. It returns when there
 is something for you. Read the entry in `.legwork/switchboard.md`, type
 your answer into the orchestrator pane, and start the wait again. On a
 `CYCLE`, type `/clear`, `/rename orch-<project>` and the `Resume:` line

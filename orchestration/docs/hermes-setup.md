@@ -15,6 +15,9 @@ default profile, then pass its name to the installer:
 python3 orchestration/install.py --with hermes --hermes-profile <profile>
 ```
 
+On Windows, use `python` in place of `python3`, which there is usually the
+Microsoft Store stub.
+
 `default` installs into `~/.hermes` itself; any other name into
 `~/.hermes/profiles/<name>`. The installer writes the switchboard skill to
 `skills/orchestration/switchboard/SKILL.md` in the profile, with your
