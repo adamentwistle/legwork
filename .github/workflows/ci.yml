@@ -47,6 +47,46 @@ jobs:
       - name: Run the stdlib test suite
         run: python3 -m unittest discover -s tests
 
+  # macOS, with the system /usr/bin/python3 and bash a Mac really has, so a
+  # change made for one platform cannot quietly break the Mac. The last step
+  # installs /bugbot into a scratch dir and runs the rendered line as a Mac
+  # user's Claude would: a bare script path, run by its python3 shebang.
+  macos:
+    name: tests (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Configure git
+        run: |
+          git config --global user.email "ci@legwork.invalid"
+          git config --global user.name "legwork ci"
+          git config --global init.defaultBranch main
+
+      - name: Run the stdlib test suite
+        run: |
+          /usr/bin/python3 --version
+          /usr/bin/python3 -m unittest discover -s tests
+
+      - name: Installer under the system bash
+        run: /bin/bash -n install.sh
+
+      - name: Installed script lines run by their shebang
+        run: |
+          q="$RUNNER_TEMP/q"; c="$RUNNER_TEMP/c"
+          mkdir -p "$q"
+          LEGWORK_CONFIG="$q/config" /usr/bin/python3 orchestration/install.py \
+            --with shipping --claude-dir "$c" --legwork-dir "$q"
+          line=$(grep -o '`[^`]*bugbot-wait <pr> --trigger' "$c/commands/bugbot.md" \
+                 | head -1 | tr -d '`')
+          echo "rendered: $line"
+          case "$line" in
+            /*) ;;
+            *) echo "expected a bare script path on macOS" >&2; exit 1 ;;
+          esac
+          "${line%% *}" --help > /dev/null
+
   # Cheap blocking syntax checks for everything the Python suite cannot
   # import: the n8n workflow JSONs, the bash installer + hooks, and the
   # reviewer build node. Seconds to run, and a truncated JSON or an
