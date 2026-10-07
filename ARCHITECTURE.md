@@ -108,6 +108,12 @@ dependency rule, not just filing:
   launchd plist template, and the n8n pipelines (`suite/reviewer/`,
   `suite/reply-capture/`, `suite/alerts/`). suite imports from core, never
   the reverse.
+- `orchestration/` is the optional orchestrator layer: `/ship`, `/bugbot`
+  and `/fanout`, the switchboard-protocol skill, the Hermes switchboard
+  skill (a template), `switchboard-wait`, `bugbot-wait`, `usage-guard`, and
+  `install.py`, which installs the pieces a user picks. Like suite, it
+  imports from core, never the reverse, and neither core nor suite depends
+  on it. See [orchestration/README.md](orchestration/README.md).
 - `scripts/` holds `legwork_install.py`, the wizard behind `./install.sh`.
   It serves both levels, so it belongs to neither.
 
@@ -290,7 +296,9 @@ from the same single source. The commands under `core/commands/` are the
 verbs: `/add` (start a project), `/log` (update without a work session),
 `/pickup` (reload context), `/go` (run the next prompt verbatim, no re-brief),
 `/shelve` (icebox), `/vision` (capture the standing brief and optionally
-grant autonomy), and `/wrap` (close out a session and mint the next prompt). `/vision` is the single gate into autonomy: it captures the
+grant autonomy), `/wrap` (close out a session and mint the next prompt), and
+`/onboard` (the legwork-onboard skill: interview the user about each
+optional layer and install only those). `/vision` is the single gate into autonomy: it captures the
 Vision and is the only place `autonomy: loop` is set.
 
 ### Tests (`tests/test_legwork.py`)

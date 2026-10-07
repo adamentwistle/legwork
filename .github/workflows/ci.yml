@@ -72,6 +72,14 @@ jobs:
           python3 -m py_compile core/session_start_hook.py \
                                 core/session_end_hook.py
 
+      - name: Orchestration syntax (scripts and installer)
+        run: |
+          python3 -m py_compile orchestration/install.py
+          for f in orchestration/bin/switchboard-wait orchestration/bin/bugbot-wait \
+                   orchestration/bin/usage-guard; do
+            python3 -c 'import sys; compile(open(sys.argv[1]).read(), sys.argv[1], "exec")' "$f"
+          done
+
       - name: Node syntax (reviewer build node)
         run: node --check suite/reviewer/n8n-build-node.js
 

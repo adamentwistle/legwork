@@ -1,0 +1,360 @@
+#!/usr/bin/env python3
+"""Wait until an orchestrator needs the switchboard.
+
+Usage: switchboard-wait [--timeout SECS] REPO:PANE [REPO:PANE ...]
+       switchboard-wait --status REPO:PANE [REPO:PANE ...]
+
+PANE is the orchestrator's Herdr pane id (as `herdr agent list` prints it).
+Without Herdr, pass `none` (REPO:none): the wait then watches the
+switchboard file only and never calls herdr.
+
+--status prints the full current state and exits 0 at once: every open
+DECISION with its id and first line, a CYCLE or DONE if it is the latest
+entry, and each pane's state. It never reads or writes the cursor file and
+never waits, so it is safe on check-ins and before answering a question
+about a decision.
+
+On start it reports state, not only changes. Before waiting it prints, for
+each watched repo:
+  - every open DECISION in .legwork/switchboard.md: no line starting
+    "ANSWERED <id>" (then a colon or a space) anywhere in the file, and no
+    later entry with a line starting "Replaces <id>"
+  - a CYCLE or DONE entry, if it is the latest entry; while the pane is
+    idle or done it is reported on every start, not once, because the
+    switchboard has to act on it
+  - the pane, if it is already idle, done, blocked or gone
+If anything is printed on start it exits 0 straight away.
+
+A cursor per repo, .legwork/switchboard-wait.cursor (JSON: switchboard file
+path -> last entry id reported), stops the same entry being reported twice
+and makes sure entries written while no wait was running are reported on the
+next start. The last pane state reported is kept in the same file, so a pane
+that stays idle is reported once, not on every start. Saves take a lock
+(.legwork/switchboard-wait.cursor.lock) and merge with what is on disk, so
+two waits on one repo keep each other's state.
+
+Otherwise it waits, and returns as soon as, in any watched repo:
+  - a new DECISION, CYCLE or DONE entry lands
+  - the pane goes idle, done, blocked or gone, or a herdr call fails
+    ("unreachable": a timeout, herdr missing, or any error other than
+    agent_not_found; reported once)
+  - the weekly all-models or Fable usage reaches 99% (the ccstatusline
+    usage cache; LEGWORK_USAGE_CACHE, in the environment or the legwork
+    config, points it elsewhere, and with no
+    cache this check is skipped)
+
+Prints one line per event: "<repo-name> <what>". Exit 0 on an event,
+124 on timeout, 2 on bad arguments. Foreground only, hard timeout: every
+herdr call has its own 30 s timeout and the overall deadline always holds.
+"""
+import fcntl
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+WAKE = ("DECISION", "CYCLE", "DONE")
+STOPPED = ("idle", "done", "blocked", "gone")
+sys.path.insert(1, os.path.join(os.path.dirname(os.path.realpath(__file__)), ".."))
+try:
+    from settings import setting  # orchestration/settings.py, same checkout
+except ImportError:  # copied out of the checkout: environment only
+    def setting(key, default=None):
+        return os.environ.get(key) or default
+
+USAGE_CACHE = (os.environ.get("SWITCHBOARD_USAGE_CACHE")
+               or setting("LEGWORK_USAGE_CACHE")
+               or os.path.expanduser("~/.cache/ccstatusline/usage.json"))
+USAGE_FLOOR = 99
+CURSOR_NAME = "switchboard-wait.cursor"
+HERDR_TIMEOUT = 30
+POLL = 10
+UNREACHABLE = "unreachable"  # a herdr call that failed; herdr's own states pass through
+NO_PANE = "none"  # REPO:none, no Herdr: watch the file only
+
+
+def weekly_usage():
+    """Weekly usage percentages; a value that is not a number is skipped."""
+    try:
+        with open(USAGE_CACHE) as f:
+            d = json.load(f)
+        raw = {"all-models": d.get("weeklyUsage"), "Fable": d.get("fableUsage")}
+    except (OSError, ValueError, AttributeError):
+        return {}
+    usage = {}
+    for k, v in raw.items():
+        try:
+            usage[k] = float(v)
+        except (TypeError, ValueError):
+            pass
+    return usage
+
+
+ENTRY = re.compile(r"^## (\S+) (DECISION|UPDATE|DECIDED|CYCLE|DONE)\b", re.M)
+ANSWERED = re.compile(r"^ANSWERED (\S+?)(?::|\s|$)", re.M)
+REPLACES = re.compile(r"^Replaces (\S+-\d+)", re.M)
+
+
+def parse(path):
+    """Return ([(id, kind, ids it replaces, first line)], ids answered)."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except (OSError, ValueError):
+        return [], set()
+    heads = list(ENTRY.finditer(text))
+    entries = []
+    for i, m in enumerate(heads):
+        end = heads[i + 1].start() if i + 1 < len(heads) else len(text)
+        body = text[m.end():end]
+        lines = [s.strip() for s in body.splitlines()[1:] if s.strip()]
+        entries.append((m.group(1), m.group(2), set(REPLACES.findall(body)),
+                        lines[0] if lines else ""))
+    return entries, set(ANSWERED.findall(text))
+
+
+def reportable(entries, answered, after, latest_only):
+    """Indexes of entries after `after` that need the switchboard.
+
+    A DECISION counts while it is open. A CYCLE or DONE counts always or,
+    with latest_only, only when it is the latest entry in the file.
+    """
+    replaced, found = set(), []
+    for i in reversed(range(len(entries))):
+        eid, kind, reps = entries[i][:3]
+        if i > after:
+            if kind == "DECISION":
+                if eid not in answered and eid not in replaced:
+                    found.append(i)
+            elif kind in WAKE and (not latest_only or i == len(entries) - 1):
+                found.append(i)
+        replaced |= reps
+    return sorted(found)
+
+
+def entry_events(w, since, latest_only, pane_stopped=False):
+    """Event lines for one repo's entries past the cursor and index `since`.
+
+    With pane_stopped, a latest CYCLE or DONE is reported even if the cursor
+    is already on it: the switchboard has to act on it while the pane is
+    stopped.
+    """
+    entries, answered = parse(w["path"])
+    if since > len(entries):
+        since = w["seen"] = 0
+    cursor = w["state"].get(w["path"])
+    after = since - 1
+    for i, e in enumerate(entries):
+        if e[0] == cursor:
+            after = max(after, i)
+            break
+    found = reportable(entries, answered, after, latest_only)
+    last = len(entries) - 1
+    if pane_stopped and entries and entries[last][1] in ("CYCLE", "DONE") and last not in found:
+        found.append(last)
+    if found:
+        w["state"][w["path"]] = entries[found[-1]][0]
+    return [f"{w['name']} {entries[i][0]} {entries[i][1]}" for i in found]
+
+
+def pane_status(pane, deadline):
+    """(status, state_change_seq), or None when the deadline cut the call short
+    or there is no pane to ask about."""
+    if pane == NO_PANE:
+        return None
+    limit = min(HERDR_TIMEOUT, deadline - time.time())
+    if limit <= 0:
+        return None
+    try:
+        done = subprocess.run(["herdr", "agent", "get", pane], capture_output=True,
+                              text=True, timeout=limit)
+    except subprocess.TimeoutExpired:
+        return (UNREACHABLE, None) if limit >= HERDR_TIMEOUT else None
+    except OSError:
+        return (UNREACHABLE, None)
+    try:
+        # herdr prints a result on stdout, and an error as JSON on stderr.
+        reply = json.loads(done.stdout if done.stdout.strip() else done.stderr)
+        if "result" not in reply:
+            gone = reply["error"]["code"] == "agent_not_found"
+            return ("gone" if gone else UNREACHABLE, None)
+        agent = reply["result"]["agent"]
+        return agent["agent_status"], agent.get("state_change_seq")
+    except (ValueError, KeyError, TypeError):
+        return (UNREACHABLE, None)
+
+
+def pane_event(mem, seen):
+    """Status to report for one pane observation, or None. Updates mem."""
+    if seen is None:
+        return None
+    status, seq = seen
+    if status == UNREACHABLE:
+        if mem.get(UNREACHABLE):
+            return None
+        mem[UNREACHABLE] = True
+        return UNREACHABLE
+    mem[UNREACHABLE] = False
+    before = (mem.get("status"), mem.get("seq"))
+    mem["status"], mem["seq"] = status, seq
+    if status in STOPPED and (status, seq) != before:
+        return status
+    return None
+
+
+def load_state(path):
+    try:
+        with open(path) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def later_id(path, a, b):
+    """Whichever of two entry ids comes later in the switchboard file."""
+    ids = [e[0] for e in parse(path)[0]]
+    pos = {x: (ids.index(x) if x in ids else -1) for x in (a, b)}
+    return a if pos[a] >= pos[b] else b
+
+
+def merge(disk, ours, base):
+    """Apply what this wait changed (ours vs base) onto the file as it is now."""
+    for key, value in ours.items():
+        if key == "panes":
+            if not isinstance(value, dict):
+                continue
+            if not isinstance(disk.get("panes"), dict):
+                disk["panes"] = {}
+            before = base.get("panes") if isinstance(base.get("panes"), dict) else {}
+            for pane, mem in value.items():
+                if mem != before.get(pane):
+                    disk["panes"][pane] = mem
+        elif value != base.get(key):
+            now = disk.get(key)
+            disk[key] = later_id(key, value, now) if isinstance(now, str) else value
+    return disk
+
+
+def save_states(states, loaded):
+    """Merge each changed cursor into the file on disk, under a lock.
+
+    Another wait on the same repo may have saved since this one started, so
+    the file is re-read and only this wait's changes are applied to it. An
+    entry cursor never moves backwards.
+    """
+    for path, d in states.items():
+        folder = os.path.dirname(path)
+        if d == loaded[path] or not os.path.isdir(os.path.dirname(folder)):
+            continue
+        tmp = f"{path}.{os.getpid()}.tmp"
+        try:
+            os.makedirs(folder, exist_ok=True)
+            with open(f"{path}.lock", "a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                merged = merge(load_state(path), d, loaded[path])
+                with open(tmp, "w") as f:
+                    json.dump(merged, f, indent=1, sort_keys=True)
+                    f.write("\n")
+                os.replace(tmp, path)
+        except OSError as e:
+            print(f"switchboard-wait: could not save {path}: {e}", file=sys.stderr)
+
+
+def poll(watched, since_start, deadline):
+    """Event lines for every watched repo: entries first, then the pane."""
+    events = []
+    for w in watched:
+        since = w["seen"] if since_start else 0
+        seen = pane_status(w["pane"], deadline)
+        stopped = not since_start and seen is not None and seen[0] in ("idle", "done")
+        events += entry_events(w, since, latest_only=not since_start, pane_stopped=stopped)
+        panes = w["state"].setdefault("panes", {})
+        if not isinstance(panes, dict):
+            panes = w["state"]["panes"] = {}
+        mem = panes.setdefault(w["pane"], {})
+        if not isinstance(mem, dict):
+            mem = panes[w["pane"]] = {}
+        status = pane_event(mem, seen)
+        if status:
+            events.append(f"{w['name']} pane {status}")
+    return events
+
+
+def status(argv, deadline):
+    """Full current state, one line each. Touches no cursor, never waits."""
+    lines = []
+    for arg in argv:
+        repo, pane = arg.split(":", 1)
+        repo = os.path.abspath(os.path.expanduser(repo))
+        name = os.path.basename(repo)
+        entries, answered = parse(os.path.join(repo, ".legwork", "switchboard.md"))
+        for i in reportable(entries, answered, -1, latest_only=True):
+            eid, kind, _, first = entries[i]
+            lines.append(f"{name} {eid} {kind} {first}".rstrip())
+        if pane == NO_PANE:
+            continue
+        seen = pane_status(pane, deadline)
+        lines.append(f"{name} pane {seen[0] if seen else UNREACHABLE}")
+    print("\n".join(lines), flush=True)
+    return 0
+
+
+def main(argv):
+    timeout, show = 1800, False
+    while argv and argv[0] in ("--timeout", "--status"):
+        if argv[0] == "--status":
+            show, argv = True, argv[1:]
+            continue
+        try:
+            timeout, argv = int(argv[1]), argv[2:]
+        except (ValueError, IndexError):
+            argv = []
+    if not argv or any(":" not in a for a in argv):
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    deadline = time.time() + timeout
+    if show:
+        return status(argv, deadline)
+
+    watched, states = [], {}
+    for arg in argv:
+        repo, pane = arg.split(":", 1)
+        repo = os.path.abspath(os.path.expanduser(repo))
+        path = os.path.join(repo, ".legwork", "switchboard.md")
+        cursor = os.path.join(repo, ".legwork", CURSOR_NAME)
+        if cursor not in states:
+            states[cursor] = load_state(cursor)
+        watched.append({"name": os.path.basename(repo), "path": path, "pane": pane,
+                        "seen": len(parse(path)[0]), "state": states[cursor]})
+    loaded = json.loads(json.dumps(states))
+
+    def finish(events, code):
+        print("\n".join(events), flush=True)
+        save_states(states, loaded)
+        return code
+
+    usage_seen = {k for k, v in weekly_usage().items() if v >= USAGE_FLOOR}
+    events = poll(watched, False, deadline)
+    if events:
+        return finish(events, 0)
+    while True:
+        left = deadline - time.time()
+        if left <= 0:
+            break
+        time.sleep(min(POLL, left))
+        events = []
+        for k, v in weekly_usage().items():
+            if v >= USAGE_FLOOR and k not in usage_seen:
+                usage_seen.add(k)
+                events.append(f"usage weekly {k} at {v:g}%")
+        events += poll(watched, True, deadline)
+        if events:
+            return finish(events, 0)
+    return finish(["timeout"], 124)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

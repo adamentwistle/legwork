@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""UserPromptSubmit + PostToolUse hook: tell Claude to pause at a safe point before a usage limit hits.
+
+Reads ccstatusline's usage cache (~/.cache/ccstatusline/usage.json, refreshed every 3 min while
+the status line is alive). Silent unless a window is past its pause line with enough time left
+before its reset that hitting the limit would strand work:
+
+  5-hour window            over 97% used, more than 15 minutes to reset
+  weekly all-models limit  over 95% used, more than 1 hour to reset
+  weekly Fable limit       over 95% used, more than 1 hour to reset (applies only to Fable sessions)
+
+When one trips, it adds context (hookSpecificOutput.additionalContext) telling Claude to reach a
+safe stopping point, write down where it is, and schedule its own resume after the reset.
+PostToolUse is what reaches long unattended turns, where no prompt is submitted; it repeats at most
+every REPEAT_AFTER seconds per session so a turn that is already wrapping up is not flooded.
+
+  usage-guard            hook mode (stdin = hook JSON, stdout = hook JSON or nothing)
+  usage-guard --check    show every window's numbers and the verdict
+LEGWORK_USAGE_CACHE (environment or legwork config) points at a cache somewhere else. With no cache it stays silent.
+Env for testing: USAGE_GUARD_CACHE (path), USAGE_GUARD_NOW (epoch seconds),
+USAGE_GUARD_STAMPS (throttle dir).
+"""
+import json
+import os
+import sys
+import time
+from datetime import datetime
+
+sys.path.insert(1, os.path.join(os.path.dirname(os.path.realpath(__file__)), ".."))
+try:
+    from settings import setting  # orchestration/settings.py, same checkout
+except ImportError:  # copied out of the checkout: environment only
+    def setting(key, default=None):
+        return os.environ.get(key) or default
+
+CACHE = (os.environ.get("USAGE_GUARD_CACHE") or setting("LEGWORK_USAGE_CACHE")
+         or os.path.expanduser("~/.cache/ccstatusline/usage.json"))
+STAMPS = os.environ.get("USAGE_GUARD_STAMPS") or os.path.expanduser("~/.cache/usage-guard")
+CACHE_STALE_AFTER = 3600
+REPEAT_AFTER = 600
+
+# (name, usage key, reset key, pause above %, only when reset is more than this many seconds away)
+WINDOWS = [
+    ("5-hour window", "sessionUsage", "sessionResetAt", 97.0, 15 * 60),
+    ("weekly all-models limit", "weeklyUsage", "weeklyResetAt", 95.0, 3600),
+    ("weekly Fable limit", "fableUsage", "fableResetAt", 95.0, 3600),
+]
+
+PAUSE = ("Pause at the next safe point so no work is lost when the limit hits: finish or back out the "
+         "edit in progress, commit or write down what is done and what comes next (the workflow's "
+         "state file if it has one), and start nothing new. If you are a subagent, stop there and "
+         "return 'PAUSED: usage limit' with that note. Otherwise schedule your resume with CronCreate "
+         "as a one-shot about 5 minutes after the reset, with a prompt that says exactly where to pick "
+         "up, then end your turn.")
+FABLE_ONLY = ("The Fable limit applies only if this session runs on Fable; if it does not, carry on "
+              "and do not start Fable workers.")
+
+
+def fmt_duration(secs):
+    secs = int(secs)
+    d, rem = divmod(secs, 86400)
+    h, rem = divmod(rem, 3600)
+    m = rem // 60
+    if d:
+        return f"{d}d {h}h"
+    if h:
+        return f"{h}h {m:02d}m"
+    return f"{m}m"
+
+
+def load(now):
+    try:
+        if now - os.path.getmtime(CACHE) > CACHE_STALE_AFTER:
+            return None
+        data = json.load(open(CACHE))
+        return None if data.get("error") else data
+    except Exception:
+        return None
+
+
+def assess(data, now):
+    """Yield (name, used, reset_ts, to_reset, pause) per window."""
+    for name, ukey, rkey, limit, min_away in WINDOWS:
+        used = data.get(ukey)
+        reset = data.get(rkey)
+        if used is None or not reset:
+            continue
+        try:
+            reset_ts = datetime.fromisoformat(str(reset).replace("Z", "+00:00")).timestamp()
+        except Exception:
+            continue
+        used = float(used)
+        to_reset = reset_ts - now
+        yield name, used, reset_ts, to_reset, used > limit and to_reset > min_away
+
+
+def read_hook_input():
+    if sys.stdin.isatty():
+        return {}
+    try:
+        return json.load(sys.stdin)
+    except Exception:
+        return {}
+
+
+def throttled(session, now, check_recent):
+    """Record that this session is being told now. With check_recent, return True instead (and record
+    nothing) when it was already told within REPEAT_AFTER seconds."""
+    if not session:
+        return False
+    path = os.path.join(STAMPS, "".join(c for c in session if c.isalnum() or c in "-_"))
+    try:
+        if check_recent and now - os.path.getmtime(path) < REPEAT_AFTER:
+            return True
+    except OSError:
+        pass
+    try:
+        os.makedirs(STAMPS, exist_ok=True)
+        with open(path, "w"):
+            pass
+        os.utime(path, (now, now))
+    except OSError:
+        pass
+    return False
+
+
+def main(argv):
+    now = float(os.environ.get("USAGE_GUARD_NOW") or time.time())
+    check = "--check" in argv
+    data = load(now)
+    if data is None:
+        if check:
+            print("no usable usage cache (missing, stale, or error)")
+        return 0
+    hits = []
+    for name, used, reset_ts, to_reset, pause in assess(data, now):
+        if check:
+            print(f"{name:<24} used {used:5.1f}%  reset in {fmt_duration(to_reset):>8}  -> {'PAUSE' if pause else 'ok'}")
+        if pause:
+            when = datetime.fromtimestamp(reset_ts).strftime("%a %d %b %H:%M")
+            hits.append((name, f"{name} is {used:.0f}% used and resets {when} local (in {fmt_duration(to_reset)})"))
+    if not hits:
+        return 0
+    msg = "[usage guard] " + "; ".join(h[1] for h in hits) + ". " + PAUSE
+    if any(h[0] == "weekly Fable limit" for h in hits):
+        msg += " " + FABLE_ONLY
+        if len(hits) > 1:
+            msg += " Resume after the latest reset that applies to you."
+    if check:
+        print("would inject:", msg)
+        return 0
+    hook = read_hook_input()
+    event = hook.get("hook_event_name") or "UserPromptSubmit"
+    if throttled(hook.get("session_id"), now, check_recent=(event == "PostToolUse")):
+        return 0
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": msg}}))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

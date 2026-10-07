@@ -2557,9 +2557,18 @@ class TestInstaller(unittest.TestCase):
         self.assertIn(dest / "commands" / "wrap.md", by_dest)
         self.assertIn(dest / "skills" / "legwork-tracker" / "SKILL.md",
                       by_dest)
+        self.assertIn(dest / "skills" / "legwork-onboard" / "SKILL.md",
+                      by_dest)
         for src, d in pairs:
             self.assertTrue(src.is_file(), src)
             self.assertTrue(str(d).startswith(str(dest)), d)
+
+    def test_default_claude_home_follows_claude_config_dir(self):
+        self.assertEqual(
+            legwork_install.default_claude_home({"CLAUDE_CONFIG_DIR": "/c/x"}),
+            Path("/c/x"))
+        self.assertEqual(legwork_install.default_claude_home({}),
+                         Path.home() / ".claude")
 
     def test_validators(self):
         self.assertEqual(legwork_install.validate_int("8")[1], 8)

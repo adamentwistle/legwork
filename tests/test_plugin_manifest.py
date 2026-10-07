@@ -28,8 +28,9 @@ PLUGIN = REPO / "core" / ".claude-plugin" / "plugin.json"
 # The complete level-1 command surface. Adding a command to core/ is a
 # deliberate act; this list makes it show up here too, so the plugin surface
 # can never silently drift from what the repo and installer expose.
-EXPECTED_COMMANDS = {"add", "wrap", "pickup", "go", "log", "shelve", "vision"}
-EXPECTED_SKILLS = {"legwork-tracker"}
+EXPECTED_COMMANDS = {"add", "wrap", "pickup", "go", "log", "shelve", "vision",
+                     "onboard"}
+EXPECTED_SKILLS = {"legwork-tracker", "legwork-onboard"}
 
 # core/ is the whole plugin, so nothing from these worlds may live inside it,
 # and no manifest string may point at one.
@@ -129,7 +130,7 @@ class ArtifactIsCoreOnly(unittest.TestCase):
         found = {p.stem for p in cmd_dir.glob("*.md")}
         self.assertEqual(found, EXPECTED_COMMANDS)
 
-    def test_skill_surface_is_the_tracker(self):
+    def test_skill_surface_is_the_tracker_and_onboarding(self):
         skills_dir = REPO / "core" / "skills"
         found = {p.name for p in skills_dir.iterdir() if p.is_dir()}
         self.assertEqual(found, EXPECTED_SKILLS)

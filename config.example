@@ -58,3 +58,50 @@ LEGWORK_DAILY_CAP=8
 # --- Applied outside the runner (documented here so config lives in one place)
 # The launchd tick interval lives in suite/com.legwork.runner.plist
 # (StartInterval, seconds). Default: 300 (every 5 minutes).
+
+# --- Orchestration (OPTIONAL) ------------------------------------------------
+# Read by the orchestration layer (orchestration/): /fanout, /ship, /bugbot,
+# the switchboard-protocol skill and the Hermes switchboard skill. /onboard
+# writes them through orchestration/install.py; nothing else needs them.
+# See orchestration/README.md.
+#
+# Set by the installer when fanout or the switchboard is installed.
+# LEGWORK_ORCHESTRATION=1
+#
+# Who relays an orchestrator's DECISIONs: hermes (a Hermes thread, with the
+# switchboard skill) or manual (you read .legwork/switchboard.md and type
+# answers into the pane yourself). Default: hermes.
+# LEGWORK_SWITCHBOARD=hermes
+#
+# The Hermes profile the switchboard skill was installed into. `default` is
+# ~/.hermes itself.
+# LEGWORK_HERMES_PROFILE=default
+#
+# GitHub users or orgs whose repos are yours, comma-separated. On these,
+# issue ids may appear in PRs, planning docs go up as PRs and merges may be
+# allowed. Every other owner is treated as a shared repo.
+# LEGWORK_OWN_OWNERS=your-user,your-org
+#
+# GitHub owners with Cursor Bugbot installed. /bugbot and /fanout skip the
+# Bugbot loop everywhere else, rather than waiting 20 minutes for nothing.
+# Unset means no owner has Bugbot.
+# LEGWORK_BUGBOT_OWNERS=your-org
+#
+# Linear: the team every issue lives in, and its key (the PLT in PLT-12).
+# Leave unset to skip the Linear rules entirely. Optional sweep labels are
+# checked at planning time, e.g. labels another tool files commitments under.
+# LEGWORK_LINEAR_TEAM=Platform
+# LEGWORK_LINEAR_TEAM_KEY=PLT
+# LEGWORK_LINEAR_SWEEP_LABELS=src:slack,src:notion
+#
+# Your own skills for two jobs, by name, if you have them: writing PR bodies
+# (/ship and /fanout's workers use it instead of the built-in shape) and
+# verifying a UI journey in a browser (the quality gate uses it instead of
+# plain Playwright).
+# LEGWORK_PR_SKILL=pr-writer
+# LEGWORK_UI_SKILL=ui-check
+#
+# The usage cache the usage guard and switchboard-wait read. Default: the
+# ccstatusline cache at ~/.cache/ccstatusline/usage.json. With no cache the
+# usage checks are skipped.
+# LEGWORK_USAGE_CACHE=$HOME/.cache/ccstatusline/usage.json

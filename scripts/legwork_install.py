@@ -35,8 +35,8 @@ pieces that live OUTSIDE the repo, asking before each one:
 
   - write `config` and create `projects/` and `.runner-logs/` in the repo
   - copy the slash commands (/add, /wrap, /pickup, /go, /vision, /log,
-    /shelve)
-    and the legwork-tracker skill into user-level `~/.claude`, so the manual
+    /shelve, /onboard) and the legwork skills into user-level `~/.claude`
+    (or $CLAUDE_CONFIG_DIR), so the manual
     loop works from any repo, not just this checkout
   - install and load the launchd agent (macOS) or a crontab line (Linux)
   - register the SessionStart/SessionEnd hooks in your Claude `settings.json`
@@ -75,7 +75,21 @@ PLIST_TEMPLATE = REPO / "suite" / "com.legwork.runner.plist"
 START_HOOK = "session_start_hook.py"
 END_HOOK = "session_end_hook.py"
 PLIST_NAME = "com.legwork.runner.plist"
+VERB_SKILLS = ("legwork-tracker", "legwork-onboard")
 DEFAULT_REVIEWER_MODEL = "claude-sonnet-4-6"
+
+# Settings owned by the optional orchestration layer (orchestration/install.py
+# writes them). This wizard never asks for them, but rewrites `config`
+# wholesale, so it carries them over under the same section header that
+# installer uses. Keep both lists and headers in step.
+ORCHESTRATION_KEYS = (
+    "LEGWORK_ORCHESTRATION", "LEGWORK_SWITCHBOARD", "LEGWORK_HERMES_PROFILE",
+    "LEGWORK_OWN_OWNERS", "LEGWORK_BUGBOT_OWNERS", "LEGWORK_LINEAR_TEAM",
+    "LEGWORK_LINEAR_TEAM_KEY", "LEGWORK_LINEAR_SWEEP_LABELS",
+    "LEGWORK_PR_SKILL", "LEGWORK_UI_SKILL", "LEGWORK_USAGE_CACHE",
+)
+ORCHESTRATION_SECTION = ("# --- Orchestration (OPTIONAL) -------------------"
+                         "-------------------------")
 
 
 # ---------------------------------------------------------------------------
@@ -183,12 +197,30 @@ def render_schtasks_argv(legwork_dir, python_bin, minutes, task_name=TASK_NAME):
             *schedule, "/f"]
 
 
+def carried_settings(existing):
+    """(key, value) pairs from an existing config that render_config must
+    keep although the wizard does not ask for them: the orchestration
+    layer's settings, in ORCHESTRATION_KEYS order."""
+    return [(k, existing[k]) for k in ORCHESTRATION_KEYS if k in existing]
+
+
+def _render_carried(w, carried):
+    if not carried:
+        return
+    w(ORCHESTRATION_SECTION)
+    w("# Written by orchestration/install.py. See config.example.")
+    for key, value in carried:
+        w(f"{key}={value}")
+    w("")
+
+
 def render_config(v):
     """Render a `config` file from a values dict. Only the lines that matter
     for the chosen review mode are left active; the rest stay as commented
     guidance, so the file documents itself and mirrors config.example. A
     level-1 install (`v['level'] == 1`, the manual loop) stops after
-    LEGWORK_DIR: none of the runner values were asked, so none are written."""
+    LEGWORK_DIR: none of the runner values were asked, so none are written.
+    Orchestration settings in `v['carried']` are written at either level."""
     level = int(v.get("level", 2))
     out = []
     w = out.append
@@ -214,6 +246,7 @@ def render_config(v):
         w("# level 2 to configure the runner, the review pipeline and the")
         w("# timer. See SETUP.md.")
         w("")
+        _render_carried(w, v.get("carried"))
         return "\n".join(out) + "\n"
     w("# Autonomous fires per project per calendar day.")
     w(f"LEGWORK_DAILY_CAP={v['daily_cap']}")
@@ -271,6 +304,7 @@ def render_config(v):
         w("# CLAUDE_CONFIG_DIR=$HOME/.claude-legwork")
     w("# CLAUDE_CONFIG_DIR_WORK=$HOME/.claude-legwork-work")
     w("")
+    _render_carried(w, v.get("carried"))
     return "\n".join(out) + "\n"
 
 
@@ -303,10 +337,21 @@ def review_mode_default(existing):
     return 0
 
 
+def default_claude_home(env=None):
+    """The Claude config dir user-level installs go to: $CLAUDE_CONFIG_DIR
+    when the shell sets one (Claude Code reads its settings, commands and
+    skills from there instead), else ~/.claude."""
+    env = os.environ if env is None else env
+    raw = env.get("CLAUDE_CONFIG_DIR")
+    if raw:
+        return Path(os.path.expanduser(os.path.expandvars(raw)))
+    return Path.home() / ".claude"
+
+
 def plan_verb_installs(verbs_root, dest_base):
     """(source, destination) pairs that install the interactive verbs
     user-level: every `core/commands/*.md` plus the whole legwork-tracker
-    skill, mirrored under `<dest_base>/commands` and `<dest_base>/skills`.
+    and legwork-onboard skills, mirrored under `<dest_base>/commands` and `<dest_base>/skills`.
     `verbs_root` is the directory holding commands/ and skills/, core/ in
     this repo (the in-checkout .claude entries symlink to it). Read-only:
     computes the copy plan, copies nothing."""
@@ -316,9 +361,10 @@ def plan_verb_installs(verbs_root, dest_base):
     for src in sorted((verbs_root / "commands").glob("*.md")):
         pairs.append((src, dest_base / "commands" / src.name))
     skills = verbs_root / "skills"
-    skill = skills / "legwork-tracker"
-    for src in sorted(p for p in skill.rglob("*") if p.is_file()):
-        pairs.append((src, dest_base / "skills" / src.relative_to(skills)))
+    for name in VERB_SKILLS:
+        skill = skills / name
+        for src in sorted(p for p in skill.rglob("*") if p.is_file()):
+            pairs.append((src, dest_base / "skills" / src.relative_to(skills)))
     return pairs
 
 
@@ -888,7 +934,7 @@ def install_verbs(wiz, values, force=None):
     (e.g. after a git pull), overwriting earlier ones."""
     ui = wiz.ui
     actions = []
-    dest_base = Path.home() / ".claude"
+    dest_base = default_claude_home()
     if not _confirm(wiz, force,
             "Install the slash commands (/add, /wrap, /pickup, ...) and the "
             f"legwork-tracker skill into {dest_base}, so they work from any "
@@ -1027,7 +1073,7 @@ def install_hooks(wiz, values, force=None):
     if config_dir:
         base = Path(os.path.expanduser(os.path.expandvars(config_dir)))
     else:
-        base = Path.home() / ".claude"
+        base = default_claude_home()
     settings_path = base / "settings.json"
 
     if int(values.get("level", 2)) == 1:
@@ -1206,6 +1252,7 @@ def main(argv=None):
             default_index=default_level - 1)
 
     values = collect_values(wiz, existing, level=level)
+    values["carried"] = carried_settings(existing)
     values["python_bin"] = detect_python()
 
     config_text = render_config(values)
