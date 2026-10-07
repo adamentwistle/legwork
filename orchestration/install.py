@@ -102,7 +102,14 @@ def plan_copies(pieces, claude_dir):
     return pairs
 
 
-def render(text, legwork_dir, bin_dir=None, pane_config_dir=None):
+def script_python():
+    """The interpreter installed lines name before a bin/ script, or None to
+    let the script's shebang choose. Windows only: the shebangs say
+    `python3`, which there is usually the Microsoft Store stub."""
+    return hook_python() if os.name == "nt" else None
+
+
+def render(text, legwork_dir, bin_dir=None, pane_config_dir=None, python=None):
     """Fill an installed file's placeholders. {{LEGWORK_DIR}} becomes the
     absolute legwork repo path; {{LEGWORK_BIN}} the absolute path of the
     scripts in this checkout (they need not live in the queue repo);
@@ -113,10 +120,22 @@ def render(text, legwork_dir, bin_dir=None, pane_config_dir=None):
     Paths go in with forward slashes: Claude runs these lines through bash,
     which is Git Bash on Windows, and an unquoted E:\\dev\\... reaches it with
     every backslash eaten. Forward slashes work in Git Bash and in Windows
-    file APIs alike, and change nothing on POSIX."""
+    file APIs alike, and change nothing on POSIX.
+
+    A {{LEGWORK_BIN}}/<script> call also gets the interpreter in front when
+    there is one (`python`, else script_python()), POSIX-quoted, so it runs
+    without the shebang. On POSIX there is none and the line is unchanged."""
     env = f" --env\n   CLAUDE_CONFIG_DIR={pane_config_dir}" if pane_config_dir else ""
-    out = (text.replace("{{LEGWORK_DIR}}", Path(legwork_dir).as_posix())
-           .replace("{{LEGWORK_BIN}}", Path(bin_dir or HERE / "bin").as_posix())
+    bin_path = Path(bin_dir or HERE / "bin").as_posix()
+    python = python or script_python()
+
+    def script(match):
+        path = f"{bin_path}/{match.group(1)}"
+        return shlex.join([Path(python).as_posix(), path]) if python else path
+
+    out = re.sub(r"\{\{LEGWORK_BIN\}\}/([\w.-]+)", script, text)
+    out = (out.replace("{{LEGWORK_DIR}}", Path(legwork_dir).as_posix())
+           .replace("{{LEGWORK_BIN}}", bin_path)
            .replace("{{PANE_ENV}}", env))
     left = re.findall(r"\{\{[A-Z_]+\}\}", out)
     if left:

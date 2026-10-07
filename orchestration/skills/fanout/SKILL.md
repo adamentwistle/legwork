@@ -23,7 +23,7 @@ Building blocks you already have: `/bugbot` (review loop), `/wrap`
 `herdr` skill (pane control and the
 pane-or-subagent table; `herdr --skill` prints it if it is not installed),
 and `{{LEGWORK_BIN}}/bugbot-wait` (not on PATH; the installer wrote the
-full path here, use it as written). Do not re-derive any of them.
+full command here, use it as written). Do not re-derive any of them.
 
 ## 0. Arguments and flags
 

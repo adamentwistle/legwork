@@ -12,12 +12,14 @@ import io
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path, PureWindowsPath
+from types import SimpleNamespace
 from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
@@ -96,16 +98,68 @@ class HermesSkillTests(unittest.TestCase):
             self.assertNotIn("<legwork>/orchestration", out, src)
 
     def test_scripts_path_defaults_to_this_checkout(self):
-        out = install.render("{{LEGWORK_BIN}}/x", "/q")
+        with mock.patch.object(install, "script_python", return_value=None):
+            out = install.render("{{LEGWORK_BIN}}/x", "/q")
         self.assertEqual(out, f"{(ORCH / 'bin').as_posix()}/x")
 
     def test_windows_paths_render_with_forward_slashes(self):
         # Claude runs these lines through Git Bash, which eats unquoted
         # backslashes: E:\dev\x/bugbot-wait became E:devx/bugbot-wait.
-        with mock.patch.object(install, "Path", PureWindowsPath):
+        with mock.patch.object(install, "Path", PureWindowsPath), \
+                mock.patch.object(install, "script_python", return_value=None):
             out = install.render("{{LEGWORK_BIN}}/x {{LEGWORK_DIR}}",
                                  r"E:\dev\queue", r"E:\dev\engine\bin")
         self.assertEqual(out, "E:/dev/engine/bin/x E:/dev/queue")
+
+    def test_posix_script_lines_run_by_shebang(self):
+        with mock.patch.object(install, "script_python", return_value=None):
+            out = install.render("`{{LEGWORK_BIN}}/bugbot-wait <pr> --trigger`",
+                                 "/q", "/engine/bin")
+        self.assertEqual(out, "`/engine/bin/bugbot-wait <pr> --trigger`")
+
+    def test_windows_script_lines_name_the_interpreter(self):
+        # The shebangs say python3, which on stock Windows is the Store stub,
+        # so a bare script path fails there. The line spells out the
+        # interpreter, slashed and quoted for the Git Bash that runs it.
+        with mock.patch.object(install, "Path", PureWindowsPath):
+            out = install.render(
+                "`{{LEGWORK_BIN}}/bugbot-wait <pr> --trigger` and "
+                "`{{LEGWORK_BIN}}/switchboard-wait --status r:none`",
+                r"E:\q", r"E:\dev\engine\bin",
+                python=r"C:\Program Files\Python312\python.exe")
+        self.assertEqual(out, (
+            "`'C:/Program Files/Python312/python.exe' "
+            "E:/dev/engine/bin/bugbot-wait <pr> --trigger` and "
+            "`'C:/Program Files/Python312/python.exe' "
+            "E:/dev/engine/bin/switchboard-wait --status r:none`"))
+        argv = shlex.split(out.split("`")[1])
+        self.assertEqual(argv[:2], ["C:/Program Files/Python312/python.exe",
+                                    "E:/dev/engine/bin/bugbot-wait"])
+
+    def test_script_python_only_on_windows(self):
+        with mock.patch.object(install, "os", SimpleNamespace(name="posix")):
+            self.assertIsNone(install.script_python())
+        with mock.patch.object(install, "os", SimpleNamespace(name="nt")), \
+                mock.patch.object(install.sys, "executable", r"C:\Py\python.exe"):
+            self.assertEqual(install.script_python(), r"C:\Py\python.exe")
+
+    def test_every_script_line_gets_the_interpreter(self):
+        sources = [s for s, _ in install.plan_copies(list(install.PIECES), Path("/c"))]
+        for src in sources + [ORCH / "hermes" / "switchboard" / "SKILL.md"]:
+            text = src.read_text()
+            calls = len(re.findall(r"\{\{LEGWORK_BIN\}\}/", text))
+            out = install.render(text, "/q", "/engine/bin", python="/py/python")
+            self.assertEqual(out.count("/py/python /engine/bin/"), calls, src)
+
+    def test_rendered_line_runs_without_the_shebang(self):
+        # The line, split the way bash splits it, starts the script under the
+        # named interpreter: no python3 on PATH needed.
+        out = install.render("{{LEGWORK_BIN}}/bugbot-wait --help", "/q",
+                             python=sys.executable)
+        run = subprocess.run(shlex.split(out), capture_output=True, text=True,
+                             timeout=60)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("--trigger", run.stdout)
 
     def test_unknown_placeholder_fails(self):
         with self.assertRaises(ValueError):
@@ -250,11 +304,14 @@ class InstallRunTests(unittest.TestCase):
             self.assertTrue((claude / "skills" / "fanout" / "SKILL.md").is_file())
             settings = json.loads((claude / "settings.json").read_text())
             self.assertIn("PostToolUse", settings["hooks"])
+            # On Windows each script line starts with the interpreter.
+            python = install.script_python()
+            run = f"{shlex.quote(Path(python).as_posix())} " if python else ""
             fanout = (claude / "skills" / "fanout" / "SKILL.md").read_text()
-            self.assertIn(f"`{(ORCH / 'bin').as_posix()}/bugbot-wait", fanout)
+            self.assertIn(f"`{run}{(ORCH / 'bin').as_posix()}/bugbot-wait", fanout)
             self.assertNotIn("{{", fanout)
             skill = (hermes / "profiles" / "work" / install.HERMES_SKILL).read_text()
-            self.assertIn(f"`{(ORCH / 'bin').as_posix()}/switchboard-wait", skill)
+            self.assertIn(f"`{run}{(ORCH / 'bin').as_posix()}/switchboard-wait", skill)
             self.assertIn(f"`{legwork.resolve().as_posix()}/config`", skill)
             self.assertIn(f"CLAUDE_CONFIG_DIR={claude}", skill)
             soul = (hermes / "profiles" / "work" / "SOUL.md").read_text()
