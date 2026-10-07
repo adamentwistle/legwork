@@ -28,7 +28,7 @@ PLUGIN = REPO / "core" / ".claude-plugin" / "plugin.json"
 # The complete level-1 command surface. Adding a command to core/ is a
 # deliberate act; this list makes it show up here too, so the plugin surface
 # can never silently drift from what the repo and installer expose.
-EXPECTED_COMMANDS = {"add", "wrap", "pickup", "log", "shelve", "vision"}
+EXPECTED_COMMANDS = {"add", "wrap", "pickup", "go", "log", "shelve", "vision"}
 EXPECTED_SKILLS = {"legwork-tracker"}
 
 # core/ is the whole plugin, so nothing from these worlds may live inside it,

@@ -288,9 +288,9 @@ the end of every session. The repo's `.claude/commands` and `.claude/skills`
 are symlinks to these directories, so the verbs work inside the checkout
 from the same single source. The commands under `core/commands/` are the
 verbs: `/add` (start a project), `/log` (update without a work session),
-`/pickup` (reload context), `/shelve` (icebox), `/vision` (capture the standing
-brief and optionally grant autonomy), and `/wrap` (close out a session and mint
-the next prompt). `/vision` is the single gate into autonomy: it captures the
+`/pickup` (reload context), `/go` (run the next prompt verbatim, no re-brief),
+`/shelve` (icebox), `/vision` (capture the standing brief and optionally
+grant autonomy), and `/wrap` (close out a session and mint the next prompt). `/vision` is the single gate into autonomy: it captures the
 Vision and is the only place `autonomy: loop` is set.
 
 ### Tests (`tests/test_legwork.py`)

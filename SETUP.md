@@ -18,8 +18,8 @@ the shortest path is the Claude Code plugin. From inside Claude Code:
 /plugin install legwork@legwork
 ```
 
-This installs `core/` (the complete level-1 product) as a plugin: the six
-commands (`/add`, `/wrap`, `/pickup`, `/log`, `/shelve`, `/vision`) and the
+This installs `core/` (the complete level-1 product) as a plugin: the seven
+commands (`/add`, `/wrap`, `/pickup`, `/go`, `/log`, `/shelve`, `/vision`) and the
 legwork-tracker skill, available in every repo. The plugin *is* this repo's
 `core/` directory — sourced as `./core` by the marketplace manifest at the
 repo root, so there is one editable source and nothing copied. Your queue
@@ -140,8 +140,8 @@ through the environment variable.
 
 ## 2. The commands and the skill
 
-The manual loop is six slash commands (`/add`, `/wrap`, `/pickup`, `/vision`,
-`/log`, `/shelve`) plus the legwork-tracker skill they share. Their source
+The manual loop is seven slash commands (`/add`, `/wrap`, `/pickup`, `/go`,
+`/vision`, `/log`, `/shelve`) plus the legwork-tracker skill they share. Their source
 lives in `core/commands/` and `core/skills/` (the repo's `.claude/` entries
 are symlinks to them), which means a fresh clone only has them inside the
 checkout itself; a `/wrap` at the end of a session in one of your own repos
