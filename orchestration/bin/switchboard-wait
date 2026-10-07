@@ -47,13 +47,19 @@ Prints one line per event: "<repo-name> <what>". Exit 0 on an event,
 124 on timeout, 2 on bad arguments. Foreground only, hard timeout: every
 herdr call has its own 30 s timeout and the overall deadline always holds.
 """
-import fcntl
+import contextlib
 import json
 import os
 import re
 import subprocess
 import sys
 import time
+
+try:
+    import fcntl
+except ImportError:  # Windows: lock with msvcrt instead
+    fcntl = None
+    import msvcrt
 
 WAKE = ("DECISION", "CYCLE", "DONE")
 STOPPED = ("idle", "done", "blocked", "gone")
@@ -72,6 +78,7 @@ CURSOR_NAME = "switchboard-wait.cursor"
 HERDR_TIMEOUT = 30
 POLL = 10
 UNREACHABLE = "unreachable"  # a herdr call that failed; herdr's own states pass through
+DRIVE = re.compile(r"^[A-Za-z]:[\\/]")  # a Windows repo path's C:/ or C:\
 NO_PANE = "none"  # REPO:none, no Herdr: watch the file only
 
 
@@ -238,6 +245,34 @@ def merge(disk, ours, base):
     return disk
 
 
+@contextlib.contextmanager
+def exclusive(lock_path):
+    """Hold an exclusive lock on lock_path for the with-block. flock on
+    POSIX; on Windows msvcrt.locking on the first byte, which retries for
+    about ten seconds and then raises OSError."""
+    with open(lock_path, "a") as lock:
+        if fcntl:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            yield
+            return
+        lock.seek(0)
+        msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            yield
+        finally:
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+def split_target(arg):
+    """REPO:PANE -> (repo, pane). The pane id holds a colon of its own
+    (w1X:p2), so the split is at the first colon -- after a Windows drive
+    letter (C:/..., C:\\...) when the repo starts with one."""
+    drive = arg[:2] if DRIVE.match(arg) else ""
+    repo, pane = arg[len(drive):].split(":", 1)
+    return drive + repo, pane
+
+
 def save_states(states, loaded):
     """Merge each changed cursor into the file on disk, under a lock.
 
@@ -252,8 +287,7 @@ def save_states(states, loaded):
         tmp = f"{path}.{os.getpid()}.tmp"
         try:
             os.makedirs(folder, exist_ok=True)
-            with open(f"{path}.lock", "a") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
+            with exclusive(f"{path}.lock"):
                 merged = merge(load_state(path), d, loaded[path])
                 with open(tmp, "w") as f:
                     json.dump(merged, f, indent=1, sort_keys=True)
@@ -287,7 +321,7 @@ def status(argv, deadline):
     """Full current state, one line each. Touches no cursor, never waits."""
     lines = []
     for arg in argv:
-        repo, pane = arg.split(":", 1)
+        repo, pane = split_target(arg)
         repo = os.path.abspath(os.path.expanduser(repo))
         name = os.path.basename(repo)
         entries, answered = parse(os.path.join(repo, ".legwork", "switchboard.md"))
@@ -312,7 +346,7 @@ def main(argv):
             timeout, argv = int(argv[1]), argv[2:]
         except (ValueError, IndexError):
             argv = []
-    if not argv or any(":" not in a for a in argv):
+    if not argv or any(":" not in DRIVE.sub("", a, count=1) for a in argv):
         print(__doc__.strip(), file=sys.stderr)
         return 2
     deadline = time.time() + timeout
@@ -321,7 +355,7 @@ def main(argv):
 
     watched, states = [], {}
     for arg in argv:
-        repo, pane = arg.split(":", 1)
+        repo, pane = split_target(arg)
         repo = os.path.abspath(os.path.expanduser(repo))
         path = os.path.join(repo, ".legwork", "switchboard.md")
         cursor = os.path.join(repo, ".legwork", CURSOR_NAME)

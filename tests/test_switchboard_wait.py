@@ -71,7 +71,41 @@ else:
 """
 
 
-@unittest.skipIf(os.name == "nt", "switchboard-wait needs fcntl, which Windows lacks")
+class PortableTests(unittest.TestCase):
+    """What runs on Windows too; SwitchboardCase needs a POSIX herdr stub."""
+
+    def setUp(self):
+        self.script = load_script()
+
+    def test_split_target_keeps_the_pane_colon_and_a_drive_letter(self):
+        split = self.script.split_target
+        self.assertEqual(split("/src/legwork:w1X:p2"), ("/src/legwork", "w1X:p2"))
+        self.assertEqual(split("~/q:none"), ("~/q", "none"))
+        self.assertEqual(split("C:/src/legwork:none"), ("C:/src/legwork", "none"))
+        self.assertEqual(split(r"E:\src\q:w1:p2"), (r"E:\src\q", "w1:p2"))
+
+    def test_a_drive_letter_alone_is_not_a_pane(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.script.main(["--status", "C:/src/legwork"]), 2)
+
+    def test_status_and_save_run_without_herdr(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "legwork"
+            (repo / ".legwork").mkdir(parents=True)
+            board = repo / ".legwork" / "switchboard.md"
+            board.write_text(unanswered(BOARD["legwork-145"]))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(self.script.main(["--status", f"{repo}:none"]), 0)
+            self.assertIn("legwork legwork-145 DECISION", out.getvalue())
+            # the cursor save takes the file lock: flock, or msvcrt on Windows
+            cursor = str(repo / ".legwork" / "switchboard-wait.cursor")
+            self.script.save_states({cursor: {str(board): "legwork-145"}}, {cursor: {}})
+            self.assertEqual(json.loads(Path(cursor).read_text()),
+                             {str(board): "legwork-145"})
+
+
+@unittest.skipIf(os.name == "nt", "the herdr stub is a POSIX shebang script on a :-joined PATH")
 class SwitchboardCase(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()

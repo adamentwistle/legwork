@@ -17,7 +17,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
@@ -53,7 +53,7 @@ class PiecesTests(unittest.TestCase):
     def test_plan_copies_mirrors_layout_and_sources_exist(self):
         dest = Path("/tmp/fake-claude")
         pairs = install.plan_copies(["shipping", "fanout", "switchboard"], dest)
-        got = {str(d.relative_to(dest)) for _, d in pairs}
+        got = {d.relative_to(dest).as_posix() for _, d in pairs}
         self.assertEqual(got, {
             "commands/ship.md", "commands/bugbot.md", "commands/fanout.md",
             "skills/fanout/SKILL.md", "skills/switchboard-protocol/SKILL.md"})
@@ -97,7 +97,15 @@ class HermesSkillTests(unittest.TestCase):
 
     def test_scripts_path_defaults_to_this_checkout(self):
         out = install.render("{{LEGWORK_BIN}}/x", "/q")
-        self.assertEqual(out, f"{ORCH / 'bin'}/x")
+        self.assertEqual(out, f"{(ORCH / 'bin').as_posix()}/x")
+
+    def test_windows_paths_render_with_forward_slashes(self):
+        # Claude runs these lines through Git Bash, which eats unquoted
+        # backslashes: E:\dev\x/bugbot-wait became E:devx/bugbot-wait.
+        with mock.patch.object(install, "Path", PureWindowsPath):
+            out = install.render("{{LEGWORK_BIN}}/x {{LEGWORK_DIR}}",
+                                 r"E:\dev\queue", r"E:\dev\engine\bin")
+        self.assertEqual(out, "E:/dev/engine/bin/x E:/dev/queue")
 
     def test_unknown_placeholder_fails(self):
         with self.assertRaises(ValueError):
@@ -169,7 +177,8 @@ class HookAndSoulTests(unittest.TestCase):
         ups = twice["hooks"]["UserPromptSubmit"]
         self.assertEqual(len(ups), 2)
         self.assertEqual(ups[1]["hooks"][0],
-                         {"type": "command", "command": "/new/usage-guard", "timeout": 5})
+                         {"type": "command", "timeout": 5,
+                          "command": install.usage_guard_command("/new/usage-guard")})
         ptu = twice["hooks"]["PostToolUse"]
         self.assertEqual(len(ptu), 1)
         self.assertEqual(ptu[0]["matcher"], "*")
@@ -177,8 +186,16 @@ class HookAndSoulTests(unittest.TestCase):
         self.assertNotIn("usage-guard", json.dumps(settings))
 
     def test_usage_guard_command_quotes_paths_with_spaces(self):
-        self.assertEqual(install.usage_guard_command("/a b/usage-guard"),
-                         '"/a b/usage-guard"')
+        self.assertEqual(install.usage_guard_command("/a b/usage-guard", "/py"),
+                         "/py '/a b/usage-guard'")
+
+    def test_usage_guard_command_survives_bash_on_windows(self):
+        # Claude Code runs hooks through Git Bash on Windows. Bare, the
+        # backslashes were eaten ("E:devx...: command not found"); quoted
+        # they are literal. The interpreter is spelled out because the
+        # script's python3 shebang is the Store stub on stock Windows.
+        cmd = install.usage_guard_command(r"E:\dev\x\usage-guard", r"C:\Py\python.exe")
+        self.assertEqual(cmd, r"'C:\Py\python.exe' 'E:\dev\x\usage-guard'")
 
     def test_soul_block_replaces_rather_than_appends(self):
         once = install.merge_soul("Be kind.\n", "- rule one")
@@ -234,11 +251,11 @@ class InstallRunTests(unittest.TestCase):
             settings = json.loads((claude / "settings.json").read_text())
             self.assertIn("PostToolUse", settings["hooks"])
             fanout = (claude / "skills" / "fanout" / "SKILL.md").read_text()
-            self.assertIn(f"`{ORCH / 'bin'}/bugbot-wait", fanout)
+            self.assertIn(f"`{(ORCH / 'bin').as_posix()}/bugbot-wait", fanout)
             self.assertNotIn("{{", fanout)
             skill = (hermes / "profiles" / "work" / install.HERMES_SKILL).read_text()
-            self.assertIn(f"`{ORCH / 'bin'}/switchboard-wait", skill)
-            self.assertIn(f"`{legwork.resolve()}/config`", skill)
+            self.assertIn(f"`{(ORCH / 'bin').as_posix()}/switchboard-wait", skill)
+            self.assertIn(f"`{legwork.resolve().as_posix()}/config`", skill)
             self.assertIn(f"CLAUDE_CONFIG_DIR={claude}", skill)
             soul = (hermes / "profiles" / "work" / "SOUL.md").read_text()
             self.assertIn("- Rule A.", soul)
@@ -274,8 +291,8 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(s("K", env={"LEGWORK_CONFIG": str(tmp / "explicit"),
                                          "LEGWORK_DIR": str(tmp / "q")}), "from-explicit")
             self.assertEqual(s("K", env={"LEGWORK_DIR": str(tmp / "q")}), "from-queue")
-            self.assertEqual(s("J", env={"LEGWORK_DIR": str(tmp / "q")}),
-                             str(Path.home() / "j"))
+            self.assertEqual(Path(s("J", env={"LEGWORK_DIR": str(tmp / "q")})),
+                             Path.home() / "j")
             self.assertEqual(s("NOPE", "d", env={"LEGWORK_DIR": str(tmp / "q")}), "d")
 
 

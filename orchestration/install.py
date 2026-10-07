@@ -37,6 +37,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -107,10 +108,15 @@ def render(text, legwork_dir, bin_dir=None, pane_config_dir=None):
     scripts in this checkout (they need not live in the queue repo);
     {{PANE_ENV}} an --env flag that starts new orchestrator panes under a
     Claude config dir, or nothing for the default one. Fails if a
-    placeholder is left over."""
+    placeholder is left over.
+
+    Paths go in with forward slashes: Claude runs these lines through bash,
+    which is Git Bash on Windows, and an unquoted E:\\dev\\... reaches it with
+    every backslash eaten. Forward slashes work in Git Bash and in Windows
+    file APIs alike, and change nothing on POSIX."""
     env = f" --env\n   CLAUDE_CONFIG_DIR={pane_config_dir}" if pane_config_dir else ""
-    out = (text.replace("{{LEGWORK_DIR}}", str(legwork_dir))
-           .replace("{{LEGWORK_BIN}}", str(bin_dir or HERE / "bin"))
+    out = (text.replace("{{LEGWORK_DIR}}", Path(legwork_dir).as_posix())
+           .replace("{{LEGWORK_BIN}}", Path(bin_dir or HERE / "bin").as_posix())
            .replace("{{PANE_ENV}}", env))
     left = re.findall(r"\{\{[A-Z_]+\}\}", out)
     if left:
@@ -145,9 +151,24 @@ def set_config_keys(text, pairs):
     return "\n".join(lines) + "\n"
 
 
-def usage_guard_command(script):
-    script = str(script)
-    return f'"{script}"' if any(c.isspace() for c in script) else script
+def hook_python():
+    """The interpreter the usage-guard hook runs under, chosen like the
+    wizard's detect_python: on Windows the interpreter running this
+    installer, since `python3` there is usually the Microsoft Store stub."""
+    if os.name != "nt":
+        if Path("/usr/bin/python3").exists():
+            return "/usr/bin/python3"
+        found = shutil.which("python3")
+        if found:
+            return found
+    return sys.executable or "python"
+
+
+def usage_guard_command(script, python=None):
+    """The hook's shell-form command: interpreter plus script, POSIX-quoted
+    on every platform because Claude Code runs hooks through bash (Git Bash
+    on Windows). Same rule as hook_command in scripts/legwork_install.py."""
+    return shlex.join([python or hook_python(), str(script)])
 
 
 def merge_usage_guard_hook(settings, script):
