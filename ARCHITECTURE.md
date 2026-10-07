@@ -134,7 +134,9 @@ generated README with the canonical-source note, and LICENSE. Because the
 copy is verbatim (the `core/` subdirectory is preserved, not flattened, so
 every `core/...` path inside the loop stays true), the zero-drift check is a
 plain byte comparison: `build_wedge.py --check`, also asserted by
-`tests/test_wedge.py`.
+`tests/test_wedge.py`. The bytes are the committed ones: a Windows checkout
+with `core.autocrlf=true` holds CRLF copies of the LF files, so the build
+turns CRLF back into LF on the way in, and `--check` compares the same way.
 
 ## Components
 
@@ -436,7 +438,7 @@ pieces rely on.
   file is gitignored.
 - The wedge repo (`dist/wedge/`, `scripts/build_wedge.py`) is a build artifact
   of `core/`. Never hand-edit it; change `core/` and rebuild. `--check` (and
-  `tests/test_wedge.py`) hold it byte-identical to `core/`.
+  `tests/test_wedge.py`) hold it byte-identical to `core/` as committed (LF).
 - `build_dashboard.py` stays stdlib-only. No third-party dependencies.
 - Project logs are append-only. Prepend a dated bullet; never rewrite or delete
   old entries.

@@ -136,5 +136,63 @@ class BuildIsSafe(unittest.TestCase):
             self.assertTrue(problems)
 
 
+class LineEndings(unittest.TestCase):
+    """A Windows checkout with core.autocrlf=true holds CRLF copies of files
+    committed with LF. The wedge must still publish the LF bytes, and --check
+    must flag a wedge that kept CRLF. A fake source tree with CRLF files makes
+    this run the same on every platform."""
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        tmp = Path(self._tmp.name)
+        self.src = tmp / "src"
+        self.out = tmp / "wedge"
+        files = {
+            "core/legwork_common.py": b"x = 1\r\ny = 2\r\n",
+            "core/commands/wrap.md": b"# wrap\r\n\r\nbody\r\n",
+            ".claude-plugin/marketplace.json": b'{\r\n  "name": "legwork"\r\n}\r\n',
+            "LICENSE": b"MIT\r\n",
+        }
+        for rel, data in files.items():
+            (self.src / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.src / rel).write_bytes(data)
+        # A binary file with a NUL keeps its bytes, CRLF and all.
+        self.binary = b"\x89PNG\r\n\x00\r\n"
+        (self.src / "core" / "icon.png").write_bytes(self.binary)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_build_writes_lf_from_a_crlf_checkout(self):
+        bw.build_wedge(self.src, self.out, "someone/legwork-loop")
+        self.assertEqual(
+            (self.out / "core" / "legwork_common.py").read_bytes(),
+            b"x = 1\ny = 2\n",
+        )
+        for p in self.out.rglob("*"):
+            if p.is_file() and p.name != "icon.png":
+                self.assertNotIn(b"\r", p.read_bytes(), f"CR left in {p}")
+        self.assertEqual(
+            (self.out / "core" / "icon.png").read_bytes(), self.binary
+        )
+        self.assertEqual(bw.verify_wedge(self.src, self.out), [])
+
+    def test_verify_flags_a_wedge_that_kept_crlf(self):
+        bw.build_wedge(self.src, self.out, "someone/legwork-loop")
+        for rel in ("core/legwork_common.py", "LICENSE"):
+            (self.out / rel).write_bytes((self.src / rel).read_bytes())
+        problems = bw.verify_wedge(self.src, self.out)
+        for rel in ("core/legwork_common.py", "LICENSE"):
+            self.assertTrue(
+                any(rel in p and "CRLF" in p for p in problems), problems
+            )
+
+    def test_real_build_has_no_cr_bytes(self):
+        bw.build_wedge(REPO, self.out, "someone/legwork-loop")
+        with_cr = [str(p) for p in self.out.rglob("*")
+                   if p.is_file() and b"\r" in p.read_bytes()]
+        self.assertEqual(with_cr, [])
+
+
 if __name__ == "__main__":
     unittest.main()
