@@ -64,6 +64,32 @@ Notes:
   variable is unset, the session falls back to `CLAUDE_CONFIG_DIR`, and if that
   is also unset, to the default config.
 
+## Orchestration
+
+Read by the optional orchestration layer (`orchestration/`): the
+switchboard-protocol and fanout skills, `/ship`, `/bugbot`, the Hermes
+switchboard skill and the scripts in `orchestration/bin/`. The runner
+ignores them. `orchestration/install.py --set` writes them, and
+`./install.sh` keeps them when it rewrites `config`.
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `LEGWORK_ORCHESTRATION` | unset | Set to `1` by the installer when fanout or the switchboard is installed. A record, nothing reads it to decide. |
+| `LEGWORK_SWITCHBOARD` | `hermes` | Who relays an orchestrator's `DECISION`s: `hermes` (a Hermes thread with the switchboard skill writes the `ANSWERED` lines) or `manual` (you answer in the pane, and the orchestrator writes the `ANSWERED` line itself). |
+| `LEGWORK_HERMES_PROFILE` | `default` | The Hermes profile the switchboard skill is installed into. `default` is `~/.hermes` itself. |
+| `LEGWORK_OWN_OWNERS` | unset | GitHub users or orgs whose repos are yours, comma-separated. On these, issue ids may appear in PRs, planning docs go up as PRs, and merges may be allowed. Every other owner is a shared repo. |
+| `LEGWORK_BUGBOT_OWNERS` | unset | GitHub owners with Cursor Bugbot installed. `bugbot-wait` returns `NO_BUGBOT` at once for any other owner, without posting. Unset means no owner has Bugbot. |
+| `LEGWORK_LINEAR_TEAM` | unset | The Linear team every issue lives in. Unset skips the Linear rules entirely. |
+| `LEGWORK_LINEAR_TEAM_KEY` | unset | That team's issue key, the `PLT` in `PLT-12`. Ids with it never appear on shared repos. |
+| `LEGWORK_LINEAR_SWEEP_LABELS` | unset | Labels a Hermes planning session also sweeps, comma-separated. |
+| `LEGWORK_PR_SKILL` | unset | A skill of yours that writes PR bodies. `/ship` and `/fanout`'s worker briefs use it, run in full, instead of the built-in TL;DR and Verification shape. |
+| `LEGWORK_UI_SKILL` | unset | A skill of yours that verifies a UI journey in a browser. The quality gate uses it instead of plain Playwright. |
+| `LEGWORK_USAGE_CACHE` | `~/.cache/ccstatusline/usage.json` | The usage cache `usage-guard` and `switchboard-wait` read. No cache means the usage checks are skipped. |
+
+Rules every worker follows (authorship, attribution, spelling, style) are
+not config: they live in `house-rules.md` beside `config`. See
+`house-rules.example.md`.
+
 ## Applied outside the runner
 
 These settings are not read by `suite/legwork_runner.py`. They live next to

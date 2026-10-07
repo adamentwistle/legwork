@@ -21,7 +21,7 @@ The fastest way in — from inside Claude Code, add the marketplace and install 
 /plugin install legwork@legwork
 ```
 
-That gives you the seven slash commands (`/add`, `/wrap`, `/pickup`, `/go`, `/log`, `/shelve`, `/vision`) and the legwork-tracker skill in every repo on your machine, backed by a queue in `~/legwork` (set `LEGWORK_DIR` to move it). The plugin is this repo's [`core/`](core/) directory itself — one editable source, nothing copied. For the self-rebuilding dashboard and the optional level-2 runner, clone the repo and run the wizard instead — see [Quickstart](#quickstart).
+That gives you the eight slash commands (`/add`, `/wrap`, `/pickup`, `/go`, `/log`, `/shelve`, `/vision`, `/onboard`) and the legwork-tracker and legwork-onboard skills in every repo on your machine, backed by a queue in `~/legwork` (set `LEGWORK_DIR` to move it). The plugin is this repo's [`core/`](core/) directory itself: one editable source, nothing copied. For the self-rebuilding dashboard and the optional level-2 runner, clone the repo and run the wizard instead. See [Quickstart](#quickstart).
 
 ## The loop
 
@@ -73,9 +73,11 @@ cd "$HOME/legwork"
 
 You supply the clone: fork this repo or push a copy to a private remote you control. Cloning this repo directly is fine just to try it; nothing in the manual loop needs a remote.
 
+Prefer to be asked in plain words? Run `claude` in the checkout and type `/onboard`. It asks which layers you want (the runner, the shipping commands, the orchestrator, Herdr, a switchboard, Linear, house rules), shows the plan, then drives the same installer for you.
+
 `./install.sh` is an interactive, dependency-free wizard. Its first question is which level you are installing:
 
-- **Level 1, the manual loop** (the default): one question — where the repo lives — then it writes `config`, creates `projects/`, and offers two opt-ins: copying the slash commands (`/add`, `/wrap`, `/pickup`, `/go`, `/vision`, `/log`, `/shelve`) and the legwork-tracker skill into user-level `~/.claude`, so the loop works from any repo on your machine, and registering the session hooks, which with no webhook set simply rebuild the dashboard after every session so the queue page stays fresh on its own. Say yes to both. No timer, nothing running in the background.
+- **Level 1, the manual loop** (the default): one question, where the repo lives, then it writes `config`, creates `projects/`, and offers two opt-ins: copying the slash commands (`/add`, `/wrap`, `/pickup`, `/go`, `/vision`, `/log`, `/shelve`, `/onboard`) and the legwork skills into user-level `~/.claude` (or `$CLAUDE_CONFIG_DIR`), so the loop works from any repo on your machine, and registering the session hooks, which with no webhook set simply rebuild the dashboard after every session so the queue page stays fresh on its own. Say yes to both. No timer, nothing running in the background.
 - **Level 2, autonomy**: everything above, plus the firing and cost caps, the review pipeline, and the launchd agent (macOS) or crontab line (Linux) that ticks the runner; with a webhook configured the same SessionEnd hook posts review evidence instead. It still asks before each piece that lives outside the repo.
 
 Graduating is re-running `./install.sh` in the same checkout and picking level 2: your previous answers, including the level, pre-fill.
@@ -135,6 +137,10 @@ Review is three options deep. Set `LEGWORK_LOCAL_REVIEW=1` and the runner triage
 
 </details>
 
+## Orchestration: one switchboard over many long runs
+
+Optional, and separate from the runner. An orchestrator is one long Claude Code session per project, ideally in a [Herdr](https://herdr.dev) pane: `/fanout <project>` turns the project's roadmap into PR-sized tasks, hands them to worker panes or subagents, and lands each PR through its gate and the Bugbot loop. It follows the switchboard protocol, so instead of stopping on a question it writes a `DECISION` to `.legwork/switchboard.md` in the repo and carries on with whatever does not depend on it. A switchboard puts those decisions in front of you one at a time: a [Hermes](https://github.com/NousResearch/hermes-agent) thread that watches every orchestrator and relays your answers, or you, by hand. `/ship` and `/bugbot` come with it and work on their own too. Every piece is optional, and `/onboard` installs only the ones you pick. See [orchestration/README.md](orchestration/README.md).
+
 ## What this is not
 
 - Not a hosted service, not an agent-ops platform, not a paid tier.
@@ -147,6 +153,7 @@ Review is three options deep. Set `LEGWORK_LOCAL_REVIEW=1` and the runner triage
 - [ARCHITECTURE.md](ARCHITECTURE.md): how the pieces fit together.
 - [SETUP.md](SETUP.md): install the runner and wire the optional pipelines.
 - [CONFIG.md](CONFIG.md): every config variable.
+- [orchestration/README.md](orchestration/README.md): the optional orchestrator and switchboard layer.
 - [SECURITY.md](SECURITY.md): the permission and escalation model.
 - [CONTRIBUTING.md](CONTRIBUTING.md): scope, non-goals, and how to send a PR.
 - [LICENSE](LICENSE): the license.

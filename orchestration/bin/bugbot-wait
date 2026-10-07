@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+"""bugbot-wait: trigger and/or wait for a Cursor Bugbot verdict on a pull request.
+
+usage: bugbot-wait <pr> [--repo owner/name] [--trigger] [--after ISO8601]
+                        [--timeout SECS] [--interval SECS]
+
+  --trigger    post the comment "bugbot run" first, then wait for a verdict
+               submitted after that comment
+  --after      only accept a verdict submitted after this UTC time
+               (default: now, or the trigger time when --trigger is used)
+  --timeout    give up after this many seconds (default 1200)
+  --interval   poll interval in seconds (default 30)
+
+Prints one JSON object and exits:
+  0  {"state":"CLEAR", ...}      Bugbot reviewed and found no new issues
+  1  {"state":"FINDINGS", ...}   Bugbot left findings; "comments" lists them
+  2  {"state":"TIMEOUT", ...}    no fresh verdict before the deadline
+  3  usage or gh error
+  4  {"state":"NO_BUGBOT", ...}  the repo's owner has no Bugbot; nothing posted
+
+Bugbot is a per-owner install, so the owners that have it are a setting:
+LEGWORK_BUGBOT_OWNERS, a comma-separated list of GitHub users or orgs, read
+from the environment or the legwork `config` file ($LEGWORK_CONFIG, else
+$LEGWORK_DIR/config, else the config in this checkout). A trigger on an owner
+without Bugbot used to wait the full 20 minutes for nothing and leave a stray
+"bugbot run" comment, so any owner not on the list stops with NO_BUGBOT
+before posting. Unset means no owner has Bugbot.
+
+Verdict shape (observed 2026-09-12): a PR review
+by login "cursor", body starting "<!-- BUGBOT_REVIEW -->". A clean run says
+"found no new issues". A stale marker "<!-- BUGBOT_REVIEW_STALE -->" means an
+old verdict was superseded and is ignored. Findings are inline review comments.
+
+Second shape (observed 2026-09-19): a FIRST-ROUND clean run posts no
+review at all, only the "Cursor Bugbot" check run on the head commit, concluding
+"success" with "no issues found" in its summary (a run with findings concludes
+"neutral" and does post a review). So a completed success check run on the
+CURRENT head also counts as CLEAR. It is tied to the head SHA rather than to
+--after, because a run that finished before the wait began is still the verdict
+for that commit; with --trigger it must have completed after the trigger.
+"""
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+# Settings are read the way the skills read them (orchestration/settings.py);
+# this script sits in orchestration/bin/ of a legwork checkout.
+sys.path.insert(1, str(Path(__file__).resolve().parents[1]))
+
+try:
+    from settings import setting
+except ImportError:  # copied out of the checkout: environment only
+    def setting(key, default=None):
+        return os.environ.get(key) or default
+
+
+def bugbot_owners():
+    """Lowercased owners from LEGWORK_BUGBOT_OWNERS (env, else config)."""
+    raw = setting("LEGWORK_BUGBOT_OWNERS", "")
+    return {o.strip().lower() for o in raw.split(",") if o.strip()}
+
+
+def gh(*args):
+    r = subprocess.run(["gh", *args], capture_output=True, text=True)
+    if r.returncode != 0:
+        print(json.dumps({"state": "ERROR", "gh": r.stderr.strip()[:500]}))
+        sys.exit(3)
+    return r.stdout
+
+
+def clean(s):
+    """Strip HTML tags and comments; Bugbot bodies carry a 'Fix in Cursor' image link."""
+    s = re.sub(r"<!--.*?-->", "", s, flags=re.S)
+    s = re.sub(r"<[^>]+>", "", s)
+    return re.sub(r"\n{3,}", "\n\n", s).strip()
+
+
+def now_utc():
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+
+
+def parse_ts(s):
+    return dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("pr", type=int)
+    ap.add_argument("--repo")
+    ap.add_argument("--trigger", action="store_true")
+    ap.add_argument("--after")
+    ap.add_argument("--timeout", type=int, default=1200)
+    ap.add_argument("--interval", type=int, default=30)
+    a = ap.parse_args()
+
+    repo = a.repo or gh("repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner").strip()
+    after = parse_ts(a.after) if a.after else now_utc()
+
+    owner = repo.split("/")[0]
+    owners = bugbot_owners()
+    if owner.lower() not in owners:
+        where = ", ".join(sorted(owners)) or "no owner (LEGWORK_BUGBOT_OWNERS is unset)"
+        print(json.dumps({"state": "NO_BUGBOT", "pr": a.pr, "repo": repo,
+                          "reason": f"Bugbot is installed on {where}, not {owner}"}))
+        sys.exit(4)
+
+    if a.trigger:
+        after = now_utc() - dt.timedelta(seconds=1)
+        gh("pr", "comment", str(a.pr), "--repo", repo, "--body", "bugbot run")
+
+    deadline = time.time() + a.timeout
+    bot = re.compile(r"cursor|bugbot", re.I)
+
+    while True:
+        reviews = json.loads(gh("pr", "view", str(a.pr), "--repo", repo, "--json", "reviews"))["reviews"]
+        fresh = [
+            r for r in reviews
+            if bot.search(r["author"]["login"])
+            and "BUGBOT_REVIEW" in r.get("body", "")
+            and "BUGBOT_REVIEW_STALE" not in r.get("body", "")
+            and parse_ts(r["submittedAt"]) > after
+        ]
+        if fresh:
+            r = max(fresh, key=lambda x: x["submittedAt"])
+            m = re.search(r"for commit ([0-9a-f]{7,40})", r["body"])
+            out = {"pr": a.pr, "repo": repo, "review_at": r["submittedAt"],
+                   "commit": m.group(1) if m else None}
+            if "no new issues" in r["body"]:
+                out["state"] = "CLEAR"
+                print(json.dumps(out))
+                sys.exit(0)
+            comments = json.loads(gh("api", f"repos/{repo}/pulls/{a.pr}/comments", "--paginate"))
+            out["state"] = "FINDINGS"
+            out["summary"] = clean(r["body"])[:400]
+            out["comments"] = [
+                {"path": c.get("path"), "line": c.get("line") or c.get("original_line"),
+                 "body": clean(c.get("body", ""))[:1200], "url": c.get("html_url")}
+                for c in comments
+                if bot.search(c["user"]["login"]) and parse_ts(c["created_at"]) > after
+            ]
+            print(json.dumps(out, indent=1))
+            sys.exit(1)
+        head = json.loads(gh("pr", "view", str(a.pr), "--repo", repo, "--json", "headRefOid"))["headRefOid"]
+        runs = json.loads(gh("api", f"repos/{repo}/commits/{head}/check-runs"))["check_runs"]
+        clean_runs = [
+            c for c in runs
+            if bot.search(c["name"]) and c["status"] == "completed"
+            and c["conclusion"] == "success"
+            and "no issues found" in ((c.get("output") or {}).get("summary") or "")
+            and (not a.trigger or parse_ts(c["completed_at"]) > after)
+        ]
+        if clean_runs:
+            c = max(clean_runs, key=lambda x: x["completed_at"])
+            print(json.dumps({"pr": a.pr, "repo": repo, "state": "CLEAR", "source": "check_run",
+                              "review_at": c["completed_at"], "commit": head}))
+            sys.exit(0)
+        if time.time() >= deadline:
+            print(json.dumps({"state": "TIMEOUT", "pr": a.pr, "repo": repo,
+                              "waited_s": a.timeout, "after": after.isoformat()}))
+            sys.exit(2)
+        time.sleep(a.interval)
+
+
+if __name__ == "__main__":
+    main()

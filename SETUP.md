@@ -18,9 +18,9 @@ the shortest path is the Claude Code plugin. From inside Claude Code:
 /plugin install legwork@legwork
 ```
 
-This installs `core/` (the complete level-1 product) as a plugin: the seven
-commands (`/add`, `/wrap`, `/pickup`, `/go`, `/log`, `/shelve`, `/vision`) and the
-legwork-tracker skill, available in every repo. The plugin *is* this repo's
+This installs `core/` (the complete level-1 product) as a plugin: the eight
+commands (`/add`, `/wrap`, `/pickup`, `/go`, `/log`, `/shelve`, `/vision`, `/onboard`)
+and the legwork-tracker and legwork-onboard skills, available in every repo. The plugin *is* this repo's
 `core/` directory — sourced as `./core` by the marketplace manifest at the
 repo root, so there is one editable source and nothing copied. Your queue
 defaults to `~/legwork`; set `LEGWORK_DIR` to move it. The plugin does not set
@@ -141,7 +141,8 @@ through the environment variable.
 ## 2. The commands and the skill
 
 The manual loop is seven slash commands (`/add`, `/wrap`, `/pickup`, `/go`,
-`/vision`, `/log`, `/shelve`) plus the legwork-tracker skill they share. Their source
+`/vision`, `/log`, `/shelve`) plus the legwork-tracker skill they share, and
+`/onboard` (the legwork-onboard skill) sets the rest up by asking. Their source
 lives in `core/commands/` and `core/skills/` (the repo's `.claude/` entries
 are symlinks to them), which means a fresh clone only has them inside the
 checkout itself; a `/wrap` at the end of a session in one of your own repos
@@ -330,6 +331,26 @@ PAT, the Anthropic key, restricting the trigger to your own Telegram user
 id, and activating), follow `suite/reply-capture/SETUP.md`. The write-back token
 is a fine-grained, repo-scoped PAT held only as an n8n credential, never in
 the repo.
+
+## 7. Optional: orchestration
+
+The orchestrator and switchboard layer lives in `orchestration/`: `/ship`,
+`/bugbot`, `/fanout`, the switchboard-protocol skill, the Hermes switchboard
+skill, and three scripts. It needs a checkout and `gh`; Herdr is strongly
+recommended, and Hermes is optional. The easy way in is `/onboard`, which
+asks what you want. By hand:
+
+```
+cp house-rules.example.md house-rules.md     # then edit it
+python3 orchestration/install.py --set LEGWORK_OWN_OWNERS=you \
+    --set LEGWORK_BUGBOT_OWNERS=your-org
+python3 orchestration/install.py --with shipping,fanout,switchboard,herdr-skill
+```
+
+Add `usage-guard` to install the pause-before-a-limit hook, and `hermes`
+with `--hermes-profile <name>` for a Hermes switchboard. `--dry-run` shows
+the plan first. The pieces, settings and a first run are in
+[orchestration/README.md](orchestration/README.md).
 
 ## Verify
 
