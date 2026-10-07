@@ -20,12 +20,18 @@ core/ and rebuild.
 The output tree is a self-contained Claude Code plugin repo:
 
     <out>/
-      core/                        <- byte-identical copy of this repo's core/
+      core/                        <- this repo's core/, bytes as committed
       .claude-plugin/
         marketplace.json           <- sources ./core, one-line install
       README.md                    <- generated, with the canonical-source note
       LICENSE                      <- copied verbatim
       .gitignore
+
+Copied files get the bytes git stores, not the working tree's: on a Windows
+checkout with core.autocrlf=true every text file sits on disk with CRLF line
+endings, and publishing those would rewrite every line of the wedge and make
+it depend on the machine that built it. So text files have CRLF turned back
+into LF on the way in, and --check compares the same way.
 
 The `core/` subdirectory is preserved rather than flattened on purpose: every
 `core/...` path reference inside the loop (the SessionEnd hook's builder path,
@@ -42,7 +48,6 @@ __main__.
 """
 
 import argparse
-import filecmp
 import json
 import shutil
 import sys
@@ -60,6 +65,41 @@ DEFAULT_WEDGE_SLUG = "adamentwistle/legwork-loop"
 
 # core/ is copied whole except for local bytecode. These match .gitignore.
 _COPY_IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc")
+
+# Copied verbatim beside core/, and held to the same zero-drift check.
+_VERBATIM_FILES = (".claude-plugin/marketplace.json", "LICENSE")
+
+
+def _lf_bytes(path):
+    """A source file's bytes as git stores them: CRLF turned back into LF.
+    Every text file under core/ is committed with LF, so this undoes a
+    Windows checkout's autocrlf exactly. Binary files (any NUL byte) pass
+    through untouched."""
+    data = Path(path).read_bytes()
+    if b"\0" in data:
+        return data
+    return data.replace(b"\r\n", b"\n")
+
+
+def _copy_lf(src, dst):
+    """shutil copy function: write src's LF bytes to dst, keeping its mode
+    (an executable script stays executable in the published repo)."""
+    Path(dst).write_bytes(_lf_bytes(src))
+    shutil.copymode(src, dst)
+    return dst
+
+
+def _drift_problem(label, source, built):
+    """None when built holds source's LF bytes, else a line naming the file,
+    and the cause when it is the classic one: a build that kept CRLF."""
+    want = _lf_bytes(source)
+    have = built.read_bytes()
+    if have == want:
+        return None
+    if have.replace(b"\r\n", b"\n") == want:
+        return (f"drifted from source: {label} has CRLF line endings; "
+                f"rebuild with this script")
+    return f"drifted from source: {label}"
 
 
 def _iter_core_files(core_dir):
@@ -177,8 +217,20 @@ def verify_wedge(repo_root, out_dir):
     for rel in sorted(dst - src):
         problems.append(f"extra in wedge (not in core/): core/{rel.as_posix()}")
     for rel in sorted(src & dst):
-        if not filecmp.cmp(core_dir / rel, wedge_core / rel, shallow=False):
-            problems.append(f"drifted from core/: core/{rel.as_posix()}")
+        problem = _drift_problem(
+            f"core/{rel.as_posix()}", core_dir / rel, wedge_core / rel
+        )
+        if problem:
+            problems.append(problem)
+
+    for rel in _VERBATIM_FILES:
+        built = out_dir / rel
+        if not built.is_file():
+            problems.append(f"missing from wedge: {rel}")
+            continue
+        problem = _drift_problem(rel, repo_root / rel, built)
+        if problem:
+            problems.append(problem)
 
     # The wedge exists to hide these worlds; a leak would defeat its purpose.
     for forbidden in ("suite", "scripts", "tests"):
@@ -210,8 +262,11 @@ def build_wedge(repo_root, out_dir, repo_slug=DEFAULT_WEDGE_SLUG, force=False):
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. core/ copied verbatim -- the single source, zero transform.
-    shutil.copytree(core_dir, out_dir / "core", ignore=_COPY_IGNORE)
+    # 1. core/ copied as committed -- the single source, no transform beyond
+    #    undoing a Windows checkout's CRLF (see _lf_bytes).
+    shutil.copytree(
+        core_dir, out_dir / "core", ignore=_COPY_IGNORE, copy_function=_copy_lf
+    )
 
     # 2. The marketplace manifest, reused verbatim: it already sources ./core
     #    and names the legwork plugin, so it is correct for the wedge unchanged.
@@ -219,10 +274,10 @@ def build_wedge(repo_root, out_dir, repo_slug=DEFAULT_WEDGE_SLUG, force=False):
     #    a corrupt source manifest fails the build loudly.
     json.loads(marketplace.read_text(encoding="utf-8"))
     (out_dir / ".claude-plugin").mkdir(parents=True, exist_ok=True)
-    shutil.copy2(marketplace, out_dir / ".claude-plugin" / "marketplace.json")
+    _copy_lf(marketplace, out_dir / ".claude-plugin" / "marketplace.json")
 
     # 3. LICENSE verbatim.
-    shutil.copy2(license_file, out_dir / "LICENSE")
+    _copy_lf(license_file, out_dir / "LICENSE")
 
     # 4. Generated wrappers. newline="\n" so a Windows build emits the same
     #    LF bytes as a macOS/Linux one — the published repo and the --check
