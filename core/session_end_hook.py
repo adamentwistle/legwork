@@ -24,7 +24,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from legwork_common import legwork_dir, load_config, python_exe  # noqa: E402
+from legwork_common import (  # noqa: E402
+    NO_WINDOW, legwork_dir, load_config, python_exe)
 
 POST_TIMEOUT = 15
 TRACKER_CHARS = 4500  # frontmatter, Vision and prompt without flooding
@@ -48,7 +49,8 @@ def log(log_file, message):
 def git(args, cwd, default=""):
     try:
         result = subprocess.run(["git", *args], cwd=cwd, capture_output=True,
-                                text=True, timeout=30)
+                                text=True, timeout=30,
+                                creationflags=NO_WINDOW)
     except (OSError, subprocess.SubprocessError):
         return default
     if result.returncode != 0:
@@ -163,7 +165,7 @@ def main():
             try:
                 ok = subprocess.run(
                     [python_exe(), str(builder)], capture_output=True,
-                    timeout=120).returncode == 0
+                    timeout=120, creationflags=NO_WINDOW).returncode == 0
             except (OSError, subprocess.SubprocessError):
                 ok = False
         if ok:

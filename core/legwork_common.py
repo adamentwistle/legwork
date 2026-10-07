@@ -14,9 +14,18 @@ dependency-free and free of suite/ imports.
 
 import os
 import re
+import subprocess
 import sys
 from datetime import date
 from pathlib import Path
+
+# Pass as creationflags= to every subprocess that runs a CONSOLE program
+# (git, claude). Task Scheduler runs the runner under pythonw.exe, which has
+# no console of its own, so Windows hands each such child a brand-new console
+# window -- it flashes and STEALS FOCUS. The tick pulls every five minutes,
+# so this fires all day in front of whoever is using the machine. Zero off
+# Windows, where the flag does not exist and there is no console to allocate.
+NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 # The Next prompt is the first fenced block under the "## Next prompt"
 # heading. Shared verbatim by the runner (eligibility) and the dashboard
