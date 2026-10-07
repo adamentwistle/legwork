@@ -416,5 +416,26 @@ class GenericCopyTests(unittest.TestCase):
                 self.fail(f"{path.relative_to(REPO)}: {m.group(0)!r}")
 
 
+class WindowsFormTests(unittest.TestCase):
+    """Commands run by hand or by /onboard must work on stock Windows, where
+    `python3`, and so the scripts' own first line, is the Store stub."""
+
+    def test_onboard_runs_python_through_the_detected_interpreter(self):
+        text = (REPO / "core" / "skills" / "legwork-onboard" / "SKILL.md").read_text(
+            encoding="utf-8")
+        self.assertIn("`<python>` below", text)
+        for m in re.finditer(r"python3 orchestration/|`orchestration/bin/[\w-]+", text):
+            self.fail(f"bare call in the onboard skill: {m.group(0)!r}")
+
+    def test_docs_give_hand_run_commands_a_windows_form(self):
+        command = re.compile(r"`(?:orchestration/)?bin/[\w-]+ -|^python3 orchestration/")
+        for path in [ORCH / "README.md", *sorted((ORCH / "docs").glob("*.md"))]:
+            lines = path.read_text(encoding="utf-8").splitlines()
+            for i, line in enumerate(lines):
+                if command.search(line.strip()):
+                    near = "\n".join(lines[i:i + 5])
+                    self.assertIn("Windows", near, f"{path.name}:{i + 1}: {line}")
+
+
 if __name__ == "__main__":
     unittest.main()

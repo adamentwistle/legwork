@@ -54,7 +54,10 @@ in `house-rules.md` beside `config`; see `house-rules.example.md`.
    `CYCLE` and `DONE` entries as it goes.
 3. **Switchboard.** In Hermes, say "watch <project>" or "check in", and
    answer decisions with a letter. By hand: `bin/switchboard-wait --status
-   <repo>:none` shows what is open; type the answer into the pane.
+   <repo>:none` shows what is open; type the answer into the pane. On
+   Windows, put `python` in front (`python bin/switchboard-wait ...`): the
+   scripts' first line asks for `python3`, which there is usually the
+   Microsoft Store stub.
 4. **Context cycling.** Past 300,000 tokens, or 60% of a smaller window, the
    orchestrator finds a clean pause, runs `/wrap`, writes `CYCLE` and stops.
    The switchboard sends `/clear`, `/rename orch-<project>` and the resume
