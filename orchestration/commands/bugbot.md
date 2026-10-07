@@ -12,7 +12,7 @@ foreground. Never use Monitor or a background task for this; they have
 missed verdicts before.
 
 The script is `{{LEGWORK_BIN}}/bugbot-wait` (the installer wrote the full
-path). It only waits on repos whose owner is in `LEGWORK_BUGBOT_OWNERS`
+command; run it as written). It only waits on repos whose owner is in `LEGWORK_BUGBOT_OWNERS`
 (the legwork `config`, or the environment). The house rules are the list
 items of `house-rules.md` in the legwork repo ($LEGWORK_DIR, else
 ~/legwork); if it does not exist, say so in the final reply.
