@@ -128,7 +128,7 @@ sys.path.insert(1, str(Path(__file__).resolve().parent.parent / "core"))
 
 import legwork_review  # noqa: E402
 from legwork_common import (  # noqa: E402
-    COST_RE, PROMPT_RE, days_since, legwork_dir, load_config,
+    COST_RE, NO_WINDOW, PROMPT_RE, days_since, legwork_dir, load_config,
     parse_frontmatter, python_exe, write_lf)
 
 load_config()
@@ -294,7 +294,8 @@ def log(message):
 
 def run_git(args, cwd):
     return subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True, timeout=120
+        ["git", *args], cwd=cwd, capture_output=True, text=True, timeout=120,
+        creationflags=NO_WINDOW,
     )
 
 
@@ -1307,6 +1308,7 @@ def fire_claimed(project, claude_path, claim_head, started):
             argv,
             cwd=project["repo_path"], env=child_env(claude_path, project["account"]),
             stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+            creationflags=NO_WINDOW,
         )
         try:
             exit_code = proc.wait(timeout=SESSION_TIMEOUT)
@@ -1406,6 +1408,7 @@ def rebuild_dashboard():
         subprocess.run(
             [sys.executable, str(LEGWORK_DIR / "core" / "build_dashboard.py")],
             cwd=LEGWORK_DIR, capture_output=True, timeout=60,
+            creationflags=NO_WINDOW,
         )
         changed = run_git(["status", "--porcelain", "dashboard"], LEGWORK_DIR)
         if changed.stdout.strip():

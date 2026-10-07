@@ -31,7 +31,7 @@ from pathlib import Path
 # keeps the import below working when the module is loaded on its own.
 sys.path.insert(1, str(Path(__file__).resolve().parent.parent / "core"))
 
-from legwork_common import parse_frontmatter  # noqa: E402
+from legwork_common import NO_WINDOW, parse_frontmatter  # noqa: E402
 
 # The reviewer system prompt. Verbatim copy of the RUBRIC in
 # suite/reviewer/n8n-build-node.js so the local and n8n reviewers judge
@@ -114,7 +114,7 @@ def call_claude(prompt, model, claude_path, timeout=300):
         argv += ["--model", model]
     try:
         proc = subprocess.run(argv, capture_output=True, text=True,
-                              timeout=timeout)
+                              timeout=timeout, creationflags=NO_WINDOW)
     except (subprocess.SubprocessError, OSError):
         return None
     if proc.returncode != 0:

@@ -21,7 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from legwork_common import legwork_dir, load_config  # noqa: E402
+from legwork_common import NO_WINDOW, legwork_dir, load_config  # noqa: E402
 
 STALE_AFTER = 3 * 86400  # markers no SessionEnd ever consumed
 
@@ -47,7 +47,7 @@ def main():
     try:
         head = subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=cwd, capture_output=True,
-            text=True, timeout=30).stdout.strip()
+            text=True, timeout=30, creationflags=NO_WINDOW).stdout.strip()
     except (OSError, subprocess.SubprocessError):
         return 0
     if not head:
