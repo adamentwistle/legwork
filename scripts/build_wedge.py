@@ -117,8 +117,8 @@ From inside Claude Code, add the marketplace and install the plugin:
 /plugin install legwork@legwork
 ```
 
-That gives you the six slash commands (`/add`, `/wrap`, `/pickup`, `/log`,
-`/shelve`, `/vision`) and the legwork-tracker skill in every repo on your
+That gives you the seven slash commands (`/add`, `/wrap`, `/pickup`, `/go`,
+`/log`, `/shelve`, `/vision`) and the legwork-tracker skill in every repo on your
 machine, backed by a queue in `~/legwork` (set `LEGWORK_DIR` to move it).
 
 ## The loop

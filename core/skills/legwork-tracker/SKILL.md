@@ -1,6 +1,6 @@
 ---
 name: legwork-tracker
-description: Manage the legwork project queue across its full lifecycle. Use whenever the user runs /wrap, /add, /log, /shelve, /pickup or /vision, says "wrap up", "close out", "log this", "shelve", "reopen", "add a project", "change the status" or "tweak the prompt", or is clearly finishing, starting, updating or retiring work on any project. Every session that produced real work must end with a tracker update.
+description: Manage the legwork project queue across its full lifecycle. Use whenever the user runs /wrap, /add, /log, /shelve, /pickup, /go or /vision, says "wrap up", "close out", "log this", "shelve", "reopen", "add a project", "change the status" or "tweak the prompt", or is clearly finishing, starting, updating or retiring work on any project. Every session that produced real work must end with a tracker update.
 ---
 
 # Legwork tracker

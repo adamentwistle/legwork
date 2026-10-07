@@ -10,5 +10,8 @@ Steps:
 3. If the frontmatter has a repo path, also read that repo's README or
    PROJECT.md if present.
 4. Brief me in at most six lines: what this project is, where it stands,
-   the last thing that happened, and the current next prompt.
+   the last thing that happened, and the current next prompt. If the prompt
+   has a `Model:` line, name it, and say whether this session is on that
+   model, so I can /model before answering.
 5. Ask one question only: run the next prompt as written, or adjust it first?
+   If I answer "as written" (or "go"), that is /go: execute it verbatim.

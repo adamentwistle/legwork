@@ -21,7 +21,7 @@ The fastest way in — from inside Claude Code, add the marketplace and install 
 /plugin install legwork@legwork
 ```
 
-That gives you the six slash commands (`/add`, `/wrap`, `/pickup`, `/log`, `/shelve`, `/vision`) and the legwork-tracker skill in every repo on your machine, backed by a queue in `~/legwork` (set `LEGWORK_DIR` to move it). The plugin is this repo's [`core/`](core/) directory itself — one editable source, nothing copied. For the self-rebuilding dashboard and the optional level-2 runner, clone the repo and run the wizard instead — see [Quickstart](#quickstart).
+That gives you the seven slash commands (`/add`, `/wrap`, `/pickup`, `/go`, `/log`, `/shelve`, `/vision`) and the legwork-tracker skill in every repo on your machine, backed by a queue in `~/legwork` (set `LEGWORK_DIR` to move it). The plugin is this repo's [`core/`](core/) directory itself — one editable source, nothing copied. For the self-rebuilding dashboard and the optional level-2 runner, clone the repo and run the wizard instead — see [Quickstart](#quickstart).
 
 ## The loop
 
@@ -75,7 +75,7 @@ You supply the clone: fork this repo or push a copy to a private remote you cont
 
 `./install.sh` is an interactive, dependency-free wizard. Its first question is which level you are installing:
 
-- **Level 1, the manual loop** (the default): one question — where the repo lives — then it writes `config`, creates `projects/`, and offers two opt-ins: copying the slash commands (`/add`, `/wrap`, `/pickup`, `/vision`, `/log`, `/shelve`) and the legwork-tracker skill into user-level `~/.claude`, so the loop works from any repo on your machine, and registering the session hooks, which with no webhook set simply rebuild the dashboard after every session so the queue page stays fresh on its own. Say yes to both. No timer, nothing running in the background.
+- **Level 1, the manual loop** (the default): one question — where the repo lives — then it writes `config`, creates `projects/`, and offers two opt-ins: copying the slash commands (`/add`, `/wrap`, `/pickup`, `/go`, `/vision`, `/log`, `/shelve`) and the legwork-tracker skill into user-level `~/.claude`, so the loop works from any repo on your machine, and registering the session hooks, which with no webhook set simply rebuild the dashboard after every session so the queue page stays fresh on its own. Say yes to both. No timer, nothing running in the background.
 - **Level 2, autonomy**: everything above, plus the firing and cost caps, the review pipeline, and the launchd agent (macOS) or crontab line (Linux) that ticks the runner; with a webhook configured the same SessionEnd hook posts review evidence instead. It still asks before each piece that lives outside the repo.
 
 Graduating is re-running `./install.sh` in the same checkout and picking level 2: your previous answers, including the level, pre-fill.

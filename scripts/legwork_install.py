@@ -34,7 +34,8 @@ interval), shows you the config it will write, then offers to activate the
 pieces that live OUTSIDE the repo, asking before each one:
 
   - write `config` and create `projects/` and `.runner-logs/` in the repo
-  - copy the slash commands (/add, /wrap, /pickup, /vision, /log, /shelve)
+  - copy the slash commands (/add, /wrap, /pickup, /go, /vision, /log,
+    /shelve)
     and the legwork-tracker skill into user-level `~/.claude`, so the manual
     loop works from any repo, not just this checkout
   - install and load the launchd agent (macOS) or a crontab line (Linux)
@@ -880,7 +881,7 @@ def plan_level(args, existing):
 
 def install_verbs(wiz, values, force=None):
     """Copy the slash commands and the legwork-tracker skill into user-level
-    `~/.claude`, so /add, /wrap, /pickup, /vision, /log and /shelve work from
+    `~/.claude`, so /add, /wrap, /pickup, /go, /vision, /log and /shelve work from
     any repo instead of only inside this checkout. Asks first since it writes
     outside the repo; `force` (see _confirm) lets a non-interactive run skip
     it, or accept it with --with-commands. Re-running refreshes the copies
