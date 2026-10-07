@@ -98,9 +98,10 @@ Rules: house rules ("me" and "I" in them mean the user whose git and gh
   the PR body marked OBSERVED, STALE or NOT RUN; do not touch files outside
   <paths> unless the task requires it; do not ask questions, decide and note
   the decision in the PR body.
-Finish: open the PR with gh pr create (title <= 70 chars; body per the
-  <LEGWORK_PR_SKILL> skill's shape, run in full, when that is set; else a
-  TL;DR first, then what changed and why, then a Verification section with
+Finish: open the PR with gh pr create (title <= 70 chars; body in the
+  shape of the <LEGWORK_PR_SKILL> skill, with its checks, when that is set,
+  and this brief is the user's word to open the PR with it; else a TL;DR
+  first, then what changed and why, then a Verification section with
   every line marked OBSERVED, STALE or NOT RUN), then print exactly:
   PR <url> | GATE <PASS|FAIL> | UNPROVEN <list or none>
 ```

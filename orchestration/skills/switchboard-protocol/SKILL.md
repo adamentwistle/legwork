@@ -171,11 +171,12 @@ that one team throughout.
 ## Quality gate, for every feature
 
 1. **Grill first.** Run `/grill-with-docs` (from the mattpocock-skills
-   plugin) on any new feature before planning it. Without that skill, interview yourself the same way: one
-   question at a time, each answered from the docs and the Vision. On
-   Fable, Opus 5.5 or gpt-6-astra, answer the questions yourself from the
-   docs and the Vision, and record the answers in `CONTEXT.md` or an ADR.
-   On any other model, send steering questions up as `DECISION`s.
+   plugin) on any new feature before planning it. Without that skill,
+   interview yourself the same way: one question at a time, each answered
+   from the docs and the Vision. On Fable, Opus 5.5 or gpt-6-astra, answer
+   the questions yourself from the docs and the Vision, and record the
+   answers in `CONTEXT.md` or an ADR. On any other model, send steering
+   questions up as `DECISION`s.
 2. **Test first.** Write the failing test and commit it before the code.
    It must fail on the base commit for the reason the feature fixes. For a
    bug report, the first test is the reporter's exact phrasing or steps.

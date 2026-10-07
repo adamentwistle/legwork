@@ -195,7 +195,7 @@ def house_rules_lines(text):
         s = line.strip()
         if s.startswith(("- ", "* ")):
             out.append("- " + s[2:].strip())
-        elif s and out and line[:1].isspace():
+        elif s and out and out[-1] is not None and line[:1].isspace():
             out[-1] += " " + s
         elif not s and out:
             out.append(None)  # a blank line ends the item

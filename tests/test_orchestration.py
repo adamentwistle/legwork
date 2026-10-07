@@ -193,6 +193,9 @@ class HookAndSoulTests(unittest.TestCase):
         self.assertEqual(install.house_rules_lines(text),
                          "- One rule wrapped here.\n- Two.")
 
+    def test_house_rules_lines_indented_line_after_a_gap_is_not_a_continuation(self):
+        self.assertEqual(install.house_rules_lines("- a\n\n  b\n- c\n"), "- a\n- c")
+
     def test_unmarked_preferences_block_is_spotted(self):
         self.assertTrue(install.unmarked_preferences("Standing preferences:\n- x\n"))
         marked = install.merge_soul("", "- x")
