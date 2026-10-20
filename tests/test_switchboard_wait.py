@@ -78,6 +78,7 @@ class PortableTests(unittest.TestCase):
 
     def setUp(self):
         self.script = load_script()
+        self.script.STATE_FILE = os.devnull
 
     def test_split_target_keeps_the_pane_colon_and_a_drive_letter(self):
         split = self.script.split_target
@@ -116,6 +117,8 @@ class SwitchboardCase(unittest.TestCase):
         self.script = load_script()
         self.script.USAGE_CACHE = str(self.tmp / "no-usage.json")
         self.script.POLL = 0.2
+        self.state_file = self.tmp / "state.md"
+        self.script.STATE_FILE = str(self.state_file)
         bindir = self.tmp / "bin"
         bindir.mkdir()
         self.cfg = self.tmp / "herdr.json"
@@ -651,6 +654,8 @@ class FileOnlyTests(unittest.TestCase):
         self.script = load_script()
         self.script.USAGE_CACHE = str(self.tmp / "no-usage.json")
         self.script.POLL = 0.2
+        self.state_file = self.tmp / "state.md"
+        self.script.STATE_FILE = str(self.state_file)
         self.repo = self.tmp / "legwork"
         self.board = self.repo / ".legwork" / "switchboard.md"
         self.cursor = self.repo / ".legwork" / "switchboard-wait.cursor"
@@ -765,6 +770,161 @@ class FileOnlyTests(unittest.TestCase):
                 with self.script.exclusive(lock, limit=0.5):
                     pass
             self.assertLess(time.time() - start, 3)
+
+    # A new run was dropped at once because the latest entry was the DONE of
+    # the run before, five days older than the watch.
+    def test_done_before_the_run_started_is_not_reported_on_start(self):
+        self.write(OLD_DONE)
+        started(self.state_file, self.repo, "2026-10-10 23:49")
+        self.assertEqual(self.run_wait(), (124, ["timeout"]))
+
+    def test_cycle_before_the_run_started_is_not_reported_on_start(self):
+        self.write("## legwork-100 CYCLE 2026-10-05 19:31\nContext full.\n\n")
+        started(self.state_file, self.repo, "2026-10-10 23:49")
+        self.assertEqual(self.run_wait(), (124, ["timeout"]))
+
+    def test_done_after_the_run_started_is_reported(self):
+        self.write(OLD_DONE, NEW_DONE)
+        started(self.state_file, self.repo, "2026-10-10 23:49")
+        self.assertEqual(self.run_wait(), (0, ["legwork legwork-101 DONE"]))
+
+    def test_done_in_the_same_minute_as_the_start_is_reported(self):
+        self.write("## legwork-101 DONE 2026-10-10 23:49\nDone.\n\n")
+        started(self.state_file, self.repo, "2026-10-10 23:49")
+        self.assertEqual(self.run_wait(), (0, ["legwork legwork-101 DONE"]))
+
+    def test_done_written_during_the_wait_is_reported(self):
+        self.write(OLD_DONE)
+        started(self.state_file, self.repo, "2026-10-10 23:49")
+        t = threading.Timer(0.5, self.append, [NEW_DONE])
+        t.start()
+        try:
+            rc, lines = self.main(["--timeout", "10", f"{self.repo}:none"])
+        finally:
+            t.cancel()
+        self.assertEqual((rc, lines), (0, ["legwork legwork-101 DONE"]))
+
+    def test_old_done_is_reported_when_the_repo_has_no_started_line(self):
+        self.write(OLD_DONE)
+        started(self.state_file, self.repo, None)
+        self.assertEqual(self.run_wait(), (0, ["legwork legwork-100 DONE"]))
+
+    def test_a_started_line_for_another_repo_does_not_apply(self):
+        self.write(OLD_DONE)
+        started(self.state_file, self.tmp / "recipe-box", "2026-10-10 23:49",
+                project="recipe-box")
+        self.assertEqual(self.run_wait(), (0, ["legwork legwork-100 DONE"]))
+
+    def test_open_decision_before_the_run_started_is_still_reported(self):
+        self.write(BOARD["legwork-150"], BOARD["legwork-151"])
+        started(self.state_file, self.repo, "2026-10-10 23:49")
+        self.assertEqual(self.run_wait(), (0, ["legwork legwork-151 DECISION"]))
+
+    def test_status_leaves_out_a_done_before_the_run_started(self):
+        self.write(OLD_DONE)
+        started(self.state_file, self.repo, "2026-10-10 23:49")
+        self.assertEqual(self.status(), ["legwork wait none"])
+
+    def test_status_keeps_a_done_after_the_run_started(self):
+        self.write(OLD_DONE, NEW_DONE)
+        started(self.state_file, self.repo, "2026-10-10 23:49")
+        self.assertEqual(self.status(), ["legwork legwork-101 DONE Roadmap 4 complete.",
+                                         "legwork wait none"])
+
+    def test_state_option_names_the_state_file(self):
+        self.write(OLD_DONE)
+        other = self.tmp / "elsewhere.md"
+        started(other, self.repo, "2026-10-10 23:49")
+        state = ["--state", str(other)]
+        self.assertEqual(self.main(["--status", *state, f"{self.repo}:none"])[1],
+                         ["legwork wait none"])
+        self.assertEqual(self.main(["--timeout", "1", *state, f"{self.repo}:none"]),
+                         (124, ["timeout"]))
+
+    def test_a_missing_state_file_keeps_the_old_behaviour(self):
+        self.write(OLD_DONE)
+        missing = str(self.tmp / "none.md")
+        self.assertEqual(self.main(["--status", "--state", missing, f"{self.repo}:none"])[1],
+                         ["legwork legwork-100 DONE Roadmap 3 complete.", "legwork wait none"])
+
+    def test_state_option_without_a_file_exits_2(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.main(["--status", "--state"])[0], 2)
+
+    @unittest.skipUnless(os.name == "nt", "Windows paths ignore case and slash direction")
+    def test_a_windows_repo_path_matches_however_it_is_spelled(self):
+        self.write(OLD_DONE)
+        started(self.state_file, str(self.repo).upper().replace("\\", "/"), "2026-10-10 23:49")
+        self.assertEqual(self.run_wait(), (124, ["timeout"]))
+
+
+OLD_DONE = "## legwork-100 DONE 2026-10-05 19:31\nRoadmap 3 complete.\n\n"
+NEW_DONE = "## legwork-101 DONE 2026-10-11 00:42\nRoadmap 4 complete.\n\n"
+
+
+def started(state_file, repo, when, project="legwork"):
+    """Write the switchboard's state file as switchboard-state does: watching
+    `repo` as `project`, with this run started at `when` (None: no line)."""
+    text = ("# switchboard state\nupdated: 2026-10-10 23:56\n## watching\n"
+            f"{project} {repo} w1:p2\n## started\n")
+    if when:
+        text += f"{project} {when}\n"
+    Path(state_file).write_text(text + f"## check-ins\n{project} 2026-10-10 23:56\n")
+
+
+class EarlierRunPaneTests(SwitchboardCase):
+    """A stopped pane makes the wait report a latest CYCLE or DONE on every
+    start; one from before the run started still stays out."""
+
+    def test_done_before_the_run_started_is_left_out_while_the_pane_is_done(self):
+        self.write(OLD_DONE)
+        started(self.state_file, self.repo, "2026-10-10 23:49")
+        self.herdr("done")
+        self.assertEqual(self.run_wait()[:2], (0, ["legwork pane done"]))
+
+    def test_cycle_before_the_run_started_is_left_out_while_the_pane_is_idle(self):
+        self.write("## legwork-100 CYCLE 2026-10-05 19:31\nContext full.\n\n")
+        started(self.state_file, self.repo, "2026-10-10 23:49")
+        self.herdr("idle")
+        self.assertEqual(self.run_wait()[:2], (0, ["legwork pane idle"]))
+
+    def test_done_in_the_same_minute_is_reported_with_the_pane(self):
+        self.write("## legwork-101 DONE 2026-10-10 23:49\nDone.\n\n")
+        started(self.state_file, self.repo, "2026-10-10 23:49")
+        self.herdr("done")
+        self.assertEqual(self.run_wait()[:2],
+                         (0, ["legwork legwork-101 DONE", "legwork pane done"]))
+
+
+class StateFileDefaultTests(unittest.TestCase):
+    """Where the state file is when --state is not given."""
+
+    def load(self, **env):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        clean = {k: v for k, v in os.environ.items()
+                 if k not in ("SWITCHBOARD_STATE", "LEGWORK_SWITCHBOARD_DIR",
+                              "CLAUDE_CONFIG_DIR", "LEGWORK_CONFIG")}
+        # No legwork config of the machine's own may answer for the setting.
+        clean["LEGWORK_DIR"] = tmp.name
+        with mock.patch.dict(os.environ, {**clean, **env}, clear=True):
+            return load_script().STATE_FILE
+
+    def test_the_switchboard_dir_setting(self):
+        self.assertEqual(self.load(LEGWORK_SWITCHBOARD_DIR="/sb", CLAUDE_CONFIG_DIR="/cc"),
+                         os.path.join("/sb", "state.md"))
+
+    def test_the_claude_config_dir_without_the_setting(self):
+        self.assertEqual(self.load(CLAUDE_CONFIG_DIR="/cc"),
+                         os.path.join("/cc", "switchboard", "state.md"))
+
+    def test_the_home_claude_dir_without_either(self):
+        self.assertEqual(self.load(), os.path.join(os.path.expanduser("~/.claude"),
+                                                   "switchboard", "state.md"))
+
+    def test_switchboard_state_overrides_the_setting(self):
+        self.assertEqual(self.load(SWITCHBOARD_STATE="/x/state.md",
+                                   LEGWORK_SWITCHBOARD_DIR="/sb"), "/x/state.md")
 
 
 if __name__ == "__main__":
