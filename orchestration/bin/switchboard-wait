@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Wait until an orchestrator needs the switchboard.
 
-Usage: switchboard-wait [--timeout SECS] REPO:PANE [REPO:PANE ...]
-       switchboard-wait --status REPO:PANE [REPO:PANE ...]
+Usage: switchboard-wait [--timeout SECS] [--state FILE] REPO:PANE [REPO:PANE ...]
+       switchboard-wait --status [--state FILE] REPO:PANE [REPO:PANE ...]
 
 PANE is the orchestrator's Herdr pane id (as `herdr agent list` prints it).
 Without Herdr, pass `none` (REPO:none): the wait then watches the
@@ -26,6 +26,14 @@ each watched repo:
     switchboard has to act on it
   - the pane, if it is already idle, done, blocked or gone
 If anything is printed on start it exits 0 straight away.
+
+A CYCLE or DONE from an earlier run is never reported, by the wait or by
+--status. The switchboard's state file has a "## started" line per project
+it started a run for; a CYCLE or DONE whose heading time is before that is
+left out. A repo with no started line, or no state file, keeps the old
+behaviour. The state file is --state FILE, else $SWITCHBOARD_STATE, else
+state.md in LEGWORK_SWITCHBOARD_DIR (environment or legwork config), which
+defaults to $CLAUDE_CONFIG_DIR/switchboard, else ~/.claude/switchboard.
 
 A cursor per repo, .legwork/switchboard-wait.cursor (JSON: switchboard file
 path -> last entry reported, as its id, or "<id>#<n>" for the nth entry
@@ -94,6 +102,11 @@ POLL = 10
 UNREACHABLE = "unreachable"  # a herdr call that failed; herdr's own states pass through
 DRIVE = re.compile(r"^[A-Za-z]:[\\/]")  # a Windows repo path's C:/ or C:\
 NO_PANE = "none"  # REPO:none, no Herdr: watch the file only
+SWITCHBOARD_DIR = (setting("LEGWORK_SWITCHBOARD_DIR")
+                   or os.path.join(os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR")
+                                                      or "~/.claude"), "switchboard"))
+STATE_FILE = os.environ.get("SWITCHBOARD_STATE") or os.path.join(SWITCHBOARD_DIR, "state.md")
+STAMP = re.compile(r"(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})")
 
 
 def weekly_usage():
@@ -136,6 +149,60 @@ def parse(path):
         reps = set(REPLACES.findall(rest)) | set(HEAD_REPLACES.findall(head))
         entries.append((m.group(1), m.group(2), reps, lines[0] if lines else ""))
     return entries, set(ANSWERED.findall(text))
+
+
+def same_path(path):
+    """A repo path in one spelling, so the state file's matches the argument's
+    (on Windows, whatever its case and slashes)."""
+    return os.path.normcase(os.path.abspath(os.path.expanduser(path)))
+
+
+def started_at(repo, state_file):
+    """When the switchboard started this repo's run ("YYYY-MM-DD HH:MM"), or None."""
+    try:
+        with open(state_file, encoding="utf-8", errors="replace") as f:
+            lines = [l.strip() for l in f.read().splitlines()]
+    except (OSError, ValueError):
+        return None
+    repos, started, section = {}, {}, None
+    for line in lines:
+        if line.startswith("## "):
+            section = line[3:].strip()
+            continue
+        parts = line.split()
+        if section == "watching" and len(parts) >= 3:
+            repos[parts[0]] = same_path(" ".join(parts[1:-1]))
+        elif section == "started" and len(parts) >= 2:
+            m = STAMP.match(" ".join(parts[1:]))
+            if m:
+                started[parts[0]] = f"{m.group(1)} {m.group(2)}"
+    repo = same_path(repo)
+    for project, path in repos.items():
+        if path == repo and project in started:
+            return started[project]
+    return None
+
+
+def heading_times(path):
+    """The time on each entry's heading line, in file order; None where there is none."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except (OSError, ValueError):
+        return []
+    times = []
+    for m in ENTRY.finditer(text):
+        end = text.find("\n", m.end())
+        t = STAMP.search(text[m.end():end if end >= 0 else len(text)])
+        times.append(f"{t.group(1)} {t.group(2)}" if t else None)
+    return times
+
+
+def before_start(entries, times, i, started):
+    """True for a CYCLE or DONE written before the switchboard started this run."""
+    if not started or entries[i][1] not in ("CYCLE", "DONE") or i >= len(times):
+        return False
+    return times[i] is not None and times[i] < started
 
 
 def cursor_key(entries, i):
@@ -188,6 +255,7 @@ def entry_events(w, since, latest_only, pane_stopped=False):
     stopped.
     """
     entries, answered = parse(w["path"])
+    times = heading_times(w["path"])
     if since > len(entries):
         since = w["seen"] = 0
     after = max(since - 1, cursor_index(entries, w["state"].get(w["path"])))
@@ -195,6 +263,7 @@ def entry_events(w, since, latest_only, pane_stopped=False):
     last = len(entries) - 1
     if pane_stopped and entries and entries[last][1] in ("CYCLE", "DONE") and last not in found:
         found.append(last)
+    found = [i for i in found if not before_start(entries, times, i, w.get("started"))]
     if found:
         w["state"][w["path"]] = cursor_key(entries, found[-1])
     return [f"{w['name']} {entries[i][0]} {entries[i][1]}" for i in found]
@@ -463,15 +532,19 @@ def poll(watched, since_start, deadline):
     return events
 
 
-def status(argv, deadline):
+def status(argv, deadline, state_file):
     """Full current state, one line each. Touches no cursor, never waits."""
     lines = []
     for arg in argv:
         repo, pane = split_target(arg)
         repo = os.path.abspath(os.path.expanduser(repo))
         name = os.path.basename(repo)
-        entries, answered = parse(os.path.join(repo, ".legwork", "switchboard.md"))
+        board = os.path.join(repo, ".legwork", "switchboard.md")
+        entries, answered = parse(board)
+        times, started = heading_times(board), started_at(repo, state_file)
         for i in reportable(entries, answered, -1, latest_only=True):
+            if before_start(entries, times, i, started):
+                continue
             eid, kind, _, first = entries[i]
             lines.append(f"{name} {eid} {kind} {first}".rstrip())
         if pane != NO_PANE:
@@ -488,10 +561,16 @@ def status(argv, deadline):
 
 
 def main(argv):
-    timeout, show = 1800, False
-    while argv and argv[0] in ("--timeout", "--status"):
+    timeout, show, state_file = 1800, False, STATE_FILE
+    while argv and argv[0] in ("--timeout", "--status", "--state"):
         if argv[0] == "--status":
             show, argv = True, argv[1:]
+            continue
+        if argv[0] == "--state":
+            if len(argv) < 2:
+                argv = []
+                break
+            state_file, argv = os.path.expanduser(argv[1]), argv[2:]
             continue
         try:
             timeout, argv = int(argv[1]), argv[2:]
@@ -502,7 +581,7 @@ def main(argv):
         return 2
     deadline = time.time() + timeout
     if show:
-        return status(argv, deadline)
+        return status(argv, deadline, state_file)
 
     watched, states, pids = [], {}, []
     for arg in argv:
@@ -514,7 +593,8 @@ def main(argv):
             states[cursor] = load_state(cursor)
             pids.append(os.path.join(repo, ".legwork", PIDS_NAME))
         watched.append({"name": os.path.basename(repo), "path": path, "pane": pane,
-                        "seen": len(parse(path)[0]), "state": states[cursor]})
+                        "seen": len(parse(path)[0]), "state": states[cursor],
+                        "started": started_at(repo, state_file)})
     loaded = json.loads(json.dumps(states))
 
     def finish(events, code):
