@@ -19,6 +19,7 @@ leave a setup they can re-run to change any answer.
 | Switchboard | who relays an orchestrator's decisions: a Hermes thread, or the user by hand | orchestration; Hermes needs Herdr |
 | Linear | an issue per change, kept in step with its PR | the Linear MCP |
 | Usage guard | a hook that makes long runs pause at a safe point before a usage limit | a usage cache (ccstatusline) |
+| Codex agent | a `codex` subagent that runs OpenAI's Codex CLI, for cross-model reviews in fanout and the quality gate | the `codex` CLI, signed in |
 | House rules | rules every worker follows: authorship, attribution, spelling, style | nothing |
 
 ## 1. Find out what is there (no questions yet)
@@ -47,7 +48,7 @@ Look these up yourself; never ask the user for a fact you can read:
   scripts in `orchestration/bin/` through it too, not by their `python3`
   first line.
 - The Claude config dir: `$CLAUDE_CONFIG_DIR`, else `~/.claude`.
-- Tools: `command -v claude gh herdr hermes`, `gh auth status`, and
+- Tools: `command -v claude gh herdr hermes codex`, `gh auth status`, and
   whether `HERDR_ENV` is set (this session runs inside Herdr).
 - A usage cache: `~/.cache/ccstatusline/usage.json`, or the path in
   `LEGWORK_USAGE_CACHE`.
@@ -98,11 +99,14 @@ in one line. Record every answer as you go.
 8. **Usage guard.** Only with orchestration, and only when a usage cache
    exists (if none, say the guard would stay silent and skip it). "Install
    the hook that pauses long runs before a usage limit?"
-9. **Your own skills.** Only with shipping or orchestration. "Do you have
+9. **Codex agent.** Only with orchestration, and only when `codex` is on
+   PATH. "Install the codex agent, so reviews get a second opinion from
+   another model?" It runs on the user's Codex plan, not their Claude one.
+10. **Your own skills.** Only with shipping or orchestration. "Do you have
    a skill that writes your PR bodies, or one that checks a UI in a
    browser?" Read the installed skill names in the Claude config dir and
    offer them. They become `LEGWORK_PR_SKILL` and `LEGWORK_UI_SKILL`.
-10. **House rules.** "Any rules every worker must follow?" Offer the common
+11. **House rules.** "Any rules every worker must follow?" Offer the common
    ones as a multi-select, then ask for their own: authored as you with no
    AI attribution or co-author lines; never push main, always a PR;
    spellings to enforce (a product or company name); words or punctuation
@@ -145,7 +149,7 @@ it.
 4. The optional layer: `<python> orchestration/install.py --with <pieces>`,
    where the pieces are the ones they chose: `shipping`, `fanout`,
    `switchboard` (always with fanout), `herdr-skill`, `usage-guard`,
-   `hermes` (with `--hermes-profile <name>`). Run it with `--dry-run` first
+   `codex-agent`, `hermes` (with `--hermes-profile <name>`). Run it with `--dry-run` first
    when anything already exists at a destination, and show what it would
    overwrite.
 
