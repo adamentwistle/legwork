@@ -16,6 +16,8 @@ Pieces (--with, comma-separated, or `all`):
   switchboard  the switchboard-protocol skill orchestrators follow
   herdr-skill  Herdr's own skill, from `herdr --skill`, if Herdr is installed
   usage-guard  a hook that tells long runs to pause before a usage limit
+  codex-agent  the codex subagent: OpenAI's Codex CLI as a cross-model second
+               opinion, if the codex CLI is installed and signed in
   hermes       the Hermes switchboard skill, and the house rules in SOUL.md
 
 Claude Code pieces go under the Claude config dir: $CLAUDE_CONFIG_DIR if set,
@@ -50,13 +52,14 @@ sys.path.insert(1, str(REPO / "core"))
 from legwork_common import iter_config_pairs, write_lf  # noqa: E402
 
 PIECES = ("shipping", "fanout", "switchboard", "herdr-skill", "usage-guard",
-          "hermes")
+          "codex-agent", "hermes")
 
 # piece -> files under orchestration/, mirrored under the Claude config dir.
 CLAUDE_FILES = {
     "shipping": ["commands/ship.md", "commands/bugbot.md"],
     "fanout": ["commands/fanout.md", "skills/fanout/SKILL.md"],
     "switchboard": ["skills/switchboard-protocol/SKILL.md"],
+    "codex-agent": ["agents/codex.md"],
 }
 
 HERMES_SKILL = "skills/orchestration/switchboard/SKILL.md"

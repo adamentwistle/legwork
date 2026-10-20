@@ -62,6 +62,18 @@ class PiecesTests(unittest.TestCase):
         for src, _ in pairs:
             self.assertTrue(src.is_file(), src)
 
+    # fanout and the protocol send cross-model reviews to "the codex agent,
+    # when you have one"; this piece is how you get one.
+    def test_codex_agent_installs_the_agent_definition(self):
+        dest = Path("/tmp/fake-claude")
+        pairs = install.plan_copies(["codex-agent"], dest)
+        self.assertEqual([d.relative_to(dest).as_posix() for _, d in pairs],
+                         ["agents/codex.md"])
+        text = pairs[0][0].read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("---\nname: codex\n"))
+        self.assertNotIn("{{", text)
+        self.assertIn("codex-agent", install.parse_pieces("all"))
+
     def test_claude_home_prefers_explicit_then_env(self):
         self.assertEqual(install.claude_home("/x", {"CLAUDE_CONFIG_DIR": "/y"}),
                          Path("/x"))

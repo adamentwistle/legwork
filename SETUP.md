@@ -347,7 +347,8 @@ python3 orchestration/install.py --set LEGWORK_OWN_OWNERS=you \
 python3 orchestration/install.py --with shipping,fanout,switchboard,herdr-skill
 ```
 
-Add `usage-guard` to install the pause-before-a-limit hook, and `hermes`
+Add `usage-guard` to install the pause-before-a-limit hook, `codex-agent`
+for the codex subagent (needs the `codex` CLI), and `hermes`
 with `--hermes-profile <name>` for a Hermes switchboard. `--dry-run` shows
 the plan first. The pieces, settings and a first run are in
 [orchestration/README.md](orchestration/README.md).

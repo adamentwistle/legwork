@@ -114,7 +114,7 @@ Decide per task with the table in the `herdr` skill. In practice:
 |---|---|
 | Bounded change, no dev server, no approvals expected, one model | Subagent (Agent tool, `isolation: worktree`, model and effort per task) |
 | Long build/test loops, a dev server or watcher, a Codex worker, or the user may want to watch in the morning | Herdr pane |
-| Cross-model second opinion only | `codex` subagent type, when you have one |
+| Cross-model second opinion only | `codex` subagent type, when you have one (`install.py --with codex-agent`) |
 | Not inside Herdr (`HERDR_ENV` unset) | Subagent, always |
 
 Model and effort: pick both per task from its shape, and write them into
