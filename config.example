@@ -77,6 +77,13 @@ LEGWORK_DAILY_CAP=8
 # ~/.hermes itself.
 # LEGWORK_HERMES_PROFILE=default
 #
+# The switchboard's own folder. switchboard-wait reads the state file,
+# state.md, there: a CYCLE or DONE dated before a run's "started" line is
+# left out. Default: $CLAUDE_CONFIG_DIR/switchboard, else
+# ~/.claude/switchboard. SWITCHBOARD_STATE in the environment, or
+# switchboard-wait --state, names the state file itself instead.
+# LEGWORK_SWITCHBOARD_DIR=$HOME/.claude/switchboard
+#
 # GitHub users or orgs whose repos are yours, comma-separated. On these,
 # issue ids may appear in PRs, planning docs go up as PRs and merges may be
 # allowed. Every other owner is treated as a shared repo.
