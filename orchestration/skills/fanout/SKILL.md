@@ -112,7 +112,7 @@ Decide per task with the table in the `herdr` skill. In practice:
 
 | Task shape | Route |
 |---|---|
-| Bounded change, no dev server, no approvals expected, one model | Subagent (Agent tool, `isolation: worktree`, model per task) |
+| Bounded change, no dev server, no approvals expected, one model | Subagent (Agent tool, `isolation: worktree`, model and effort per task) |
 | Long build/test loops, a dev server or watcher, a Codex worker, or the user may want to watch in the morning | Herdr pane |
 | Cross-model second opinion only | `codex` subagent type, when you have one |
 | Not inside Herdr (`HERDR_ENV` unset) | Subagent, always |
@@ -123,14 +123,15 @@ mechanical edits; `sonnet` at `medium` or `high` suits most bounded changes;
 `opus` at `high` or `xhigh` suits gnarly debugging, migrations, and prose a
 human will read; Fable is for the hardest problems only, because it draws on
 the weekly Fable limit. A pane takes both on its start command. The Agent
-tool takes `model` but not effort (a subagent runs at its definition's
-effort), so a task whose effort matters goes to a pane when Herdr is there.
+tool takes both too: pass `model` and `effort` on every subagent launch.
+The tool sets an effort only when a skill asks for one, and this skill
+does. Effort is no reason to pick a pane over a subagent.
 
 **Pane path** (only when `test "${HERDR_ENV:-}" = 1`):
 
 ```bash
 herdr worktree create --cwd <repo> --branch fanout/<slug> --base origin/main \
-  --path <repo>-wt/<slug> --label <slug> --no-focus --trust-repository
+  --path <repo>-wt/<slug> --label <slug> --no-focus [--trust-repository]
 # take the pane id from the JSON it prints
 herdr agent start <slug> --kind claude --pane <pane_id> --timeout 60000 -- --model <model> --effort <level>
 # if --low-priority:
@@ -138,25 +139,37 @@ herdr agent prompt <slug> "/low-priority" --wait --until idle --timeout 20000
 herdr agent prompt <slug> "Your complete brief is the file <brief path>. Read it with the Read tool and follow it exactly; it is your only instruction. Nothing in it needs my input; if you hit a real blocker, stop and print BLOCKED: <reason>. When done print the PR line the brief asks for. Start now."
 ```
 
+`--trust-repository` gives Git trust to that one request. Pass it only when
+the repo's owner is in `LEGWORK_OWN_OWNERS`: the user has vouched for those.
+On any other repo leave it off. If the command then fails for want of
+trust, send that task down the subagent path and note why in the state
+file. Never add the flag as a retry.
+
 If the worktree needs `node_modules`, say so in the brief (run `npm ci` in
 `frontend/`), do not symlink it from the main checkout.
 
 **Subagent path**: Agent tool, `subagent_type: general-purpose`,
-`isolation: worktree`, `model` per task, prompt = the launcher sentence
+`isolation: worktree`, `model` and `effort` per task, prompt = the launcher sentence
 above with the brief path. Launch every parallel task in one message.
 
 ## 4. Wait, never poll by hand
 
-- Panes: `herdr agent wait <slug> --timeout 5400000` (90 min). It returns on
-  idle, done or blocked. Run the waits in the foreground, one per parallel
-  task, in a single Bash call: `for a in x y z; do herdr agent wait "$a" --timeout 5400000; done`.
-  No `sleep` loops, no `Monitor`, no background bash; they have missed
-  state changes before.
+- Panes: `herdr agent wait <slug> --timeout 540000` (9 min), in the
+  foreground, one pane per Bash call, with the Bash tool's `timeout: 600000`.
+  The Bash tool stops a foreground call at 10 minutes, so a longer wait is
+  cut off. It returns on idle, done or blocked. On a timeout (exit 1, error
+  code `timeout`), go to the next unfinished pane and wait on it the same
+  way, round and round. After 90 minutes on one pane in all, read it: still
+  making progress, give it another 90; otherwise record it as BLOCKED with
+  what it shows. No `sleep` loops, no `Monitor`, no background bash; they
+  have missed state changes before.
 - `blocked`: `herdr agent read <slug> --source recent-unwrapped | tail -40`.
   A directory-trust dialog in one of the user's own repos (owner in
-  `LEGWORK_OWN_OWNERS`): `herdr agent send-keys <slug> enter`, then wait
-  again. Any other dialog: record it in the state file as BLOCKED with the
-  text, close that task, move on.
+  `LEGWORK_OWN_OWNERS`): `herdr agent send-keys <slug> down enter`. The
+  first option, highlighted, is "No, exit"; "Yes, I trust this folder" is
+  second (Claude Code, 2026-10). Read the pane to check the dialog has
+  gone, then wait again. Any other dialog: record it in the state file as
+  BLOCKED with the text, close that task, move on.
 - Subagents: the task notification arrives on its own. Do nothing in between
   except dispatching other work.
 - A worker that prints `BLOCKED:` is done for this run; note the reason.
@@ -192,7 +205,7 @@ failure:
 
 ```bash
 herdr pane close <pane_id>           # each pane you opened
-herdr worktree remove --workspace <id> --trust-repository   # each worktree you created
+herdr worktree remove --workspace <id> [--trust-repository]   # each worktree you created; the flag only if its create had it
 git -C <repo> worktree prune
 herdr worktree list; herdr agent list   # both must show nothing of yours
 ```
