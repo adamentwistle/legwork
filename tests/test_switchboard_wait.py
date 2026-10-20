@@ -14,6 +14,8 @@ import io
 import json
 import os
 import re
+import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -333,7 +335,7 @@ class SwitchboardWaitTests(SwitchboardCase):
         first = BOARD["legwork-151"].splitlines()[1]
         self.assertTrue(first.startswith("Attempted: plugin cache option A is built as 327"))
         self.assertEqual(lines, [f"legwork legwork-151 DECISION {first}",
-                                 "legwork pane working"])
+                                 "legwork pane working", "legwork wait none"])
 
     def test_status_leaves_cursor_file_byte_identical(self):
         self.write(BOARD["legwork-163"], BOARD["legwork-164"],
@@ -475,10 +477,10 @@ class SwitchboardWaitTests(SwitchboardCase):
         self.herdr("unknown", seq=4)
         self.assertEqual(self.run_wait()[:2], (124, ["timeout"]))
         self.assertEqual(self.main(["--status", f"{self.repo}:w1:p2"]),
-                         (0, ["legwork pane unknown"]))
+                         (0, ["legwork pane unknown", "legwork wait none"]))
         self.herdr("error:server_not_running")
         self.assertEqual(self.main(["--status", f"{self.repo}:w1:p2"]),
-                         (0, ["legwork pane unreachable"]))
+                         (0, ["legwork pane unreachable", "legwork wait none"]))
 
     # Finding 11: a usage cache with strings in it.
     def test_string_usage_values_are_coerced_or_skipped(self):
@@ -514,8 +516,9 @@ class SwitchboardWaitTests(SwitchboardCase):
         calls = []
 
         def replace(src, dst):
-            calls.append((src, dst, json.loads(Path(src).read_text())))
-            self.assertFalse(Path(dst).exists())
+            if dst == str(self.cursor):  # the pids file is saved the same way
+                calls.append((src, dst, json.loads(Path(src).read_text())))
+                self.assertFalse(Path(dst).exists())
             return real_replace(src, dst)
 
         self.patch_attr(self.script.os, "replace", replace)
@@ -558,9 +561,210 @@ class SwitchboardWaitTests(SwitchboardCase):
         self.write(BOARD["legwork-150"], BOARD["legwork-151"])
         rc, lines = self.main(["--status", f"{self.repo}:none"])
         self.assertEqual(rc, 0)
-        self.assertEqual(len(lines), 1)
+        self.assertEqual(len(lines), 2)
         self.assertTrue(lines[0].startswith("legwork legwork-151 DECISION "))
+        self.assertEqual(lines[1], "legwork wait none")
         self.assertEqual(self.herdr_calls(), [])
+
+    # A wait that is running lists itself, and a SIGTERM takes it off again.
+    def spawn_wait(self, preexec_fn=None):
+        env = dict(os.environ, SWITCHBOARD_USAGE_CACHE=str(self.tmp / "no-usage.json"))
+        return subprocess.Popen([sys.executable, str(SCRIPT), "--timeout", "20",
+                                 f"{self.repo}:w1:p2"], stdout=subprocess.DEVNULL,
+                                env=env, preexec_fn=preexec_fn)
+
+    def last_status_line(self):
+        return self.main(["--status", f"{self.repo}:w1:p2"])[1][-1]
+
+    def test_status_shows_a_running_wait_and_drops_it_on_sigterm(self):
+        self.write(BOARD["legwork-150"])
+        proc = self.spawn_wait()
+        try:
+            self.assertTrue(until(lambda: self.last_status_line().startswith(
+                "legwork wait running since ")))
+            self.assertIn(f"(pid {proc.pid})", self.last_status_line())
+        finally:
+            proc.terminate()
+            proc.wait(5)
+        self.assertEqual(self.last_status_line(), "legwork wait none")
+        self.assertNotIn(str(proc.pid), (self.repo / ".legwork" / PIDS).read_text())
+
+    # nohup starts a wait with SIGHUP ignored; it must stay ignored.
+    def test_inherited_sighup_ignore_is_kept(self):
+        self.write(BOARD["legwork-150"])
+        proc = self.spawn_wait(
+            preexec_fn=lambda: signal.signal(signal.SIGHUP, signal.SIG_IGN))
+        try:
+            self.assertTrue(until(lambda: self.last_status_line().startswith(
+                "legwork wait running")))
+            proc.send_signal(signal.SIGHUP)
+            time.sleep(0.5)
+            self.assertIsNone(proc.poll())
+        finally:
+            proc.terminate()
+            proc.wait(5)
+
+    # A live process that only looks like a wait, or that started at another
+    # time than the one listed, is not the listed wait.
+    def test_status_ignores_a_reused_pid_with_a_wait_like_name(self):
+        self.write(BOARD["legwork-150"])
+        fake = subprocess.Popen(["bash", "-c", "exec -a switchboard-wait-fake sleep 30"])
+        try:
+            until(lambda: "switchboard-wait-fake" in subprocess.run(
+                ["ps", "-o", "command=", "-p", str(fake.pid)],
+                capture_output=True, text=True).stdout)
+            (self.repo / ".legwork" / PIDS).write_text(json.dumps({str(fake.pid): 1.0}))
+            self.assertEqual(self.last_status_line(), "legwork wait none")
+        finally:
+            fake.kill()
+            fake.wait(5)
+
+
+def until(cond, limit=5):
+    end = time.time() + limit
+    while time.time() < end:
+        if cond():
+            return True
+        time.sleep(0.1)
+    return False
+
+
+# A GRANT written by the switchboard took the same number as an
+# orchestrator entry: legwork-2 was a GRANT, a DECISION and two DONEs. With
+# the cursor on the last DONE the next start matched the first legwork-2
+# and reported the DONE again, three times in three minutes.
+DUP = ("## legwork-1 DONE 2026-09-26 16:52\nRoadmap 1 wrapped.\n\n"
+       "## legwork-2 GRANT 2026-09-26 17:07\nUser: \"b\"\nScope: item 8.\n\n"
+       "## legwork-2 DECISION 2026-09-26 17:10\nAttempted: x\n\n"
+       "ANSWERED legwork-2: b (2026-09-26 17:10)\n\n"
+       "## legwork-2 DONE 2026-09-26 17:10\nRoadmap 2 wrapped.\n\n")
+PIDS = "switchboard-wait.pids"
+
+
+class FileOnlyTests(unittest.TestCase):
+    """Waits on REPO:none never call herdr, so these run on Windows too."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+        self.script = load_script()
+        self.script.USAGE_CACHE = str(self.tmp / "no-usage.json")
+        self.script.POLL = 0.2
+        self.repo = self.tmp / "legwork"
+        self.board = self.repo / ".legwork" / "switchboard.md"
+        self.cursor = self.repo / ".legwork" / "switchboard-wait.cursor"
+        self.pids = self.repo / ".legwork" / PIDS
+        self.board.parent.mkdir(parents=True)
+
+    def write(self, *texts):
+        self.board.write_text("".join(texts))
+
+    def append(self, text):
+        with open(self.board, "a") as f:
+            f.write(text)
+
+    def main(self, argv):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = self.script.main(argv)
+        return rc, out.getvalue().splitlines()
+
+    def run_wait(self):
+        return self.main(["--timeout", "1", f"{self.repo}:none"])
+
+    def status(self):
+        return self.main(["--status", f"{self.repo}:none"])[1]
+
+    def test_cursor_on_a_repeated_id_does_not_re_report_the_later_entry(self):
+        self.write(DUP)
+        self.assertEqual(self.run_wait(), (0, ["legwork legwork-2 DONE"]))
+        self.assertEqual(json.loads(self.cursor.read_text())[str(self.board)], "legwork-2#2")
+        self.assertEqual(self.run_wait(), (124, ["timeout"]))
+
+    def test_cursor_on_a_repeated_id_still_reports_what_follows(self):
+        self.write(DUP)
+        self.assertEqual(self.run_wait(), (0, ["legwork legwork-2 DONE"]))
+        self.append("## legwork-3 DECISION 2026-09-26 17:20\nAttempted: y\n\n")
+        self.assertEqual(self.run_wait(), (0, ["legwork legwork-3 DECISION"]))
+
+    def test_merge_compares_repeated_ids_by_position(self):
+        self.write(DUP)
+        self.cursor.write_text(json.dumps({str(self.board): "legwork-2#2"}))
+        self.script.save_states({str(self.cursor): {str(self.board): "legwork-2"}},
+                                {str(self.cursor): {}})
+        self.assertEqual(json.loads(self.cursor.read_text())[str(self.board)], "legwork-2#2")
+
+    def test_an_id_ending_in_hash_digits_is_reported_once(self):
+        self.write("## t#1 DECISION 2026-10-10 12:00\nAttempted: x\n\n")
+        self.assertEqual(self.run_wait(), (0, ["legwork t#1 DECISION"]))
+        self.assertEqual(self.run_wait(), (124, ["timeout"]))
+
+    # A decision closed by "Replaces <id>" as the last words of a heading.
+    def test_replaces_on_the_heading_line_closes_a_decision(self):
+        self.write("## legwork-6 DECISION 2026-10-01 20:10\nAttempted: x\n\n"
+                   "## legwork-9 DECISION 2026-10-01 21:21 Replaces legwork-6\n"
+                   "Attempted: y\n\n")
+        self.assertEqual(self.run_wait(), (0, ["legwork legwork-9 DECISION"]))
+
+    def test_replaces_in_heading_prose_does_not_close_a_decision(self):
+        self.write(RECIPES["recipe-box-17"],
+                   "## recipe-box-18 UPDATE 2026-09-25 19:30 new loader Replaces "
+                   "recipe-box-17 style\nProse.\n\n")
+        self.assertEqual(self.run_wait(), (0, ["legwork recipe-box-17 DECISION"]))
+
+    # An answer typed into the pane: the DECIDED entry carries Replaces.
+    def test_decided_with_replaces_closes_a_decision(self):
+        self.write("## legwork-80 DECISION 2026-10-01 16:54\nAttempted: x\n\n"
+                   "## legwork-82 DECIDED 2026-10-01 16:57\nReplaces legwork-80\n"
+                   "The user said in the pane: \"after the tests\".\n\n")
+        self.assertEqual(self.run_wait(), (124, ["timeout"]))
+
+    def test_status_says_when_no_wait_watches_the_repo(self):
+        self.write(BOARD["legwork-150"])
+        self.assertEqual(self.status(), ["legwork wait none"])
+
+    def test_a_finished_wait_takes_itself_off_the_list(self):
+        self.write(BOARD["legwork-150"])
+        listed = []
+        real_update = self.script.update_pids
+
+        def update(paths, add):
+            real_update(paths, add)
+            listed.append(json.loads(self.pids.read_text()))
+
+        with mock.patch.object(self.script, "update_pids", update):
+            self.assertEqual(self.run_wait(), (124, ["timeout"]))
+        self.assertEqual([list(d) for d in listed], [[str(os.getpid())], []])
+
+    def test_status_ignores_a_dead_wait_left_in_the_list(self):
+        self.write(BOARD["legwork-150"])
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        self.pids.write_text(json.dumps({str(dead.pid): time.time()}))
+        self.assertEqual(self.status(), ["legwork wait none"])
+
+    def test_status_ignores_a_live_pid_that_is_not_a_wait(self):
+        self.write(BOARD["legwork-150"])
+        self.pids.write_text(json.dumps({str(os.getpid()): time.time()}))
+        self.assertEqual(self.status(), ["legwork wait none"])
+
+    # On Windows os.kill(pid, 0) ends the process, so it must never be
+    # called there: with no ps to read either, a listed pid counts as gone.
+    def test_windows_never_signals_a_listed_pid(self):
+        with mock.patch.object(self.script.os, "name", "nt"), \
+                mock.patch.object(self.script.os, "kill",
+                                  side_effect=AssertionError("os.kill on Windows")):
+            self.assertFalse(self.script.wait_alive(os.getpid(), self.script.STARTED))
+
+    def test_a_held_lock_gives_up_after_its_limit(self):
+        lock = str(self.tmp / "x.lock")
+        with self.script.exclusive(lock):
+            start = time.time()
+            with self.assertRaises(OSError):
+                with self.script.exclusive(lock, limit=0.5):
+                    pass
+            self.assertLess(time.time() - start, 3)
 
 
 if __name__ == "__main__":

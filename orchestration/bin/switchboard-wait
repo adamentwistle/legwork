@@ -12,13 +12,15 @@ switchboard file only and never calls herdr.
 DECISION with its id and first line, a CYCLE or DONE if it is the latest
 entry, and each pane's state. It never reads or writes the cursor file and
 never waits, so it is safe on check-ins and before answering a question
-about a decision.
+about a decision. It also says, per repo, whether a wait is watching it:
+"<repo-name> wait running since HH:MM (pid N)" or "<repo-name> wait none".
 
 On start it reports state, not only changes. Before waiting it prints, for
 each watched repo:
   - every open DECISION in .legwork/switchboard.md: no line starting
     "ANSWERED <id>" (then a colon or a space) anywhere in the file, and no
-    later entry with a line starting "Replaces <id>"
+    later entry with "Replaces <id>" at the start of a line or as the last
+    words of its heading
   - a CYCLE or DONE entry, if it is the latest entry; while the pane is
     idle or done it is reported on every start, not once, because the
     switchboard has to act on it
@@ -26,12 +28,21 @@ each watched repo:
 If anything is printed on start it exits 0 straight away.
 
 A cursor per repo, .legwork/switchboard-wait.cursor (JSON: switchboard file
-path -> last entry id reported), stops the same entry being reported twice
+path -> last entry reported, as its id, or "<id>#<n>" for the nth entry
+with an id used more than once), stops the same entry being reported twice
 and makes sure entries written while no wait was running are reported on the
 next start. The last pane state reported is kept in the same file, so a pane
 that stays idle is reported once, not on every start. Saves take a lock
 (.legwork/switchboard-wait.cursor.lock) and merge with what is on disk, so
 two waits on one repo keep each other's state.
+
+Each running wait lists its pid and start time in
+.legwork/switchboard-wait.pids and takes itself off when it ends, including
+on SIGTERM or SIGHUP, so --status can tell the switchboard whether a repo is
+watched. A pid that is dead, is not a switchboard-wait, or started at
+another time than the one listed is ignored. On Windows there is no ps to
+check a pid with, so every listed pid counts as gone and --status says
+"wait none".
 
 Otherwise it waits, and returns as soon as, in any watched repo:
   - a new DECISION, CYCLE or DONE entry lands
@@ -51,6 +62,7 @@ import contextlib
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -75,7 +87,9 @@ USAGE_CACHE = (os.environ.get("SWITCHBOARD_USAGE_CACHE")
                or os.path.expanduser("~/.cache/ccstatusline/usage.json"))
 USAGE_FLOOR = 99
 CURSOR_NAME = "switchboard-wait.cursor"
+PIDS_NAME = "switchboard-wait.pids"
 HERDR_TIMEOUT = 30
+STARTED = time.time()  # this process's start, as listed in the pids file
 POLL = 10
 UNREACHABLE = "unreachable"  # a herdr call that failed; herdr's own states pass through
 DRIVE = re.compile(r"^[A-Za-z]:[\\/]")  # a Windows repo path's C:/ or C:\
@@ -102,6 +116,7 @@ def weekly_usage():
 ENTRY = re.compile(r"^## (\S+) (DECISION|UPDATE|DECIDED|CYCLE|DONE)\b", re.M)
 ANSWERED = re.compile(r"^ANSWERED (\S+?)(?::|\s|$)", re.M)
 REPLACES = re.compile(r"^Replaces (\S+-\d+)", re.M)
+HEAD_REPLACES = re.compile(r"\bReplaces (\S+-\d+)\s*$")
 
 
 def parse(path):
@@ -116,10 +131,34 @@ def parse(path):
     for i, m in enumerate(heads):
         end = heads[i + 1].start() if i + 1 < len(heads) else len(text)
         body = text[m.end():end]
-        lines = [s.strip() for s in body.splitlines()[1:] if s.strip()]
-        entries.append((m.group(1), m.group(2), set(REPLACES.findall(body)),
-                        lines[0] if lines else ""))
+        head, _, rest = body.partition("\n")
+        lines = [s.strip() for s in rest.splitlines() if s.strip()]
+        reps = set(REPLACES.findall(rest)) | set(HEAD_REPLACES.findall(head))
+        entries.append((m.group(1), m.group(2), reps, lines[0] if lines else ""))
     return entries, set(ANSWERED.findall(text))
+
+
+def cursor_key(entries, i):
+    """The cursor value for entry i: its id, or "<id>#<n>" if the id repeats."""
+    eid = entries[i][0]
+    n = sum(1 for e in entries[:i + 1] if e[0] == eid)
+    return eid if n == 1 else f"{eid}#{n}"
+
+
+def cursor_index(entries, key):
+    """Index of the entry a cursor value names, or -1. A bare id is its first entry."""
+    if not isinstance(key, str):
+        return -1
+    eid, n = key, 1
+    base, sep, count = key.rpartition("#")
+    if sep and count.isdigit() and all(e[0] != key for e in entries):
+        eid, n = base, int(count)
+    for i, e in enumerate(entries):
+        if e[0] == eid:
+            n -= 1
+            if n == 0:
+                return i
+    return -1
 
 
 def reportable(entries, answered, after, latest_only):
@@ -151,18 +190,13 @@ def entry_events(w, since, latest_only, pane_stopped=False):
     entries, answered = parse(w["path"])
     if since > len(entries):
         since = w["seen"] = 0
-    cursor = w["state"].get(w["path"])
-    after = since - 1
-    for i, e in enumerate(entries):
-        if e[0] == cursor:
-            after = max(after, i)
-            break
+    after = max(since - 1, cursor_index(entries, w["state"].get(w["path"])))
     found = reportable(entries, answered, after, latest_only)
     last = len(entries) - 1
     if pane_stopped and entries and entries[last][1] in ("CYCLE", "DONE") and last not in found:
         found.append(last)
     if found:
-        w["state"][w["path"]] = entries[found[-1]][0]
+        w["state"][w["path"]] = cursor_key(entries, found[-1])
     return [f"{w['name']} {entries[i][0]} {entries[i][1]}" for i in found]
 
 
@@ -221,10 +255,9 @@ def load_state(path):
 
 
 def later_id(path, a, b):
-    """Whichever of two entry ids comes later in the switchboard file."""
-    ids = [e[0] for e in parse(path)[0]]
-    pos = {x: (ids.index(x) if x in ids else -1) for x in (a, b)}
-    return a if pos[a] >= pos[b] else b
+    """Whichever of two cursor values comes later in the switchboard file."""
+    entries = parse(path)[0]
+    return a if cursor_index(entries, a) >= cursor_index(entries, b) else b
 
 
 def merge(disk, ours, base):
@@ -246,22 +279,45 @@ def merge(disk, ours, base):
 
 
 @contextlib.contextmanager
-def exclusive(lock_path):
+def exclusive(lock_path, limit=None):
     """Hold an exclusive lock on lock_path for the with-block. flock on
     POSIX; on Windows msvcrt.locking on the first byte, which retries for
-    about ten seconds and then raises OSError."""
+    about ten seconds and then raises OSError. With a limit, both try
+    without blocking until `limit` seconds have passed, then raise
+    TimeoutError (an OSError)."""
     with open(lock_path, "a") as lock:
         if fcntl:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            if limit is None:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+            else:
+                retry(lambda: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB),
+                      limit, lock_path)
             yield
             return
         lock.seek(0)
-        msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+        if limit is None:
+            msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            retry(lambda: msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1),
+                  limit, lock_path)
         try:
             yield
         finally:
             lock.seek(0)
             msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+def retry(take, limit, lock_path):
+    """Call take() until it stops raising OSError, for at most `limit` seconds."""
+    end = time.time() + limit
+    while True:
+        try:
+            take()
+            return
+        except OSError:
+            if time.time() >= end:
+                raise TimeoutError(f"{lock_path} stayed locked for {limit:g} s")
+            time.sleep(0.1)
 
 
 def split_target(arg):
@@ -297,6 +353,96 @@ def save_states(states, loaded):
             print(f"switchboard-wait: could not save {path}: {e}", file=sys.stderr)
 
 
+PS = "/bin/ps" if os.path.exists("/bin/ps") else "ps"
+START_SLACK = 5  # seconds between a process starting and listing itself
+
+
+def wait_alive(pid, started):
+    """True when pid is a running switchboard-wait that started at `started`.
+
+    The start time check stops a reused pid, or any process whose command
+    line happens to contain "switchboard-wait", passing for a listed wait.
+    On Windows, os.kill(pid, 0) would end the process and there is no ps,
+    so a listed pid there always counts as gone.
+    """
+    if os.name == "nt":
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    except (OSError, ValueError, OverflowError):
+        return False
+    try:
+        out = subprocess.run([PS, "-o", "etime=,command=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=5,
+                             env={**os.environ, "LC_ALL": "C"}).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    elapsed, _, command = out.partition(" ")
+    if "switchboard-wait" not in command:
+        return False
+    secs = 0
+    try:
+        days, _, rest = elapsed.rpartition("-")
+        for part in rest.split(":"):
+            secs = secs * 60 + int(part)
+        secs += int(days or 0) * 86400
+    except ValueError:
+        return False
+    return abs((time.time() - secs) - started) <= START_SLACK + 1
+
+
+def running_waits(path):
+    """[(pid, started)] for the live waits listed in a pids file."""
+    found = []
+    for pid, started in sorted(load_state(path).items()):
+        try:
+            pid, started = int(pid), float(started)
+        except (TypeError, ValueError):
+            continue
+        if pid != os.getpid() and wait_alive(pid, started):
+            found.append((pid, started))
+    return found
+
+
+def update_pids(paths, add):
+    """Add this process to, or take it off, each repo's pids file, dropping dead pids."""
+    me = os.getpid()
+    for path in paths:
+        folder = os.path.dirname(path)
+        if not os.path.isdir(os.path.dirname(folder)):
+            continue
+        tmp = f"{path}.{me}.tmp"
+        try:
+            os.makedirs(folder, exist_ok=True)
+            with exclusive(f"{path}.lock", limit=HERDR_TIMEOUT):
+                pids = {str(p): s for p, s in running_waits(path)}
+                if add:
+                    pids[str(me)] = STARTED
+                with open(tmp, "w") as f:
+                    json.dump(pids, f, indent=1, sort_keys=True)
+                    f.write("\n")
+                os.replace(tmp, path)
+        except OSError as e:
+            print(f"switchboard-wait: could not save {path}: {e}", file=sys.stderr)
+
+
+class Stopped(Exception):
+    """A terminating signal arrived; the wait takes itself off the list first."""
+
+
+def stop(signum, _frame):
+    raise Stopped(signum)
+
+
+# SIGHUP does not exist on Windows.
+TERMINATING = [s for s in (getattr(signal, "SIGTERM", None), getattr(signal, "SIGHUP", None))
+               if s is not None]
+
+
 def poll(watched, since_start, deadline):
     """Event lines for every watched repo: entries first, then the pane."""
     events = []
@@ -328,10 +474,15 @@ def status(argv, deadline):
         for i in reportable(entries, answered, -1, latest_only=True):
             eid, kind, _, first = entries[i]
             lines.append(f"{name} {eid} {kind} {first}".rstrip())
-        if pane == NO_PANE:
-            continue
-        seen = pane_status(pane, deadline)
-        lines.append(f"{name} pane {seen[0] if seen else UNREACHABLE}")
+        if pane != NO_PANE:
+            seen = pane_status(pane, deadline)
+            lines.append(f"{name} pane {seen[0] if seen else UNREACHABLE}")
+        waits = running_waits(os.path.join(repo, ".legwork", PIDS_NAME))
+        for pid, started in waits:
+            since = time.strftime("%H:%M", time.localtime(started))
+            lines.append(f"{name} wait running since {since} (pid {pid})")
+        if not waits:
+            lines.append(f"{name} wait none")
     print("\n".join(lines), flush=True)
     return 0
 
@@ -353,7 +504,7 @@ def main(argv):
     if show:
         return status(argv, deadline)
 
-    watched, states = [], {}
+    watched, states, pids = [], {}, []
     for arg in argv:
         repo, pane = split_target(arg)
         repo = os.path.abspath(os.path.expanduser(repo))
@@ -361,6 +512,7 @@ def main(argv):
         cursor = os.path.join(repo, ".legwork", CURSOR_NAME)
         if cursor not in states:
             states[cursor] = load_state(cursor)
+            pids.append(os.path.join(repo, ".legwork", PIDS_NAME))
         watched.append({"name": os.path.basename(repo), "path": path, "pane": pane,
                         "seen": len(parse(path)[0]), "state": states[cursor]})
     loaded = json.loads(json.dumps(states))
@@ -370,25 +522,48 @@ def main(argv):
         save_states(states, loaded)
         return code
 
-    usage_seen = {k for k, v in weekly_usage().items() if v >= USAGE_FLOOR}
-    events = poll(watched, False, deadline)
-    if events:
-        return finish(events, 0)
-    while True:
-        left = deadline - time.time()
-        if left <= 0:
-            break
-        time.sleep(min(POLL, left))
-        events = []
-        for k, v in weekly_usage().items():
-            if v >= USAGE_FLOOR and k not in usage_seen:
-                usage_seen.add(k)
-                events.append(f"usage weekly {k} at {v:g}%")
-        events += poll(watched, True, deadline)
+    caught = {}
+    for sig in TERMINATING:
+        if signal.getsignal(sig) != signal.SIG_IGN:  # keep nohup's ignore
+            caught[sig] = signal.signal(sig, stop)
+    try:
+        update_pids(pids, add=True)
+        usage_seen = {k for k, v in weekly_usage().items() if v >= USAGE_FLOOR}
+        events = poll(watched, False, deadline)
         if events:
             return finish(events, 0)
-    return finish(["timeout"], 124)
+        while True:
+            left = deadline - time.time()
+            if left <= 0:
+                break
+            time.sleep(min(POLL, left))
+            events = []
+            for k, v in weekly_usage().items():
+                if v >= USAGE_FLOOR and k not in usage_seen:
+                    usage_seen.add(k)
+                    events.append(f"usage weekly {k} at {v:g}%")
+            events += poll(watched, True, deadline)
+            if events:
+                return finish(events, 0)
+        return finish(["timeout"], 124)
+    finally:
+        # A second signal must not cut the cleanup short; it is re-sent after.
+        late = []
+        for sig in caught:
+            signal.signal(sig, lambda signum, _f: late.append(signum))
+        update_pids(pids, add=False)
+        for sig, handler in caught.items():
+            signal.signal(sig, handler)
+        if late:
+            raise Stopped(late[0])
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Stopped as e:
+        if os.name == "nt":  # os.kill there ends the process without the signal
+            sys.exit(128 + e.args[0])
+        # Die by the same signal, so the caller sees the exit it always has.
+        signal.signal(e.args[0], signal.SIG_DFL)
+        os.kill(os.getpid(), e.args[0])
