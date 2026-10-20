@@ -28,9 +28,9 @@ each watched repo:
 If anything is printed on start it exits 0 straight away.
 
 A CYCLE or DONE from an earlier run is never reported, by the wait or by
---status. The switchboard's state file has a "## started" line per project
-it started a run for; a CYCLE or DONE whose heading time is before that is
-left out. A repo with no started line, or no state file, keeps the old
+--status. The switchboard's state file (written by switchboard-state) has a
+"## started" line per project it started a run for; a CYCLE or DONE whose
+heading time is before that is left out. A repo with no started line, or no state file, keeps the old
 behaviour. The state file is --state FILE, else $SWITCHBOARD_STATE, else
 state.md in LEGWORK_SWITCHBOARD_DIR (environment or legwork config), which
 defaults to $CLAUDE_CONFIG_DIR/switchboard, else ~/.claude/switchboard.

@@ -28,6 +28,7 @@ which ones you want, then installs only those with `install.py`.
 | `skills/switchboard-protocol/` | The skill orchestrators follow: when to escalate, the entry format, context cycling, the usage budget, the quality gate |
 | `hermes/switchboard/` | The Hermes skill for the switchboard itself: check-ins, relaying answers, cycling, watching, planning sessions. A template; `install.py` fills in your paths |
 | `bin/switchboard-wait` | The wait behind watch mode. On start it reports open decisions, a trailing `CYCLE` or `DONE` and panes already stopped, then returns when a watched repo gets a new `DECISION`, `CYCLE` or `DONE`, or a pane goes blocked or idle. `REPO:none` watches the file only, for a setup without Herdr |
+| `bin/switchboard-state` | The only writer of the switchboard's state file (`LEGWORK_SWITCHBOARD_DIR/state.md`): `add [--run]`, `pane`, `remove`, `checkin`, `cycle`, `uncycle`, `show`. `add --run` records when a run started, so `switchboard-wait` leaves out the previous run's `CYCLE` or `DONE` |
 | `bin/bugbot-wait` | Triggers and waits for a Cursor Bugbot verdict on a PR, for owners in `LEGWORK_BUGBOT_OWNERS` |
 | `agents/codex.md` | The `codex` subagent: runs OpenAI's Codex CLI on one scoped task, for the cross-model review fanout and the quality gate ask for. The caller picks model and effort with `codex-model:` and `codex-effort:` lines; the description carries the routing guide |
 | `bin/usage-guard` | A hook that tells a long run to pause at a safe point before a usage limit, from the ccstatusline usage cache |
