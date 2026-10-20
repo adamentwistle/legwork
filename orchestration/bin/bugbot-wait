@@ -26,18 +26,20 @@ without Bugbot used to wait the full 20 minutes for nothing and leave a stray
 "bugbot run" comment, so any owner not on the list stops with NO_BUGBOT
 before posting. Unset means no owner has Bugbot.
 
-Verdict shape (observed 2026-09-12): a PR review
-by login "cursor", body starting "<!-- BUGBOT_REVIEW -->". A clean run says
-"found no new issues". A stale marker "<!-- BUGBOT_REVIEW_STALE -->" means an
-old verdict was superseded and is ignored. Findings are inline review comments.
+Verdict shape (observed 2026-09-12): a PR review by Bugbot's own user
+(cursor[bot], type Bot), body starting "<!-- BUGBOT_REVIEW -->". A clean run
+says "found no new issues". A stale marker "<!-- BUGBOT_REVIEW_STALE -->"
+means an old verdict was superseded and is ignored. Findings are inline
+review comments by the same user.
 
 Second shape (observed 2026-09-19): a FIRST-ROUND clean run posts no
-review at all, only the "Cursor Bugbot" check run on the head commit, concluding
-"success" with "no issues found" in its summary (a run with findings concludes
-"neutral" and does post a review). So a completed success check run on the
-CURRENT head also counts as CLEAR. It is tied to the head SHA rather than to
---after, because a run that finished before the wait began is still the verdict
-for that commit; with --trigger it must have completed after the trigger.
+review at all, only the "Cursor Bugbot" check run (from the app with slug
+"cursor") on the head commit, concluding "success" with "no issues found" in
+its summary (a run with findings concludes "neutral" and does post a review).
+So a completed success check run on the CURRENT head also counts as CLEAR.
+It is tied to the head SHA rather than to --after, because a run that
+finished before the wait began is still the verdict for that commit; with
+--trigger it must have completed after the trigger.
 """
 import argparse
 import datetime as dt
@@ -58,6 +60,25 @@ try:
 except ImportError:  # copied out of the checkout: environment only
     def setting(key, default=None):
         return os.environ.get(key) or default
+
+
+# Who Bugbot is, exactly (observed 2026-10-10). Reviews and inline comments
+# come from the GitHub App user "cursor[bot]" of type Bot; only an App can
+# hold a "[bot]" login. The check run comes from the App with slug "cursor".
+# Matching on a name containing "cursor" or "bugbot" let a look-alike user,
+# or a workflow job named "Cursor Bugbot", pass as a clean verdict, and
+# /fanout merges on CLEAR.
+BUGBOT_LOGIN = "cursor[bot]"
+BUGBOT_APP = "cursor"
+
+
+def is_bugbot(user):
+    return bool(user) and user.get("login") == BUGBOT_LOGIN and user.get("type") == "Bot"
+
+
+def pages(raw):
+    """Flatten `gh api --paginate --slurp` output (a list of pages) into one list."""
+    return [item for page in json.loads(raw) for item in page]
 
 
 def bugbot_owners():
@@ -115,34 +136,32 @@ def main():
         gh("pr", "comment", str(a.pr), "--repo", repo, "--body", "bugbot run")
 
     deadline = time.time() + a.timeout
-    bot = re.compile(r"cursor|bugbot", re.I)
-
     while True:
-        reviews = json.loads(gh("pr", "view", str(a.pr), "--repo", repo, "--json", "reviews"))["reviews"]
+        reviews = pages(gh("api", f"repos/{repo}/pulls/{a.pr}/reviews", "--paginate", "--slurp"))
         fresh = [
             r for r in reviews
-            if bot.search(r["author"]["login"])
-            and "BUGBOT_REVIEW" in r.get("body", "")
-            and "BUGBOT_REVIEW_STALE" not in r.get("body", "")
-            and parse_ts(r["submittedAt"]) > after
+            if is_bugbot(r.get("user"))
+            and "BUGBOT_REVIEW" in (r.get("body") or "")
+            and "BUGBOT_REVIEW_STALE" not in (r.get("body") or "")
+            and r.get("submitted_at") and parse_ts(r["submitted_at"]) > after
         ]
         if fresh:
-            r = max(fresh, key=lambda x: x["submittedAt"])
+            r = max(fresh, key=lambda x: x["submitted_at"])
             m = re.search(r"for commit ([0-9a-f]{7,40})", r["body"])
-            out = {"pr": a.pr, "repo": repo, "review_at": r["submittedAt"],
+            out = {"pr": a.pr, "repo": repo, "review_at": r["submitted_at"],
                    "commit": m.group(1) if m else None}
             if "no new issues" in r["body"]:
                 out["state"] = "CLEAR"
                 print(json.dumps(out))
                 sys.exit(0)
-            comments = json.loads(gh("api", f"repos/{repo}/pulls/{a.pr}/comments", "--paginate"))
+            comments = pages(gh("api", f"repos/{repo}/pulls/{a.pr}/comments", "--paginate", "--slurp"))
             out["state"] = "FINDINGS"
             out["summary"] = clean(r["body"])[:400]
             out["comments"] = [
                 {"path": c.get("path"), "line": c.get("line") or c.get("original_line"),
                  "body": clean(c.get("body", ""))[:1200], "url": c.get("html_url")}
                 for c in comments
-                if bot.search(c["user"]["login"]) and parse_ts(c["created_at"]) > after
+                if is_bugbot(c.get("user")) and parse_ts(c["created_at"]) > after
             ]
             print(json.dumps(out, indent=1))
             sys.exit(1)
@@ -150,7 +169,8 @@ def main():
         runs = json.loads(gh("api", f"repos/{repo}/commits/{head}/check-runs"))["check_runs"]
         clean_runs = [
             c for c in runs
-            if bot.search(c["name"]) and c["status"] == "completed"
+            if (c.get("app") or {}).get("slug") == BUGBOT_APP and "bugbot" in c["name"].lower()
+            and c["status"] == "completed"
             and c["conclusion"] == "success"
             and "no issues found" in ((c.get("output") or {}).get("summary") or "")
             and (not a.trigger or parse_ts(c["completed_at"]) > after)
