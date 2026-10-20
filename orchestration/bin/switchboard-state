@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""Change the switchboard's state file. The switchboard's only way to write it.
+
+Usage: switchboard-state [--file FILE] add [--run] PROJECT REPO PANE
+       switchboard-state [--file FILE] pane PROJECT PANE
+       switchboard-state [--file FILE] remove PROJECT
+       switchboard-state [--file FILE] checkin PROJECT [PROJECT ...]
+       switchboard-state [--file FILE] cycle | uncycle | show
+
+add     watch PROJECT (REPO is its absolute path, PANE its Herdr pane id, or
+        none) and give it a check-in time. With --run, also record now as the
+        time this run started: switchboard-wait then ignores a CYCLE or DONE
+        written before it, which is the end of an earlier run. Use --run
+        whenever you start the run ("run <project>"). Adding a watched project
+        again updates its repo and pane and keeps its start unless --run is
+        given.
+pane    the project's orchestrator moved to PANE.
+remove  stop watching PROJECT: its watching, started and check-in lines go.
+checkin set each PROJECT's check-in time to now.
+cycle   end the file with "CYCLE <now>", asking for the switchboard to be
+        cycled; uncycle takes that line off.
+show    print the file.
+
+The file is FILE, else $SWITCHBOARD_STATE, else state.md in
+LEGWORK_SWITCHBOARD_DIR (environment or legwork config), which defaults to
+$CLAUDE_CONFIG_DIR/switchboard, else ~/.claude/switchboard: the file
+switchboard-wait reads. It is replaced whole on every change (temp file and
+rename, with LF line endings); on Windows a rename that meets a reader is
+retried for a few seconds. Times are local "YYYY-MM-DD HH:MM", from the
+clock, or $SWITCHBOARD_NOW when set (tests). Exit 0 on success, 1 for a
+project not in the file (nothing written), 2 for bad arguments.
+"""
+import os
+import sys
+import tempfile
+import time
+
+sys.path.insert(1, os.path.join(os.path.dirname(os.path.realpath(__file__)), ".."))
+try:
+    from settings import setting  # orchestration/settings.py, same checkout
+except ImportError:  # copied out of the checkout: environment only
+    def setting(key, default=None):
+        return os.environ.get(key) or default
+
+SECTIONS = ("watching", "started", "check-ins")
+REPLACE_TRIES = 50  # Windows: a reader holding the file blocks the rename
+REPLACE_PAUSE = 0.1
+
+
+def default_file():
+    folder = (setting("LEGWORK_SWITCHBOARD_DIR")
+              or os.path.join(os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR")
+                                                 or "~/.claude"), "switchboard"))
+    return os.environ.get("SWITCHBOARD_STATE") or os.path.join(folder, "state.md")
+
+
+def now():
+    return os.environ.get("SWITCHBOARD_NOW") or time.strftime("%Y-%m-%d %H:%M")
+
+
+def read(path):
+    """{"watching": [[project, repo, pane]], "started": [[project, time]],
+    "check-ins": [[project, time]], "cycle": line or None}."""
+    state = {"watching": [], "started": [], "check-ins": [], "cycle": None}
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            lines = [l.strip() for l in f.read().splitlines()]
+    except OSError:
+        return state
+    section = None
+    for line in lines:
+        if line.startswith("## "):
+            section = line[3:].strip()
+            continue
+        if line.startswith("CYCLE"):
+            state["cycle"] = line
+            continue
+        parts = line.split()
+        if section == "watching" and len(parts) >= 3:
+            state["watching"].append([parts[0], " ".join(parts[1:-1]), parts[-1]])
+        elif section in ("started", "check-ins") and len(parts) >= 2:
+            state[section].append([parts[0], " ".join(parts[1:])])
+    return state
+
+
+def write(path, state):
+    lines = ["# switchboard state", f"updated: {now()}", "## watching"]
+    lines += [" ".join(row) for row in state["watching"]]
+    for section in ("started", "check-ins"):
+        lines.append(f"## {section}")
+        lines += [" ".join(row) for row in state[section]]
+    if state["cycle"]:
+        lines.append(state["cycle"])
+    folder = os.path.dirname(os.path.abspath(path))
+    os.makedirs(folder, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=folder, prefix=".state.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(lines) + "\n")
+        for attempt in range(REPLACE_TRIES):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:
+                if attempt == REPLACE_TRIES - 1:
+                    raise
+                time.sleep(REPLACE_PAUSE)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def put(rows, key, row):
+    """Replace the row for key in place, or append it."""
+    for i, r in enumerate(rows):
+        if r[0] == key:
+            rows[i] = row
+            return
+    rows.append(row)
+
+
+def usage():
+    print(__doc__.strip(), file=sys.stderr)
+    return 2
+
+
+def main(argv):
+    path = default_file()
+    if argv[:1] == ["--file"]:
+        if len(argv) < 2:
+            return usage()
+        path, argv = os.path.expanduser(argv[1]), argv[2:]
+    if not argv:
+        return usage()
+    cmd, args = argv[0], argv[1:]
+    run = cmd == "add" and args[:1] == ["--run"]
+    if run:
+        args = args[1:]
+    shapes = {"add": lambda a: len(a) == 3, "pane": lambda a: len(a) == 2,
+              "remove": lambda a: len(a) == 1, "checkin": lambda a: len(a) >= 1,
+              "cycle": lambda a: not a, "uncycle": lambda a: not a, "show": lambda a: not a}
+    if cmd not in shapes or not shapes[cmd](args):
+        return usage()
+    if cmd in ("add", "pane", "remove", "checkin") and any(
+            not a or any(c.isspace() for c in a) for a in ([args[0]] if cmd != "checkin" else args)):
+        return usage()
+
+    if cmd == "show":
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                sys.stdout.write(f.read())
+        except OSError:
+            pass
+        return 0
+
+    state = read(path)
+    watched = [r[0] for r in state["watching"]]
+    names = args if cmd == "checkin" else args[:1]
+    if cmd in ("pane", "remove", "checkin"):
+        missing = [n for n in names if n not in watched]
+        if missing:
+            print(f"switchboard-state: not watched: {' '.join(missing)} "
+                  f"(watching: {' '.join(watched) or 'nothing'}, in {path})", file=sys.stderr)
+            return 1
+
+    t = now()
+    if cmd == "add":
+        project, repo, pane = args
+        put(state["watching"], project, [project, repo, pane])
+        if run:
+            put(state["started"], project, [project, t])
+        put(state["check-ins"], project, [project, t])
+    elif cmd == "pane":
+        for r in state["watching"]:
+            if r[0] == args[0]:
+                r[2] = args[1]
+    elif cmd == "remove":
+        for section in SECTIONS:
+            state[section] = [r for r in state[section] if r[0] != args[0]]
+    elif cmd == "checkin":
+        for n in names:
+            put(state["check-ins"], n, [n, t])
+    elif cmd == "cycle":
+        state["cycle"] = f"CYCLE {t}"
+    elif cmd == "uncycle":
+        state["cycle"] = None
+    write(path, state)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
