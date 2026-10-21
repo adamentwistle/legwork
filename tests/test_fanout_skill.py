@@ -67,6 +67,36 @@ class WaitTests(unittest.TestCase):
         self.assertIn("the user approves pushes", wait)
 
 
+class ReviewerTests(unittest.TestCase):
+    """Who reviews comes from the house rules' Pull request reviews section,
+    read once for the repo; the worker requests the open-time reviewers,
+    the orchestrator the ones for after the review bot."""
+
+    def test_load_reads_the_repos_review_item(self):
+        load = " ".join(section(text(), "1. Load").split())
+        self.assertIn("Its `Pull request reviews` section", load)
+        self.assertIn("a repo's item beats its owner's", load)
+
+    def test_brief_names_the_open_time_reviewers(self):
+        brief = text().split("```", 2)[1]
+        self.assertIn("Reviewers: <", brief)
+        flat_brief = " ".join(brief.split())
+        self.assertIn("if Reviewers names anyone, `gh pr edit <n> --add-reviewer "
+                      "<them>`", flat_brief)
+        self.assertLess(flat_brief.index("gh pr create"),
+                        flat_brief.index("--add-reviewer"))
+        self.assertLess(flat_brief.index("--add-reviewer"),
+                        flat_brief.index("then print exactly"))
+
+    def test_after_the_bot_reviewers_are_requested_without_bugbot_too(self):
+        land = " ".join(section(text(), "5. Land").split())
+        self.assertIn("after the review bot is clear", land)
+        self.assertIn("With no Bugbot on the repo, request them yourself", land)
+
+    def test_wrap_names_the_reviewers_requested(self):
+        self.assertIn("reviewers requested", section(text(), "7. Wrap"))
+
+
 class LandTests(unittest.TestCase):
     def test_pane_and_worktree_go_before_the_merge(self):
         land = section(text(), "5. Land")
@@ -152,10 +182,13 @@ class LeakTests(unittest.TestCase):
     def test_no_em_dashes(self):
         self.assertNotIn(chr(0x2014), text())
 
-    def test_no_reviewers_rule_left_out(self):
+    def test_reviewers_come_from_the_house_rules_not_a_blanket_rule(self):
+        # Was a check that no reviewer rule exists. The rule is now the
+        # user's, per repo, in the house rules' Pull request reviews section.
         body = text()
-        self.assertNotIn("--reviewer", body)
+        self.assertNotIn("--reviewer ", body)
         self.assertNotIn("no reviewers", body)
+        self.assertIn("`Pull request reviews`", body)
 
     def test_linear_is_not_in_the_skill(self):
         self.assertNotIn("Linear", text())

@@ -76,8 +76,18 @@ class ProtocolRulesTests(unittest.TestCase):
     def test_switchboard_is_claude_or_manual(self):
         self.assertIn("`LEGWORK_SWITCHBOARD`: `claude`", self.text)
 
-    def test_no_reviewer_rule_and_no_names(self):
-        self.assertNotIn("reviewer", self.text.lower())
+    def test_reviews_follow_the_house_rules_section(self):
+        # Was a check that no reviewer rule exists. The rule is now the
+        # user's, per repo, in the house rules' Pull request reviews section,
+        # which this skill reaches through <legwork> like its settings.
+        setup = section(self.text, "Setup, once per session")
+        self.assertIn("`<legwork>/house-rules.md`", setup)
+        self.assertIn("`Pull request reviews` section", setup)
+        self.assertIn("once step 3 of the quality gate passes", setup)
+        self.assertIn("do not escalate it", setup)
+        self.assertNotIn("no reviewers", self.text.lower())
+
+    def test_no_names(self):
         self.assertNotIn("Adam", self.text)
         self.assertNotIn("—", self.text)
 

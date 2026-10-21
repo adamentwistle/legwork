@@ -30,6 +30,15 @@ direction.
   slug. The user or the switchboard sets it with `/rename`, and inside
   Herdr it shows as your pane title. Inside Herdr, if `herdr pane current`
   shows a different title, write an `UPDATE` saying so.
+- Pull request reviews: the `Pull request reviews` section of
+  `<legwork>/house-rules.md`, if any, says per repo or per owner who
+  reviews pull requests and when; a repo's item beats its owner's. Request
+  them as it says, never the PR's author: when the PR opens, or after the
+  review bot is clear. `/bugbot` does the second on `CLEAR`; on a repo
+  whose owner is not in `LEGWORK_BUGBOT_OWNERS`, request them once step 3
+  of the quality gate passes. If it names nothing for the repo, request
+  nobody and leave reviews to the user. The section is the user's
+  standing word, so do not escalate it.
 - The switchboard file is `<repo>/.legwork/switchboard.md`. Create it if
   missing. The repo must gitignore `.legwork/`.
 - Before any other work, write an `UPDATE` that says the run started and

@@ -31,6 +31,13 @@ each commit, pull request and comment this session writes (the design doc
 and its pull request in step 4, the legwork commit in step 5), as it does
 for `/ship`. If the file does not exist, say so once and carry on.
 
+Its `Pull request reviews` section, if any, says per repo or per owner who
+reviews pull requests and when; a repo's item beats its owner's. The
+design doc's pull request follows it as `/ship` does: the reviewers named
+for when the PR opens are requested then, those for after the review bot
+once `/bugbot` on it ends clear, never the PR's author. If it names nothing
+for the repo, request nobody and leave reviews to the user.
+
 ## Steps
 
 1. Inputs: the tracker file `projects/<project>.md` in `{{LEGWORK_DIR}}`
@@ -83,7 +90,10 @@ for `/ship`. If the file does not exist, say so once and carry on.
 5. Tracker: a `## Roadmap N` section (newest first, one item per PR, run
    rules, what needs the user) and a `## Next prompt` of
    `/fanout <project> --merge`, then wrap (`legwork-tracker`) and commit
-   the legwork repo. The orchestrator runs on Opus at high effort
+   the legwork repo. The run rules say who reviews this repo's PRs and
+   when, from the house rules' `Pull request reviews` item for the repo, or
+   that reviews are left to the user when it names nothing for the repo.
+   The orchestrator runs on Opus at high effort
    (`Model: opus`, `Effort: high`); each item names the model that fits
    it for the worker that builds it.
 

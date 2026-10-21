@@ -117,7 +117,9 @@ in one line. Record every answer as you go.
    AI attribution or co-author lines; never push main, always a PR;
    spellings to enforce (a product or company name); words or punctuation
    to avoid; mark every result OBSERVED, STALE or NOT RUN; lead escalations
-   with the decision. `house-rules.example.md` shows the format.
+   with the decision. `house-rules.example.md` shows the format. Then ask
+   who reviews pull requests, per repo or per owner, and when; the answers
+   go in a `## Pull request reviews` section, and with none nobody is asked.
 
 ## 3. Show the plan, then confirm once
 

@@ -91,8 +91,9 @@ Code switchboard, with the health watcher and pane notifications, is in
 | `LEGWORK_USAGE_CACHE` | `~/.cache/ccstatusline/usage.json` | The usage cache `usage-guard` and `switchboard-wait` read. No cache means the usage checks are skipped. |
 
 Rules every worker follows (authorship, attribution, spelling, style) are
-not config: they live in `house-rules.md` beside `config`. See
-`house-rules.example.md`.
+not config: they live in `house-rules.md` beside `config`. So does who
+reviews your pull requests, per repo or per owner, in its
+`Pull request reviews` section. See `house-rules.example.md`.
 
 ## Applied outside the runner
 

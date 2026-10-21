@@ -8,8 +8,9 @@ Project for the tracker: $ARGUMENTS if given, otherwise infer it from the repo.
 The legwork repo is $LEGWORK_DIR if set, otherwise ~/legwork. Rules that
 apply to every step: every list item of its `house-rules.md` (authorship,
 attribution and style). If that file does not exist, say so in the final
-reply. Work lands on a branch through a pull request, never by pushing to
-main.
+reply. Its `Pull request reviews` section, if any, says per repo or per
+owner who reviews pull requests and when; a repo's item beats its owner's.
+Work lands on a branch through a pull request, never by pushing to main.
 
 Steps:
 1. `git status --short` and `git diff --stat`. Stage only the files this
@@ -26,11 +27,16 @@ Steps:
    with the skill named by `LEGWORK_PR_SKILL` in the legwork `config`, when
    set, run in full; otherwise TL;DR first, ticket IDs linked, every
    Verification line marked OBSERVED, STALE or NOT RUN. Open it with
-   `gh pr create`. If one exists, update the body only if the change
-   set moved beyond what it describes.
+   `gh pr create`. Then request the reviewers that section names for this
+   repo when the PR opens: `gh pr edit <n> --add-reviewer <logins>`,
+   never the PR's author. Those it names for after the review bot is clear
+   wait for step 6. If it names nothing for this repo, request nobody and
+   leave reviews to the user. If a PR exists, update the body only if the
+   change set moved beyond what it describes.
 6. Run /bugbot for that PR. It triggers Bugbot, waits, fixes real findings,
-   pushes, and retriggers, up to three rounds.
+   pushes, and retriggers, up to three rounds. When it ends clear, it
+   requests the reviewers the house rules name for after the review bot.
 7. Run /wrap for the project. The log entry names the PR and the Bugbot
    state.
-8. Reply in three lines: PR URL and branch; Bugbot state and rounds;
-   what /wrap minted as the next prompt.
+8. Reply in three lines: PR URL and branch; Bugbot state and rounds, and
+   the reviewers requested (or none); what /wrap minted as the next prompt.
