@@ -66,12 +66,12 @@ class PiecesTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             install.parse_pieces("shipping,runner")
 
-    def test_the_old_switchboard_piece_and_flag_are_gone(self):
-        with self.assertRaises(ValueError):
-            install.parse_pieces(OLD)
+    def test_the_old_switchboard_piece_installs_nothing(self):
+        self.assertEqual(install.parse_pieces(OLD), [])
+        self.assertEqual(install.parse_pieces(f"shipping,{OLD}"), ["shipping"])
+        self.assertNotIn(OLD, install.PIECES)
+        self.assertNotIn(OLD, install.parse_pieces("all"))
         self.assertFalse(hasattr(install, OLD + "_home"))
-        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-            install.main([f"--{OLD}-profile", "x", "--dry-run"])
 
     def test_new_pieces_are_in_all(self):
         for piece in ("switchboard-health", "pane-notify"):
@@ -320,14 +320,21 @@ class ConfigTests(unittest.TestCase):
                 f"LEGWORK_SWITCHBOARD={OLD}\n{install.RETIRED_KEYS[0]}=work\n"
                 "LEGWORK_OWN_OWNERS=me\n")
         out, changed = install.upgrade_config(text)
-        self.assertTrue(changed)
+        self.assertEqual(changed, ("LEGWORK_SWITCHBOARD", install.RETIRED_KEYS[0]))
         self.assertEqual(out, (f"LEGWORK_DIR=/a\n# LEGWORK_SWITCHBOARD={OLD}\n"
                                "LEGWORK_SWITCHBOARD=claude\nLEGWORK_OWN_OWNERS=me\n"))
 
     def test_upgrade_config_leaves_a_current_config_alone(self):
         for text in ("", "LEGWORK_SWITCHBOARD=manual\n",
                      "LEGWORK_SWITCHBOARD=claude\nA=1\n"):
-            self.assertEqual(install.upgrade_config(text), (text, False), text)
+            self.assertEqual(install.upgrade_config(text), (text, ()), text)
+
+    def test_upgrade_config_names_only_what_it_changed(self):
+        self.assertEqual(install.upgrade_config(f"LEGWORK_SWITCHBOARD={OLD}\n")[1],
+                         ("LEGWORK_SWITCHBOARD",))
+        self.assertEqual(install.upgrade_config(
+            f"LEGWORK_SWITCHBOARD=claude\n{install.RETIRED_KEYS[0]}=work\n")[1],
+            (install.RETIRED_KEYS[0],))
 
     def test_settings_are_documented(self):
         example = (REPO / "config.example").read_text(encoding="utf-8")
@@ -570,15 +577,56 @@ class InstallRunTests(unittest.TestCase):
             self.assertFalse((claude / "settings.json").exists())
             self.assertNotIn("LEGWORK_SWITCHBOARD_HEALTH", (legwork / "config").read_text())
 
-    def test_house_rules_note_is_for_shipping_and_fanout_only(self):
-        # The Claude Code switchboard reads no house rules: it writes no
-        # commits or PRs, and its reply rules are in its own skill.
-        with tempfile.TemporaryDirectory() as tmp:
-            _, _, out = self.run_install(Path(tmp), ["--with", "switchboard"], rules=False)
-            self.assertNotIn("house-rules.md", out)
+    def test_house_rules_note_counts_planning_sessions(self):
+        # The switchboard piece installs roadmap-planning, which commits and
+        # opens a docs PR, so it follows the house rules. With manual it is
+        # left out, and the protocol alone writes no commits.
+        for config, noted in (("LEGWORK_DIR=/x\n", True),
+                              ("LEGWORK_SWITCHBOARD=manual\n", False)):
+            with tempfile.TemporaryDirectory() as tmp:
+                _, _, out = self.run_install(Path(tmp), ["--with", "switchboard"],
+                                             config=config, rules=False)
+                self.assertEqual("house-rules.md" in out, noted, config)
+                if noted:
+                    self.assertIn("planning sessions", out)
         with tempfile.TemporaryDirectory() as tmp:
             _, _, out = self.run_install(Path(tmp), ["--with", "shipping"], rules=False)
             self.assertIn("house-rules.md", out)
+
+    def test_old_piece_and_flag_are_skipped_with_one_note(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, claude, out = self.run_install(Path(tmp), [
+                "--with", f"shipping,{OLD}", f"--{OLD}-profile", "work"])
+            self.assertTrue((claude / "commands" / "ship.md").is_file())
+            notes = [ln for ln in out.splitlines() if OLD in ln.lower()]
+            self.assertEqual(len(notes), 1, out)
+            self.assertTrue(notes[0].startswith("skip "), notes)
+
+    def test_set_switchboard_writes_only_claude_or_manual(self):
+        for given, written in ((OLD, "claude"), ("Manual", "manual"), ("claude", "claude")):
+            with tempfile.TemporaryDirectory() as tmp:
+                legwork, _, out = self.run_install(
+                    Path(tmp), ["--set", f"LEGWORK_SWITCHBOARD={given}"])
+                cfg = (legwork / "config").read_text()
+                self.assertIn(f"LEGWORK_SWITCHBOARD={written}\n", cfg)
+                self.assertNotIn(OLD, cfg.lower())
+                self.assertEqual(OLD in out.lower(), given == OLD, out)
+        with tempfile.TemporaryDirectory() as tmp, \
+                redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            self.run_install(Path(tmp), ["--set", "LEGWORK_SWITCHBOARD=other"])
+
+    def test_upgrade_note_names_only_what_changed(self):
+        for config, profile, mode in (
+                (f"LEGWORK_SWITCHBOARD={OLD}\n", False, True),
+                (f"LEGWORK_SWITCHBOARD=claude\n{install.RETIRED_KEYS[0]}=w\n", True, False)):
+            with tempfile.TemporaryDirectory() as tmp:
+                _, _, out = self.run_install(Path(tmp), ["--with", "shipping"],
+                                             config=config)
+                note = [ln for ln in out.splitlines()
+                        if ln.startswith("note:") and "no longer ships" in ln]
+                self.assertEqual(len(note), 1, out)
+                self.assertEqual("profile key" in note[0], profile, note)
+                self.assertEqual("now reads claude" in note[0], mode, note)
 
     def test_dry_run_writes_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -707,6 +755,17 @@ class RetiredSwitchboardTests(unittest.TestCase):
         text = (REPO / "house-rules.example.md").read_text(encoding="utf-8")
         self.assertNotIn("SOUL", text)
         self.assertNotIn("switchboard", text)
+        # Planning sessions commit and open a docs PR, so they follow them.
+        self.assertIn("roadmap-planning", text)
+
+    def test_smoke_test_cleans_up_before_the_panes_close(self):
+        # Left in the state file, smoke keeps the health watcher restarting
+        # a switchboard for a throwaway repo.
+        text = (ORCH / "docs" / "smoke-test.md").read_text(encoding="utf-8")
+        self.assertIn("switchboard-state remove smoke", text)
+        self.assertIn("switchboard-health-ctl off", text)
+        self.assertLess(text.index("switchboard-state remove smoke"),
+                        text.index("## Known gotcha"))
 
 
 class OnboardTests(unittest.TestCase):
@@ -717,6 +776,13 @@ class OnboardTests(unittest.TestCase):
     def test_onboard_lists_every_piece(self):
         for piece in install.PIECES:
             self.assertIn(f"`{piece}`", self.text, piece)
+
+    def test_pane_notify_hand_over_applies_with_a_manual_switchboard_too(self):
+        # pane-notify is offered with Herdr either way, so its Herdr config
+        # step must not sit under the Claude Code switchboard bullet.
+        at = self.text.index("with `pane-notify`: switch Herdr")
+        bullet = self.text.rfind("\n- ", 0, at)
+        self.assertNotIn("Claude Code switchboard", self.text[bullet:at])
 
     def test_onboard_offers_a_claude_or_manual_switchboard(self):
         self.assertIn("`LEGWORK_SWITCHBOARD=claude` or `manual`", self.text)

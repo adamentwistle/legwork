@@ -226,6 +226,12 @@ class RoadmapPlanningSkillTests(unittest.TestCase):
         self.assertIn("LEGWORK_OWN_OWNERS", self.body)
         self.assertIn("any owner not in `LEGWORK_OWN_OWNERS`", self.flat)
 
+    def test_follows_the_house_rules_for_its_commits_and_pr(self):
+        # It commits the legwork repo and opens a docs PR, so the user's
+        # authorship and attribution rules apply, as in /ship and /fanout.
+        self.assertIn("`{{LEGWORK_DIR}}/house-rules.md`", self.body)
+        self.assertIn("house-rules.md` applies to each commit, pull request", self.flat)
+
     def test_keeps_the_tracker_skill_and_the_live_machine_rule(self):
         self.assertIn("legwork-tracker", self.body)
         self.assertIn("orchestrator-only", self.body)

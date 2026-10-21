@@ -38,6 +38,21 @@ line from the `CYCLE` entry, into pane 1.
 - The answer reached pane 1 and `ANSWERED <id>: A` appeared under the decision.
 - After the cycle the pane title was `orch-smoke` again and the new session wrote "cycle worked".
 
+## Clean up
+
+Do this before you close the panes, pass or fail. Left on the switchboard's
+watch list, smoke keeps the health watcher (the `switchboard-health` piece)
+restarting a switchboard for the throwaway repo. From the legwork repo:
+
+```
+orchestration/bin/switchboard-state remove smoke
+orchestration/bin/switchboard-health-ctl off
+```
+
+On Windows, put `python` in front of each line. `off` says so when the
+watcher is already off. Then close both panes and delete the throwaway
+repo.
+
 ## Known gotcha
 
 `herdr agent prompt --wait` fails with `agent_prompt_stalled` on slash
