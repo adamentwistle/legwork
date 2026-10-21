@@ -367,7 +367,7 @@ class SwitchboardWaitTests(SwitchboardCase):
         rc, lines, _ = self.run_wait()
         self.assertEqual((rc, lines), (0, ["legwork legwork-151 DECISION"]))
 
-    # Finding 2: a trailing CYCLE or DONE needs Hermes while the pane is stopped,
+    # Finding 2: a trailing CYCLE or DONE needs the switchboard while the pane is stopped,
     # so it is reported on every start, not once.
     def test_trailing_cycle_is_reported_every_start_while_pane_idle(self):
         self.write(BOARD["legwork-163"], BOARD["legwork-164"], BOARD["legwork-165"])
@@ -894,6 +894,142 @@ class EarlierRunPaneTests(SwitchboardCase):
         self.herdr("done")
         self.assertEqual(self.run_wait()[:2],
                          (0, ["legwork legwork-101 DONE", "legwork pane done"]))
+
+
+DECISION = "## legwork-200 DECISION 2026-10-20 09:00\nAttempted: x\n\n"
+
+
+class PaneFlipTests(unittest.TestCase):
+    """Pane states that wake the switchboard, with herdr faked in process, so
+    these run on Windows too. A pane that only flips between idle and done
+    did nothing new, and while the latest entry is an open DECISION already
+    reported, the orchestrator is waiting on the user."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+        self.script = load_script()
+        self.script.USAGE_CACHE = str(self.tmp / "no-usage.json")
+        self.script.POLL = 0.2
+        self.script.STATE_FILE = str(self.tmp / "state.md")
+        self.repo = self.tmp / "legwork"
+        self.board = self.repo / ".legwork" / "switchboard.md"
+        self.board.parent.mkdir(parents=True)
+        self.board.write_text(BOARD["legwork-150"])
+        self.pane = ("working", 1)
+        self.script.pane_status = lambda pane, deadline: self.pane
+
+    def set_pane(self, status, seq):
+        self.pane = (status, seq)
+
+    def append(self, text):
+        with open(self.board, "a") as f:
+            f.write(text)
+
+    def main(self, argv):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = self.script.main(argv)
+        return rc, out.getvalue().splitlines()
+
+    def run_wait(self, *changes, timeout=1):
+        """One wait; each change is (delay, function, args) run while it waits."""
+        timers = [threading.Timer(d, f, a) for d, f, a in changes]
+        for t in timers:
+            t.start()
+        try:
+            return self.main(["--timeout", str(timeout), f"{self.repo}:w1:p2"])
+        finally:
+            for t in timers:
+                t.cancel()
+
+    def test_idle_to_done_between_waits_is_not_an_event(self):
+        self.set_pane("idle", 1)
+        self.assertEqual(self.run_wait(), (0, ["legwork pane idle"]))
+        self.set_pane("done", 2)
+        self.assertEqual(self.run_wait(), (124, ["timeout"]))
+        self.set_pane("idle", 3)
+        self.assertEqual(self.run_wait(), (124, ["timeout"]))
+
+    def test_flips_during_a_wait_are_not_events(self):
+        self.set_pane("done", 1)
+        self.assertEqual(self.run_wait(), (0, ["legwork pane done"]))
+        self.assertEqual(self.run_wait((0.3, self.set_pane, ["idle", 2]),
+                                       (0.6, self.set_pane, ["done", 3])),
+                         (124, ["timeout"]))
+
+    def test_working_then_stopped_is_still_an_event(self):
+        self.set_pane("idle", 1)
+        self.assertEqual(self.run_wait(), (0, ["legwork pane idle"]))
+        self.assertEqual(self.run_wait((0.3, self.set_pane, ["working", 2]),
+                                       (0.6, self.set_pane, ["done", 3]), timeout=10),
+                         (0, ["legwork pane done"]))
+
+    def test_unknown_then_idle_is_an_event(self):
+        self.set_pane("unknown", 1)
+        self.assertEqual(self.run_wait(), (124, ["timeout"]))
+        self.set_pane("idle", 2)
+        self.assertEqual(self.run_wait(), (0, ["legwork pane idle"]))
+
+    def test_blocked_and_gone_after_idle_are_still_events(self):
+        self.set_pane("idle", 1)
+        self.assertEqual(self.run_wait(), (0, ["legwork pane idle"]))
+        self.set_pane("blocked", 2)
+        self.assertEqual(self.run_wait(), (0, ["legwork pane blocked"]))
+        self.set_pane("gone", None)
+        self.assertEqual(self.run_wait(), (0, ["legwork pane gone"]))
+
+    def test_an_open_decision_already_reported_quiets_idle_and_done(self):
+        self.append(DECISION)
+        self.assertEqual(self.run_wait(), (0, ["legwork legwork-200 DECISION"]))
+        self.set_pane("idle", 2)
+        self.assertEqual(self.run_wait(), (124, ["timeout"]))
+        self.assertEqual(self.run_wait((0.3, self.set_pane, ["working", 3]),
+                                       (0.6, self.set_pane, ["done", 4])),
+                         (124, ["timeout"]))
+
+    def test_an_open_decision_does_not_quiet_blocked(self):
+        self.append(DECISION)
+        self.assertEqual(self.run_wait(), (0, ["legwork legwork-200 DECISION"]))
+        self.set_pane("blocked", 2)
+        self.assertEqual(self.run_wait(), (0, ["legwork pane blocked"]))
+
+    def test_an_answered_decision_brings_pane_reports_back(self):
+        self.append(DECISION)
+        self.assertEqual(self.run_wait(), (0, ["legwork legwork-200 DECISION"]))
+        self.set_pane("idle", 2)
+        self.assertEqual(self.run_wait(), (124, ["timeout"]))
+        self.append("ANSWERED legwork-200: b (2026-10-20 09:30)\n\n")
+        self.assertEqual(self.run_wait((0.3, self.set_pane, ["working", 3]),
+                                       (0.6, self.set_pane, ["idle", 4]), timeout=10),
+                         (0, ["legwork pane idle"]))
+
+    def test_a_decided_that_replaces_it_brings_pane_reports_back(self):
+        self.append(DECISION)
+        self.assertEqual(self.run_wait(), (0, ["legwork legwork-200 DECISION"]))
+        self.append("## legwork-201 DECIDED 2026-10-20 09:40\nReplaces legwork-200\n"
+                    "The user said in the pane: \"b\".\n\n")
+        self.assertEqual(self.run_wait((0.3, self.set_pane, ["idle", 2]), timeout=10),
+                         (0, ["legwork pane idle"]))
+
+    def test_a_new_decision_that_replaces_it_is_reported(self):
+        self.append(DECISION)
+        self.set_pane("idle", 2)
+        self.assertEqual(self.run_wait()[0], 0)
+        self.append("## legwork-202 DECISION 2026-10-20 10:00 Replaces legwork-200\n"
+                    "Attempted: y\n\n")
+        self.assertEqual(self.run_wait(), (0, ["legwork legwork-202 DECISION"]))
+        self.set_pane("done", 3)
+        self.assertEqual(self.run_wait(), (124, ["timeout"]))
+
+    def test_status_still_shows_the_pane_while_a_decision_is_open(self):
+        self.append(DECISION)
+        self.set_pane("idle", 2)
+        self.run_wait()
+        self.assertEqual(self.main(["--status", f"{self.repo}:w1:p2"]),
+                         (0, ["legwork legwork-200 DECISION Attempted: x",
+                              "legwork pane idle", "legwork wait none"]))
 
 
 class StateFileDefaultTests(unittest.TestCase):
