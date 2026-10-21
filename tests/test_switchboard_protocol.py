@@ -75,7 +75,6 @@ class ProtocolRulesTests(unittest.TestCase):
 
     def test_switchboard_is_claude_or_manual(self):
         self.assertIn("`LEGWORK_SWITCHBOARD`: `claude`", self.text)
-        self.assertNotRegex(self.text, re.compile("hermes", re.I))
 
     def test_no_reviewer_rule_and_no_names(self):
         self.assertNotIn("reviewer", self.text.lower())

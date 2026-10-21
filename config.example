@@ -61,21 +61,31 @@ LEGWORK_DAILY_CAP=8
 
 # --- Orchestration (OPTIONAL) ------------------------------------------------
 # Read by the orchestration layer (orchestration/): /fanout, /ship, /bugbot,
-# the switchboard-protocol skill and the Hermes switchboard skill. /onboard
-# writes them through orchestration/install.py; nothing else needs them.
+# the switchboard-protocol, switchboard and roadmap-planning skills and the
+# scripts in orchestration/bin/. /onboard writes them through
+# orchestration/install.py; nothing else needs them.
 # See orchestration/README.md.
 #
 # Set by the installer when fanout or the switchboard is installed.
 # LEGWORK_ORCHESTRATION=1
 #
-# Who relays an orchestrator's DECISIONs: hermes (a Hermes thread, with the
-# switchboard skill) or manual (you read .legwork/switchboard.md and type
-# answers into the pane yourself). Default: hermes.
-# LEGWORK_SWITCHBOARD=hermes
+# Who relays an orchestrator's DECISIONs: claude (a Claude Code session in
+# a Herdr pane named switchboard, started with /switchboard <project>) or
+# manual (you read .legwork/switchboard.md and type answers into the pane
+# yourself). Any other value reads as claude. Default: claude.
+# LEGWORK_SWITCHBOARD=claude
 #
-# The Hermes profile the switchboard skill was installed into. `default` is
-# ~/.hermes itself.
-# LEGWORK_HERMES_PROFILE=default
+# Set to 1 by the installer's switchboard-health piece (macOS and Windows).
+# It tells the switchboard the health watcher is there, so it switches it on
+# with switchboard-health-ctl when it starts watching and off when it stops.
+# The watcher checks the switchboard every 5 minutes, cycles its context and
+# restarts it if it dies. Unset means no watcher.
+# LEGWORK_SWITCHBOARD_HEALTH=1
+#
+# The arguments a new orchestrator's claude starts with, when the switchboard
+# opens one, and the switchboard's own when the health watcher restarts it.
+# Default: --model opus --effort high.
+# LEGWORK_SESSION_ARGS=--model opus --effort high
 #
 # The switchboard's own folder. switchboard-state writes the state file,
 # state.md, there, and switchboard-wait reads it: a CYCLE or DONE dated before a run's "started" line is

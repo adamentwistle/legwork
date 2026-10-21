@@ -31,7 +31,7 @@ def load(path, name):
 install = load(ORCH / "install.py", "orchestration_install_skills")
 
 # Scripts a skill may call before the slice that adds them has landed.
-PENDING_SCRIPTS = {"switchboard-health-ctl"}
+PENDING_SCRIPTS = set()
 
 # Generic shapes only, so no private name is written into a public test:
 # home folders, a second Claude config folder, tracker issue ids, the user's
@@ -115,8 +115,7 @@ class SwitchboardSkillTests(unittest.TestCase):
         self.assertEqual(meta.get("disable-model-invocation"), "true")
         self.assertIn("/switchboard resume", self.body)
 
-    def test_no_hermes_and_no_reviewers_rule(self):
-        self.assertNotRegex(self.body, re.compile(r"hermes", re.I))
+    def test_no_reviewers_rule(self):
         self.assertNotRegex(self.flat, re.compile(r"no reviewers|reviewers", re.I))
 
     def test_scripts_go_through_the_placeholder(self):
@@ -214,8 +213,7 @@ class RoadmapPlanningSkillTests(unittest.TestCase):
         self.body = text("roadmap-planning")
         self.flat = flat(self.body)
 
-    def test_no_hermes_and_no_reviewers_rule(self):
-        self.assertNotRegex(self.body, re.compile(r"hermes", re.I))
+    def test_no_reviewers_rule(self):
         self.assertNotRegex(self.flat, re.compile(r"reviewers", re.I))
 
     def test_linear_sweep_reads_the_settings_and_is_skipped_when_unset(self):

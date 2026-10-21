@@ -3,8 +3,8 @@
 The skill is prose an orchestrator follows, so these check that the lessons
 from earlier runs are in it (worker pane names, the follow-up wait, refused
 pushes, cleanup before a merge, the cycle threshold), that what the public
-copy already had is kept, and that nothing tied to one person's setup or to
-Hermes leaks in.
+copy already had is kept, and that nothing tied to one person's setup
+leaks in.
 """
 import re
 import unittest
@@ -142,10 +142,10 @@ class LeakTests(unittest.TestCase):
     # Generic shapes only, so no private name is written into a public test:
     # home folders, a second Claude config folder, tracker issue ids, and the
     # user's own name where the skill should say "the user".
-    WORK = re.compile(r"hermes|\badam\b|/Users/|/home/[a-z]|C:\\Users|"
+    WORK = re.compile(r"\badam\b|/Users/|/home/[a-z]|C:\\Users|"
                       r"~/\.claude-[a-z]|\b[A-Z]{2,5}-[0-9]+\b", re.I)
 
-    def test_no_work_names_or_hermes(self):
+    def test_no_work_names(self):
         for m in self.WORK.finditer(text()):
             self.fail(f"leak: {m.group(0)!r}")
 

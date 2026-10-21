@@ -1,6 +1,6 @@
 ---
 name: legwork-onboard
-description: Set up legwork the way this user wants it. Interviews them about each optional layer (the autonomy runner, shipping commands, the fanout orchestrator, Herdr, a Hermes or manual switchboard, Linear, the usage guard, house rules), then writes the config and installs only what they chose. Use for /onboard, "set up legwork", "install legwork", "configure legwork", "turn on the runner/orchestration/switchboard", or a re-run to change an earlier choice.
+description: Set up legwork the way this user wants it. Interviews them about each optional layer (the autonomy runner, shipping commands, the fanout orchestrator, Herdr, a Claude Code or manual switchboard, Linear, the usage guard, house rules), then writes the config and installs only what they chose. Use for /onboard, "set up legwork", "install legwork", "configure legwork", "turn on the runner/orchestration/switchboard", or a re-run to change an earlier choice.
 ---
 
 # Onboard
@@ -16,7 +16,9 @@ leave a setup they can re-run to change any answer.
 | Shipping | `/ship` (commit, push, PR, Bugbot, wrap) and `/bugbot` (the review loop) | `gh` signed in |
 | Orchestration | `/fanout` runs one project's roadmap to many PRs; the switchboard protocol has it report `DECISION`s instead of stopping | shipping |
 | Herdr | panes the orchestrator can start, watch and steer; strongly recommended | Herdr installed |
-| Switchboard | who relays an orchestrator's decisions: a Hermes thread, or the user by hand | orchestration; Hermes needs Herdr |
+| Switchboard | who relays an orchestrator's decisions: a Claude Code session in a Herdr pane, or the user by hand | orchestration; the Claude Code switchboard needs Herdr |
+| Health watcher | a script that checks the switchboard every 5 minutes, cycles its context and restarts it if it dies (macOS and Windows) | a Claude Code switchboard |
+| Pane notifications | a banner and a sound when an orchestrator or a normal session finishes or needs the user, and silence from workers and the switchboard (macOS and Windows) | Herdr |
 | Linear | an issue per change, kept in step with its PR | the Linear MCP |
 | Usage guard | a hook that makes long runs pause at a safe point before a usage limit | a usage cache (ccstatusline) |
 | Codex agent | a `codex` subagent that runs OpenAI's Codex CLI, for cross-model reviews in fanout and the quality gate | the `codex` CLI, signed in |
@@ -48,7 +50,7 @@ Look these up yourself; never ask the user for a fact you can read:
   scripts in `orchestration/bin/` through it too, not by their `python3`
   first line.
 - The Claude config dir: `$CLAUDE_CONFIG_DIR`, else `~/.claude`.
-- Tools: `command -v claude gh herdr hermes codex`, `gh auth status`, and
+- Tools: `command -v claude gh herdr codex`, `gh auth status`, and
   whether `HERDR_ENV` is set (this session runs inside Herdr).
 - A usage cache: `~/.cache/ccstatusline/usage.json`, or the path in
   `LEGWORK_USAGE_CACHE`.
@@ -83,12 +85,16 @@ in one line. Record every answer as you go.
    and ask whether to wait for that or carry on without. If `herdr` is
    there, offer to install its skill (`herdr --skill`).
 5. **Switchboard.** Only with orchestration. "Who relays an orchestrator's
-   decisions to you?" A) Hermes: one Hermes thread watches every
-   orchestrator, puts decisions in front of you, relays your answer and
-   cycles context (needs Herdr and Hermes). B) By hand: you read
+   decisions to you?" A) Claude Code: one Claude Code session in a Herdr
+   pane named `switchboard`, started with `/switchboard <project>`, watches
+   every orchestrator, puts decisions in front of you, relays your answer
+   and cycles context (needs Herdr). B) By hand: you read
    `.legwork/switchboard.md` (or `switchboard-wait --status <repo>:none`)
-   and type answers into the pane. Recommend A when both tools are there,
-   else B. For Hermes, ask which profile (`default` or a named one).
+   and type answers into the pane. Recommend A when Herdr is there, else B.
+   On macOS or Windows, ask two more. With A: "Install the health watcher,
+   which restarts the switchboard if it dies?" With Herdr, either way:
+   "Show a banner when an orchestrator finishes or needs you?" On Linux,
+   say both are macOS and Windows only and skip them.
 6. **Your repos.** Only with shipping or orchestration. "Which GitHub users
    or orgs are yours?" Suggest the ones `gh` reported. On these,
    orchestrators may merge when told to, put issue ids in PRs and push
@@ -117,7 +123,7 @@ in one line. Record every answer as you go.
 
 One screen: every setting with its value, every file that will be
 written, and where. Mark the ones outside the checkout (the Claude config
-dir, the Hermes profile, `settings.json`, the launchd agent or crontab).
+dir, `settings.json`, the launchd agent or crontab).
 Ask once: "Install this?" Nothing is written before a yes.
 
 ## 4. Install
@@ -133,7 +139,7 @@ it.
    - runner: `LEGWORK_DAILY_CAP`, `LEGWORK_DAILY_COST_CAP`, and
      `LEGWORK_LOCAL_REVIEW=1` or `LEGWORK_WEBHOOK_URL` / `LEGWORK_ALERT_URL`
    - `LEGWORK_BUGBOT_OWNERS`, `LEGWORK_OWN_OWNERS`
-   - `LEGWORK_SWITCHBOARD=hermes` or `manual`
+   - `LEGWORK_SWITCHBOARD=claude` or `manual`
    - `LEGWORK_LINEAR_TEAM`, `LEGWORK_LINEAR_TEAM_KEY`,
      `LEGWORK_LINEAR_SWEEP_LABELS`
    - `LEGWORK_PR_SKILL`, `LEGWORK_UI_SKILL`
@@ -148,10 +154,12 @@ it.
    interactive wizard and will hang this session.
 4. The optional layer: `<python> orchestration/install.py --with <pieces>`,
    where the pieces are the ones they chose: `shipping`, `fanout`,
-   `switchboard` (always with fanout), `herdr-skill`, `usage-guard`,
-   `codex-agent`, `hermes` (with `--hermes-profile <name>`). Run it with `--dry-run` first
-   when anything already exists at a destination, and show what it would
-   overwrite.
+   `switchboard` (always with fanout; with `manual` it installs the
+   protocol only), `herdr-skill`, `usage-guard`, `codex-agent`,
+   `switchboard-health` (the health watcher) and `pane-notify` (the pane
+   notifications). Run it with `--dry-run` first when anything already
+   exists at a destination, and show what it would overwrite. Pass on every
+   `note:` line it prints.
 
 ## 5. Check it, and hand over
 
@@ -160,15 +168,15 @@ it.
   each destination now exists.
 - With orchestration: `<python> orchestration/bin/switchboard-wait --status
   <checkout>:none` must exit 0.
-- With Hermes, these steps are the user's, because they change Hermes
-  itself. List them, do not run them:
-  - import the Claude skills a planning session uses into the profile:
-    `hermes -p <profile> import-agent claude-code --source <claude dir> --yes`
-  - set `prompt_caching.cache_ttl: 1h` in the profile, so a thread that
-    wakes every 30 minutes reuses its cache
+- With a Claude Code switchboard, these steps are the user's. List them,
+  do not run them:
+  - with `pane-notify`: switch Herdr's own toasts and Claude sounds off, as
+    the installer's note says, then `herdr server reload-config`
+  - with `switchboard-health`: trust the legwork repo in Claude Code (start
+    `claude` there once), since the watcher restarts the switchboard there
   - run the 15 minute plumbing test in `orchestration/docs/smoke-test.md`
 - In every repo an orchestrator will work in: `.legwork/` gitignored, and
-  the allow and deny rules in `orchestration/docs/hermes-setup.md`
+  the allow and deny rules in `orchestration/docs/first-run.md`
   ("Permissions") in its gitignored `.claude/settings.local.json`.
 
 Finish with one line per layer: installed, skipped, or waiting on the user,

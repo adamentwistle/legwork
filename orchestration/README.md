@@ -10,11 +10,12 @@ Only key updates and decisions with knock-on effects come up to you. The
 switchboard reads what every orchestrator writes, puts the open decisions in
 front of you one at a time, relays your answers back into the right pane,
 and cycles each orchestrator's context when it reaches a clean pause. The
-switchboard is a Hermes thread, or you, by hand.
+switchboard is a Claude Code session in a Herdr pane named `switchboard`,
+or you, by hand.
 
 The state lives in a file in each repo, `.legwork/switchboard.md`, not in
-anyone's context window. So the switchboard thread can reset, or an
-orchestrator can `/clear`, and nothing is lost.
+anyone's context window. So the switchboard can `/clear`, or an
+orchestrator can, and nothing is lost.
 
 Every piece is optional. Run `/onboard` in a legwork checkout and it asks
 which ones you want, then installs only those with `install.py`.
@@ -26,7 +27,10 @@ which ones you want, then installs only those with `install.py`.
 | `commands/ship.md`, `commands/bugbot.md` | `/ship` lands the working tree as a PR and runs the Bugbot loop; `/bugbot` is that loop on its own |
 | `commands/fanout.md`, `skills/fanout/` | `/fanout <project>`: load the queue, plan PR-sized tasks, dispatch them to panes or subagents, land each PR through the gate and Bugbot, clean up, wrap |
 | `skills/switchboard-protocol/` | The skill orchestrators follow: when to escalate, the entry format, context cycling, the usage budget, the quality gate |
-| `hermes/switchboard/` | The Hermes skill for the switchboard itself: check-ins, relaying answers, cycling, watching, planning sessions. A template; `install.py` fills in your paths |
+| `skills/switchboard/` | The skill for the switchboard session itself (`/switchboard <project>` or `/switchboard resume`): watching, relaying answers, cycling, opening orchestrator panes. A template; `install.py` fills in your paths |
+| `skills/roadmap-planning/` | The planning session that turns a feature into a roadmap and queues the `/fanout` prompt the switchboard starts |
+| `bin/switchboard-health`, `bin/switchboard-health-ctl` | The health watcher (macOS launchd, Windows Task Scheduler): checks the switchboard every 5 minutes, cycles its context and restarts it. The switchboard switches it on and off with the ctl |
+| `bin/pane-notify` | A Stop and Notification hook: a banner and a sound from orchestrators and normal sessions, silence from workers and the switchboard |
 | `bin/switchboard-wait` | The wait behind watch mode. On start it reports open decisions, a trailing `CYCLE` or `DONE` and panes already stopped, then returns when a watched repo gets a new `DECISION`, `CYCLE` or `DONE`, or a pane goes blocked or idle. `REPO:none` watches the file only, for a setup without Herdr |
 | `bin/switchboard-state` | The only writer of the switchboard's state file (`LEGWORK_SWITCHBOARD_DIR/state.md`): `add [--run]`, `pane`, `remove`, `checkin`, `cycle`, `uncycle`, `show`. `add --run` records when a run started, so `switchboard-wait` leaves out the previous run's `CYCLE` or `DONE` |
 | `bin/bugbot-wait` | Triggers and waits for a Cursor Bugbot verdict on a PR, for owners in `LEGWORK_BUGBOT_OWNERS` |
@@ -34,16 +38,18 @@ which ones you want, then installs only those with `install.py`.
 | `agents/codex.md` | The `codex` subagent: runs OpenAI's Codex CLI on one scoped task, for the cross-model review fanout and the quality gate ask for. The caller picks model and effort with `codex-model:` and `codex-effort:` lines; the description carries the routing guide |
 | `bin/usage-guard` | A hook that tells a long run to pause at a safe point before a usage limit, from the ccstatusline usage cache |
 | `install.py` | Installs the pieces you choose and writes their settings into `config` |
-| `docs/hermes-setup.md` | Setting up Hermes as the switchboard |
 | `docs/smoke-test.md` | A 15 minute plumbing test before a real run |
 | `docs/first-run.md` | The first real run on a project |
 
 ## Settings
 
 All in the legwork `config` file, documented in `config.example` under
-"Orchestration": who the switchboard is (`LEGWORK_SWITCHBOARD`), the
-Hermes profile, which GitHub owners are yours (`LEGWORK_OWN_OWNERS`), which
-have Bugbot (`LEGWORK_BUGBOT_OWNERS`), the Linear team, and the usage cache.
+"Orchestration": who the switchboard is (`LEGWORK_SWITCHBOARD`, `claude` or
+`manual`), whether the health watcher is installed
+(`LEGWORK_SWITCHBOARD_HEALTH`), the arguments new sessions start with
+(`LEGWORK_SESSION_ARGS`), which GitHub owners are yours
+(`LEGWORK_OWN_OWNERS`), which have Bugbot (`LEGWORK_BUGBOT_OWNERS`), the
+Linear team, and the usage cache.
 Rules every worker follows (authorship, attribution, spelling, style) live
 in `house-rules.md` beside `config`; see `house-rules.example.md`.
 
@@ -55,8 +61,9 @@ in `house-rules.md` beside `config`; see `house-rules.example.md`.
 2. **Long run, without you.** The orchestrator follows `switchboard-protocol`
    and usually runs `/fanout`. It writes `UPDATE`, `DECISION`, `DECIDED`,
    `CYCLE` and `DONE` entries as it goes.
-3. **Switchboard.** In Hermes, say "watch <project>" or "check in", and
-   answer decisions with a letter. By hand: `bin/switchboard-wait --status
+3. **Switchboard.** In a Herdr pane, start `claude` in the legwork repo
+   and run `/switchboard <project>`; answer decisions with a letter. By
+   hand: `bin/switchboard-wait --status
    <repo>:none` shows what is open; type the answer into the pane. On
    Windows, put `python` in front (`python bin/switchboard-wait ...`): the
    scripts' first line asks for `python3`, which there is usually the
@@ -77,7 +84,4 @@ Herdr's own skill (`herdr --skill`) where Claude Code finds it.
 ## Updating
 
 The copies here are the source of truth. Re-run `install.py` with the same
-pieces after a `git pull` to refresh the installed copies. Hermes edits its
-own skills when it learns something, so diff the installed Hermes copy
-against `hermes/switchboard/SKILL.md` after a run and bring anything useful
-back here.
+pieces after a `git pull` to refresh the installed copies.
