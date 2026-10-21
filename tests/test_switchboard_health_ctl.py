@@ -130,6 +130,7 @@ class CtlCase(unittest.TestCase):
         for key in CLEAN_ENV:
             os.environ.pop(key, None)
         os.environ["PATH"] = str(self.bin)
+        self.add_tool("herdr")
         self.claude_home = self.home / ".claude-alt"
         os.environ["CLAUDE_CONFIG_DIR"] = str(self.claude_home)
         self.state_dir = self.claude_home / "switchboard"
@@ -154,13 +155,24 @@ class CtlCase(unittest.TestCase):
         self.out, self.err = out.getvalue(), err.getvalue()
         return rc
 
-    def add_claude(self, where=None):
+    def add_tool(self, name, where=None):
+        """A stand-in program the script can find; never run."""
         d = where or self.bin
         d.mkdir(parents=True, exist_ok=True)
-        c = d / ("claude.exe" if os.name == "nt" else "claude")
+        c = d / (name + ".exe" if os.name == "nt" else name)
         c.write_text("#!/bin/sh\n", encoding="utf-8")
         c.chmod(0o755)
         return d
+
+    def add_claude(self, where=None):
+        return self.add_tool("claude", where)
+
+    def on_path(self, *folders):
+        os.environ["PATH"] = os.pathsep.join([os.environ["PATH"]] + [str(f) for f in folders])
+
+    def drop_herdr(self):
+        for c in self.bin.glob("herdr*"):
+            c.unlink()
 
     def log_line(self, **over):
         rec = {"time": "2026-10-10T19:20:05+0100",
@@ -194,7 +206,7 @@ class MacOnTests(CtlCase):
                          [os.path.normpath(a) for a in (sys.executable, str(HEALTH), "--once",
                                                         "--state-dir", str(self.state_dir))])
         self.assertTrue(plist["EnvironmentVariables"]["PATH"].startswith(
-            f"/opt/homebrew/bin:{claude_dir}:"), plist["EnvironmentVariables"]["PATH"])
+            f"{claude_dir}:/opt/homebrew/bin:"), plist["EnvironmentVariables"]["PATH"])
         self.assertEqual(plist["StartInterval"], 300)
         self.assertIs(plist["RunAtLoad"], True)
         self.assertEqual(os.path.normpath(plist["StandardOutPath"]),
@@ -213,6 +225,36 @@ class MacOnTests(CtlCase):
         self.assertEqual(env["CLAUDE_CONFIG_DIR"], str(self.claude_home))
         self.assertEqual(env["LEGWORK_DIR"], str(self.tmp / "queue"))
         self.assertNotIn("LEGWORK_CONFIG", env)
+
+    def test_on_puts_the_herdr_and_notifier_folders_on_the_job_path(self):
+        self.tools.codes["print"] = 113
+        claude_dir = self.add_claude()
+        self.drop_herdr()
+        herdr_dir = self.add_tool("herdr", self.tmp / "herdr-home")
+        notifier_dir = self.add_tool("terminal-notifier", self.tmp / "notifier-home")
+        self.on_path(herdr_dir, notifier_dir)
+        self.assertEqual(self.run_ctl("on"), 0, self.err)
+        path = self.loaded_plist()["EnvironmentVariables"]["PATH"]
+        self.assertTrue(path.startswith(":".join([str(claude_dir), str(herdr_dir),
+                                                  str(notifier_dir), "/opt/homebrew/bin:"])),
+                        path)
+
+    def test_on_without_herdr_is_an_error_and_loads_nothing(self):
+        self.tools.codes["print"] = 113
+        self.add_claude()
+        self.drop_herdr()
+        self.assertEqual(self.run_ctl("on"), 1)
+        self.assertIn("herdr", self.err)
+        self.assertNotIn("bootstrap", self.tools.verbs())
+        self.assertFalse(self.plist.exists())
+
+    def test_on_passes_switchboard_state_in_the_job_environment(self):
+        self.tools.codes["print"] = 113
+        self.add_claude()
+        os.environ["SWITCHBOARD_STATE"] = str(self.tmp / "boards" / "state.md")
+        self.assertEqual(self.run_ctl("on"), 0, self.err)
+        env = self.loaded_plist()["EnvironmentVariables"]
+        self.assertEqual(env["SWITCHBOARD_STATE"], str(self.tmp / "boards" / "state.md"))
 
     def test_on_without_a_claude_config_dir_leaves_it_unset(self):
         self.tools.codes["print"] = 113
@@ -286,7 +328,7 @@ class MacOnTests(CtlCase):
         nvm = self.add_claude(self.home / ".nvm" / "versions" / "node" / "v20.20.0" / "bin")
         self.assertEqual(self.run_ctl("on"), 0, self.err)
         path = self.loaded_plist()["EnvironmentVariables"]["PATH"]
-        self.assertEqual(path.split(":")[1], str(nvm))
+        self.assertEqual(path.split(":")[:2], [str(nvm), str(self.bin)])
 
     @unittest.skipIf(os.name == "nt", "nvm keeps POSIX bin folders")
     def test_on_prefers_the_newest_nvm_node(self):
@@ -295,7 +337,7 @@ class MacOnTests(CtlCase):
         new = self.add_claude(self.home / ".nvm" / "versions" / "node" / "v20.20.0" / "bin")
         self.assertEqual(self.run_ctl("on"), 0, self.err)
         path = self.loaded_plist()["EnvironmentVariables"]["PATH"]
-        self.assertEqual(path.split(":")[1], str(new))
+        self.assertEqual(path.split(":")[0], str(new))
 
     def test_on_without_claude_is_an_error_and_loads_nothing(self):
         self.tools.codes["print"] = 113
@@ -461,7 +503,8 @@ class WindowsTests(CtlCase):
         self.assertEqual(command, r"C:\Py\pythonw.exe")
         self.assertEqual(arguments, subprocess.list2cmdline([
             str(HEALTH), "--once", "--state-dir", str(self.state_dir),
-            "--env", f"CLAUDE_CONFIG_DIR={self.claude_home}", "--login", "111"]))
+            "--env", f"CLAUDE_CONFIG_DIR={self.claude_home}", "--path", str(self.bin),
+            "--login", "111"]))
 
     def test_task_passes_the_legwork_settings_it_finds(self):
         os.environ["LEGWORK_DIR"] = str(self.tmp / "queue")
@@ -472,6 +515,28 @@ class WindowsTests(CtlCase):
                       arguments)
         self.assertIn(subprocess.list2cmdline(
             ["--env", "LEGWORK_SESSION_ARGS=--model opus --effort high"]), arguments)
+
+    def test_task_passes_switchboard_state(self):
+        os.environ["SWITCHBOARD_STATE"] = str(self.tmp / "boards" / "state.md")
+        self.run_ctl("on")
+        _, _, arguments = self.task()
+        self.assertIn(subprocess.list2cmdline(
+            ["--env", f"SWITCHBOARD_STATE={self.tmp / 'boards' / 'state.md'}"]), arguments)
+
+    def test_task_puts_the_herdr_folder_on_its_path(self):
+        self.drop_herdr()
+        herdr_dir = self.add_tool("herdr", self.tmp / "herdr home")
+        self.on_path(herdr_dir)
+        self.assertEqual(self.run_ctl("on"), 0, self.err)
+        _, _, arguments = self.task()
+        self.assertIn(subprocess.list2cmdline(["--path", str(herdr_dir)]), arguments)
+
+    def test_on_without_herdr_is_an_error_and_registers_nothing(self):
+        self.drop_herdr()
+        self.assertEqual(self.run_ctl("on"), 1)
+        self.assertIn("herdr", self.err)
+        self.assertNotIn("/Create", self.tools.verbs())
+        self.assertIsNone(self.tools.task)
 
     def test_task_without_a_claude_config_dir_passes_none(self):
         del os.environ["CLAUDE_CONFIG_DIR"]

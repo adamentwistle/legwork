@@ -16,13 +16,16 @@
                    $CLAUDE_CONFIG_DIR/switchboard, else ~/.claude/switchboard, written out
                    in full (it must exist before loading: launchd does not create log
                    directories)
-    @CLAUDE_BIN@   directory holding the claude binary, from `dirname $(which claude)`
-    @ENVIRONMENT@  CLAUDE_CONFIG_DIR and the legwork settings (LEGWORK_DIR, LEGWORK_CONFIG,
-                   LEGWORK_SESSION_ARGS) that were set when the watcher was switched on,
-                   one key and string each; nothing when none was set
+    @TOOL_DIRS@    the folders holding claude, herdr and terminal-notifier (when found),
+                   joined with ":", e.g. from `dirname $(which herdr)`
+    @ENVIRONMENT@  CLAUDE_CONFIG_DIR, SWITCHBOARD_STATE and the legwork settings
+                   (LEGWORK_DIR, LEGWORK_CONFIG, LEGWORK_SESSION_ARGS) that were set when
+                   the watcher was switched on, one key and string each; nothing when
+                   none was set
 
-  A launch agent's default PATH is /usr/bin:/bin:/usr/sbin:/sbin, where herdr and
-  terminal-notifier are missing, so PATH puts /opt/homebrew/bin first.
+  A launch agent's default PATH is /usr/bin:/bin:/usr/sbin:/sbin, where claude, herdr
+  and terminal-notifier are missing, so PATH puts their folders first, then
+  /opt/homebrew/bin.
 
   switchboard-health-ctl fills the placeholders itself. By hand, the same plist goes in
   @STATE_DIR@ and is loaded with launchctl bootstrap gui/$(id -u) <that plist>.
@@ -43,7 +46,7 @@
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>PATH</key>
-		<string>/opt/homebrew/bin:@CLAUDE_BIN@:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<string>@TOOL_DIRS@:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
 @ENVIRONMENT@
 	</dict>
 	<key>StartInterval</key>

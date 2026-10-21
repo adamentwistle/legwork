@@ -20,22 +20,26 @@ watcher is off after every login or reboot until you switch it on. If an old
 plist is at ~/Library/LaunchAgents/dev.legwork.switchboard-health.plist, `on`
 and `status` warn that it loads at login and print the command to remove it.
 This script never deletes it. claude is looked for on PATH, then under
-~/.nvm/versions/node/*/bin (newest first), and its folder goes on the job's PATH.
+~/.nvm/versions/node/*/bin (newest first), and herdr and terminal-notifier on
+PATH. Their folders go first on the job's PATH, since a launch agent does not
+get your shell's PATH. Without claude or herdr, `on` stops and says so.
 
 Windows: `on` writes a Task Scheduler task, DIR/dev.legwork.switchboard-health.xml,
 registers it as dev.legwork.switchboard-health with `schtasks /Create /XML`,
 and starts its first pass with `schtasks /Run`; `off` runs `schtasks /Delete`.
 The task runs only while you are signed in, every 5 minutes, with the
 interpreter running this script (its windowless pythonw.exe when there is
-one, so no console window opens). It carries this sign-in's logon time, and
+one, so no console window opens), with herdr's folder put first on its PATH
+(herdr must be on PATH when you switch it on). It carries this sign-in's
+logon time, and
 a pass in a later sign-in switches the watcher off, so here too it is off
 after every sign-in or restart until you switch it on. A task left from an
 earlier sign-in counts as off: `on` replaces it and `off` deletes it.
 
-The job gets CLAUDE_CONFIG_DIR and the legwork settings LEGWORK_DIR,
-LEGWORK_CONFIG and LEGWORK_SESSION_ARGS from this script's environment, the
-ones that are set: in the plist's environment on macOS, as --env flags on the
-task's command line on Windows. DIR is --state-dir, else
+The job gets CLAUDE_CONFIG_DIR, SWITCHBOARD_STATE and the legwork settings
+LEGWORK_DIR, LEGWORK_CONFIG and LEGWORK_SESSION_ARGS from this script's
+environment, the ones that are set: in the plist's environment on macOS, as
+--env flags on the task's command line on Windows. DIR is --state-dir, else
 LEGWORK_SWITCHBOARD_DIR (environment or legwork config), else
 $CLAUDE_CONFIG_DIR/switchboard, else ~/.claude/switchboard.
 
@@ -69,7 +73,8 @@ WINDOWS = os.name == "nt"
 ROOT = os.path.dirname(os.path.dirname(HERE))  # the legwork checkout
 TEMPLATE = os.path.join(ROOT, "orchestration", "launchd", LABEL + ".plist.template")
 HEALTH = os.path.join(HERE, "switchboard-health")
-PASS_ENV = ("CLAUDE_CONFIG_DIR", "LEGWORK_DIR", "LEGWORK_CONFIG", "LEGWORK_SESSION_ARGS")
+PASS_ENV = ("CLAUDE_CONFIG_DIR", "SWITCHBOARD_STATE", "LEGWORK_DIR", "LEGWORK_CONFIG",
+            "LEGWORK_SESSION_ARGS")
 USAGE = "Usage: switchboard-health-ctl on|off|status [--state-dir DIR]"
 TASK_XML = """<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -175,6 +180,17 @@ def login_mark():
     return mod.login_mark()
 
 
+def find_tool(name):
+    """The folder holding a program found on PATH, else None."""
+    found = shutil.which(name)
+    return os.path.dirname(os.path.abspath(found)) if found else None
+
+
+def no_herdr():
+    print("could not find herdr on PATH: the watcher needs it, so it is not switched on",
+          file=sys.stderr)
+
+
 def failure(what, done):
     detail = ((done.stderr or "") or (done.stdout or "")).strip()
     return f"{what} failed (exit {done.returncode}): {detail}"
@@ -211,7 +227,7 @@ def find_claude():
     return None
 
 
-def render(state_dir, claude_bin, env):
+def render(state_dir, tool_dirs, env):
     """The template with its placeholders filled in. The leading comment stays as it is."""
     with open(TEMPLATE, encoding="utf-8") as f:
         text = f.read()
@@ -220,7 +236,7 @@ def render(state_dir, claude_bin, env):
                     for k, v in env.items())
     body = body.replace("@ENVIRONMENT@\n", pairs)
     for key, value in (("@PYTHON@", interpreter()), ("@LEGWORK@", ROOT),
-                       ("@STATE_DIR@", state_dir), ("@CLAUDE_BIN@", claude_bin)):
+                       ("@STATE_DIR@", state_dir), ("@TOOL_DIRS@", ":".join(tool_dirs))):
         body = body.replace(key, escape(value))
     return head + sep + body
 
@@ -242,10 +258,18 @@ def mac_on(state_dir):
         print("could not find claude on PATH or under ~/.nvm/versions/node/*/bin",
               file=sys.stderr)
         return 1
+    herdr_bin = find_tool("herdr")
+    if herdr_bin is None:
+        no_herdr()
+        return 1
+    tool_dirs = []
+    for d in (claude_bin, herdr_bin, find_tool("terminal-notifier")):
+        if d and d not in tool_dirs:
+            tool_dirs.append(d)
     os.makedirs(state_dir, exist_ok=True)
     plist = os.path.join(state_dir, LABEL + ".plist")
     with open(plist, "w", encoding="utf-8", newline="\n") as f:
-        f.write(render(state_dir, claude_bin, job_env()))
+        f.write(render(state_dir, tool_dirs, job_env()))
     print(f"Wrote {plist}")
     if not dry_run(state_dir):
         return 1
@@ -285,19 +309,21 @@ def task_state():
     return "on"
 
 
-def task_arguments(state_dir, mark):
+def task_arguments(state_dir, mark, herdr_bin):
     args = [HEALTH, "--once", "--state-dir", state_dir]
     for key, value in job_env().items():
         args += ["--env", f"{key}={value}"]
+    # The task gets the PATH saved for this user, not this shell's.
+    args += ["--path", herdr_bin]
     if mark:
         args += ["--login", mark]
     return subprocess.list2cmdline(args)
 
 
-def task_xml(state_dir, mark):
+def task_xml(state_dir, mark, herdr_bin):
     return TASK_XML.format(start=time.strftime("%Y-%m-%dT%H:%M:%S"),
                            command=escape(interpreter()),
-                           arguments=escape(task_arguments(state_dir, mark)),
+                           arguments=escape(task_arguments(state_dir, mark, herdr_bin)),
                            workdir=escape(state_dir))
 
 
@@ -314,11 +340,15 @@ def windows_on(state_dir):
     if state == "on":
         print("The health watcher is already on.")
         return 0
+    herdr_bin = find_tool("herdr")
+    if herdr_bin is None:
+        no_herdr()
+        return 1
     os.makedirs(state_dir, exist_ok=True)
     mark = login_mark()
     path = os.path.join(state_dir, LABEL + ".xml")
     with open(path, "w", encoding="utf-16", newline="\n") as f:
-        f.write(task_xml(state_dir, mark))
+        f.write(task_xml(state_dir, mark, herdr_bin))
     print(f"Wrote {path}")
     if not mark:
         print("Note: this sign-in's logon time could not be read, so the watcher will not "

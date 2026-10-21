@@ -2,12 +2,13 @@
 """Check on the switchboard and the orchestrators it watches. No LLM.
 
 Usage: switchboard-health --once [--dry-run] [--state-dir DIR]
-                          [--env KEY=VALUE ...] [--login MARK]
+                          [--env KEY=VALUE ...] [--path DIR ...] [--login MARK]
 
 Run every 5 minutes by switchboard-health-ctl: a launch agent on macOS, a
-Task Scheduler task on Windows. One pass reads the switchboard's state file,
-DIR/state.md (written only by switchboard-state), and `herdr agent list`,
-then checks in this order:
+Task Scheduler task on Windows. One pass reads the switchboard's state file
+(written only by switchboard-state): $SWITCHBOARD_STATE when it is set, else
+DIR/state.md, as for switchboard-state and switchboard-wait. It reads
+`herdr agent list` too, then checks in this order:
 
   1. The switchboard pane: the agent whose name is "switchboard", else whose
      title is (herdr's title, else its terminal title). Blocked (a prompt it
@@ -46,10 +47,12 @@ shown writes a note to stderr and is logged as failed, and the fingerprint
 stays open, so the next pass tries again.
 
 Restart: when the switchboard is missing, open a workspace in the legwork
-folder (LEGWORK_DIR, else this checkout) with DISABLE_AUTO_UPDATE=true and the
-job's CLAUDE_CONFIG_DIR, when it has one (a scheduled job has no current pane
-to split), name the pane, `herdr agent start switchboard --kind claude ...
--- <LEGWORK_SESSION_ARGS>` (default "--model opus --effort high"), then send
+folder (LEGWORK_DIR, else this checkout) with DISABLE_AUTO_UPDATE=true,
+LEGWORK_SWITCHBOARD_DIR=DIR, and the job's CLAUDE_CONFIG_DIR and
+SWITCHBOARD_STATE when it has them (a scheduled job has no current pane to
+split), so the new switchboard finds the same state file. Then name the
+pane, `herdr agent start switchboard --kind claude ... --
+<LEGWORK_SESSION_ARGS>` (default "--model opus --effort high"), then send
 "/rename switchboard" and "/switchboard resume". The folder must be one Claude
 Code already trusts, or the start stops at the trust question. At most one
 restart an hour. Missing again inside that hour, or a start that ends in
@@ -74,7 +77,13 @@ macOS launch agent goes at logout by itself.
 
 --env KEY=VALUE sets one environment variable for the pass, before any
 setting is read. The Windows task uses it to carry CLAUDE_CONFIG_DIR and the
-legwork settings, as the launch agent's environment does on macOS.
+legwork settings, as the launch agent's environment does on macOS. --path DIR
+puts DIR first on PATH for the pass; the Windows task uses it for the folder
+herdr was found in when the watcher was switched on.
+
+With no stdout or stderr (the Windows task runs under pythonw.exe), the pass
+appends them to DIR/health.out.log and DIR/health.err.log, the files the
+launch agent writes on macOS.
 
 Each pass appends one JSON line to DIR/health.jsonl and keeps fingerprints,
 two-pass counts, the off count, stall clocks, the last pass and the last
@@ -92,11 +101,13 @@ error line, its alerts carried over, and the pass goes on to the next.
 writes nothing (not even the log), so it is safe against the real state.
 --state-dir defaults to LEGWORK_SWITCHBOARD_DIR (environment or legwork
 config), else $CLAUDE_CONFIG_DIR/switchboard, else ~/.claude/switchboard:
-the folder switchboard-state and switchboard-wait use.
+the folder switchboard-state and switchboard-wait use when SWITCHBOARD_STATE
+is not set. The watcher's own files always go in DIR.
 
 Exit 0 after a pass, 2 on bad arguments.
 """
 import base64
+import html
 import json
 import os
 import re
@@ -124,7 +135,8 @@ POWERSHELL = shutil.which("powershell.exe") or (
                  "powershell.exe") if os.environ.get("SystemRoot") else None)
 WAIT = os.path.join(HERE, "switchboard-wait")
 CTL = os.path.join(HERE, "switchboard-health-ctl")
-STATE_FILE = None  # DIR/state.md, set per pass
+STATE_FILE = None  # $SWITCHBOARD_STATE, else DIR/state.md, set per pass
+STATE_DIR = None  # DIR, set per pass
 NAME = "switchboard"
 TITLE = "legwork switchboard"
 SESSION_ARGS = "--model opus --effort high"
@@ -148,6 +160,7 @@ ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # into the script. The app id is PowerShell's own, which Windows knows.
 TOAST = r"""
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 $null = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
 $null = [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime]
 $e = [System.Security.SecurityElement]
@@ -176,7 +189,48 @@ def legwork_dir():
 
 
 def session_args():
-    return shlex.split(setting("LEGWORK_SESSION_ARGS") or SESSION_ARGS)
+    """LEGWORK_SESSION_ARGS as a list. On Windows a backslash is a path
+    separator, not an escape, so it is kept; quotes still group words."""
+    value = setting("LEGWORK_SESSION_ARGS") or SESSION_ARGS
+    if not WINDOWS:
+        return shlex.split(value)
+    args = []
+    for word in shlex.split(value, posix=False):
+        if len(word) >= 2 and word[0] == word[-1] and word[0] in "\"'":
+            word = word[1:-1]
+        args.append(word)
+    return args
+
+
+def state_file(state_dir):
+    """The switchboard's state file: $SWITCHBOARD_STATE, else DIR/state.md."""
+    named = os.environ.get("SWITCHBOARD_STATE")
+    return os.path.expanduser(named) if named else os.path.join(state_dir, "state.md")
+
+
+def plain_error(text):
+    """powershell.exe's stderr in plain words. Windows PowerShell 5.1 writes
+    it as CLIXML when stderr is not a console, often with a progress record
+    first, so only its error strings are kept."""
+    if not text.lstrip().startswith("#< CLIXML"):
+        return text
+    parts = re.findall(r'<S S="Error">(.*?)</S>', text, re.S)
+    words = re.sub(r"_x([0-9A-Fa-f]{4})_", lambda m: chr(int(m.group(1), 16)), "".join(parts))
+    return " ".join(html.unescape(words).split())
+
+
+def log_to_files(state_dir):
+    """Under pythonw.exe there is no stdout or stderr: append them to DIR's
+    log files, as the launch agent does on macOS."""
+    for stream, name in (("stdout", "health.out.log"), ("stderr", "health.err.log")):
+        if getattr(sys, stream) is not None:
+            continue
+        try:
+            os.makedirs(state_dir, exist_ok=True)
+            setattr(sys, stream, open(os.path.join(state_dir, name), "a", buffering=1,
+                                      encoding="utf-8", errors="replace", newline="\n"))
+        except OSError:
+            pass
 
 
 def call(argv, timeout, env=None):
@@ -307,6 +361,9 @@ def find_pane(agents, pane):
 def wait_status(repo, pane):
     """switchboard-wait --status lines for one repo, repo name dropped, or (None, why).
 
+    Each line starts with the repo folder's name, which may hold spaces, so
+    that whole name is taken off, not just the first word.
+
     The wait reads the same state file, so a CYCLE or DONE from before the run
     started is left out and never counts as this run's end.
     """
@@ -318,7 +375,9 @@ def wait_status(repo, pane):
     if done.returncode != 0:
         return None, (f"switchboard-wait --status {repo} exit {done.returncode}: "
                       f"{(done.stderr or '').strip()[:200]}")
-    return [l.split(" ", 1)[1] for l in (done.stdout or "").splitlines() if " " in l], None
+    name = os.path.basename(os.path.abspath(os.path.expanduser(repo))) + " "
+    return [line[len(name):] for line in (done.stdout or "").splitlines()
+            if line.startswith(name)], None
 
 
 def load_json(path):
@@ -526,7 +585,7 @@ def notify(text):
     except (OSError, subprocess.TimeoutExpired) as e:
         return f"{tool}: {e}"
     if done.returncode != 0:
-        detail = ((done.stderr or "") or (done.stdout or "")).strip()[:200]
+        detail = plain_error((done.stderr or "") or (done.stdout or "")).strip()[:200]
         return f"{tool} exit {done.returncode} {detail}".strip()
     return None
 
@@ -536,6 +595,10 @@ def restart():
     env = []
     if os.environ.get("CLAUDE_CONFIG_DIR"):
         env += ["--env", f"CLAUDE_CONFIG_DIR={os.environ['CLAUDE_CONFIG_DIR']}"]
+    # The new switchboard reads and writes the state file this pass reads.
+    env += ["--env", f"LEGWORK_SWITCHBOARD_DIR={STATE_DIR}"]
+    if os.environ.get("SWITCHBOARD_STATE"):
+        env += ["--env", f"SWITCHBOARD_STATE={STATE_FILE}"]
     # An oh-my-zsh update question at shell start eats the first letter herdr
     # types, so `claude` arrives as `laude`. Elsewhere the variable does nothing.
     env += ["--env", "DISABLE_AUTO_UPDATE=true"]
@@ -655,8 +718,8 @@ def check_cycle(p, marker, to, sw_idle):
 
 
 def run_pass(state_dir, dry, login=None):
-    global STATE_FILE
-    STATE_FILE = os.path.join(state_dir, "state.md")
+    global STATE_FILE, STATE_DIR
+    STATE_FILE, STATE_DIR = state_file(state_dir), state_dir
     p = Pass(load_json(os.path.join(state_dir, "health-state.json")), dry, now(), state_dir)
     current = login_mark() if login else None
     if current and current != login:
@@ -680,7 +743,7 @@ def run_pass(state_dir, dry, login=None):
     sb = read_state(STATE_FILE)
     count_off(p, sb)
     if sb is None:
-        p.record["notes"].append(f"no state file in {state_dir}: the switchboard has not run")
+        p.record["notes"].append(f"no state file at {STATE_FILE}: the switchboard has not run")
         p.keep()
         p.finish(state_dir)
         return 0
@@ -741,7 +804,7 @@ def main(argv):
     if "-h" in argv or "--help" in argv:
         print(__doc__.strip())
         return 0
-    once, dry, state_dir, login, env = False, False, None, None, {}
+    once, dry, state_dir, login, env, path = False, False, None, None, {}, []
     args = list(argv)
     while args:
         arg = args.pop(0)
@@ -753,6 +816,8 @@ def main(argv):
             state_dir = args.pop(0)
         elif arg == "--login" and args:
             login = args.pop(0)
+        elif arg == "--path" and args:
+            path.append(args.pop(0))
         elif arg == "--env" and args and ENV_KEY.fullmatch(args[0].partition("=")[0]) \
                 and "=" in args[0]:
             key, _, value = args.pop(0).partition("=")
@@ -764,8 +829,12 @@ def main(argv):
         print(__doc__.strip(), file=sys.stderr)
         return 2
     os.environ.update(env)
-    state_dir = state_dir or default_state_dir()
-    return run_pass(os.path.abspath(os.path.expanduser(state_dir)), dry, login)
+    if path:
+        os.environ["PATH"] = os.pathsep.join(path + [os.environ.get("PATH", "")]).rstrip(
+            os.pathsep)
+    state_dir = os.path.abspath(os.path.expanduser(state_dir or default_state_dir()))
+    log_to_files(state_dir)
+    return run_pass(state_dir, dry, login)
 
 
 if __name__ == "__main__":
