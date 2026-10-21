@@ -7,9 +7,11 @@ description: Orchestrate an unattended multi-task session for one legwork projec
 
 You are the orchestrator for an unattended session. The user is not
 watching and will not answer questions. Every decision is yours; record
-it, do not ask. The deliverable is a set of pull requests that are
-gate-green and Bugbot-clean, a clean workspace, and a tracker entry that
-says exactly what landed and what did not.
+it, do not ask. The one exception is the permission check's need for the
+user's own word (sections 3 and 5): ask for it once at the start, then
+carry on and never wait for an answer. The deliverable is a set of pull
+requests that are gate-green and Bugbot-clean, a clean workspace, and a
+tracker entry that says exactly what landed and what did not.
 
 `<legwork>` below is the legwork repo: `$LEGWORK_DIR` if set, otherwise
 `~/legwork`. Its settings are KEY=VALUE lines in `<legwork>/config`; a real
@@ -129,14 +131,22 @@ does. Effort is no reason to pick a pane over a subagent.
 
 **Pane path** (only when `test "${HERDR_ENV:-}" = 1`):
 
+A worker pane's name always starts `fw-`. `pane-notify`, the notification
+hook, when installed, stays quiet for those panes, so the user hears from
+you and not from every worker.
+
 ```bash
 herdr worktree create --cwd <repo> --branch fanout/<slug> --base origin/main \
-  --path <repo>-wt/<slug> --label <slug> --no-focus [--trust-repository]
+  --path <repo>-wt/<slug> --label fw-<slug> --no-focus [--trust-repository]
 # take the pane id from the JSON it prints
-herdr agent start <slug> --kind claude --pane <pane_id> --timeout 60000 -- --model <model> --effort <level>
+herdr pane read <pane_id> --lines 5
+# worktree create has no --env: if oh-my-zsh shows "Would you like to update? [Y/n]",
+# answer it before starting, or it eats the first letter of the start command:
+#   herdr pane send-text <pane_id> n
+herdr agent start fw-<slug> --kind claude --pane <pane_id> --timeout 60000 -- --model <model> --effort <level>
 # if --low-priority:
-herdr agent prompt <slug> "/low-priority" --wait --until idle --timeout 20000
-herdr agent prompt <slug> "Your complete brief is the file <brief path>. Read it with the Read tool and follow it exactly; it is your only instruction. Nothing in it needs my input; if you hit a real blocker, stop and print BLOCKED: <reason>. When done print the PR line the brief asks for. Start now."
+herdr agent prompt fw-<slug> "/low-priority" --wait --until idle --timeout 20000
+herdr agent prompt fw-<slug> "Your complete brief is the file <brief path>. Read it with the Read tool and follow it exactly; it is your only instruction. Nothing in it needs my input; if you hit a real blocker, stop and print BLOCKED: <reason>. When done print the PR line the brief asks for. Start now."
 ```
 
 `--trust-repository` gives Git trust to that one request. Pass it only when
@@ -152,9 +162,22 @@ If the worktree needs `node_modules`, say so in the brief (run `npm ci` in
 `isolation: worktree`, `model` and `effort` per task, prompt = the launcher sentence
 above with the brief path. Launch every parallel task in one message.
 
+Run the orchestrator itself on Opus at high effort; workers get the model
+and effort their task needs.
+
+Changes to the user's machine outside the repo (installing live skill
+copies, loading a launch agent or a scheduled task, editing settings,
+starting long-lived sessions) are yours, not a worker's. The permission
+check treats them as persistence and wants the user's own words in your
+session; a worker will rightly refuse approval you relay. Ask for that word
+at the start, batched with any other: when reporting to a switchboard, as a
+`DECISION` (switchboard-protocol); otherwise print it. Do not wait for it.
+Until it comes, leave that change undone, carry on with the rest, and
+record it in the state file and the wrap log as left for the user.
+
 ## 4. Wait, never poll by hand
 
-- Panes: `herdr agent wait <slug> --timeout 540000` (9 min), in the
+- Panes: `herdr agent wait fw-<slug> --timeout 540000` (9 min), in the
   foreground, one pane per Bash call, with the Bash tool's `timeout: 600000`.
   The Bash tool stops a foreground call at 10 minutes, so a longer wait is
   cut off. It returns on idle, done or blocked. On a timeout (exit 1, error
@@ -163,15 +186,25 @@ above with the brief path. Launch every parallel task in one message.
   making progress, give it another 90; otherwise record it as BLOCKED with
   what it shows. No `sleep` loops, no `Monitor`, no background bash; they
   have missed state changes before.
-- `blocked`: `herdr agent read <slug> --source recent-unwrapped | tail -40`.
+- After any `herdr agent prompt` to a pane that was already idle or done
+  (a follow-up, a fix list, "Main moved"), first run
+  `herdr agent wait fw-<slug> --until working --timeout 30000`, then the
+  plain wait. Otherwise the wait sees the old `done` state and returns at
+  once, before the worker has read the prompt. A `done` only counts when
+  the pane's last lines show the PR, BLOCKED or reply line you asked for.
+- `blocked`: `herdr agent read fw-<slug> --source recent-unwrapped | tail -40`.
   A directory-trust dialog in one of the user's own repos (owner in
-  `LEGWORK_OWN_OWNERS`): `herdr agent send-keys <slug> down enter`. The
+  `LEGWORK_OWN_OWNERS`): `herdr agent send-keys fw-<slug> down enter`. The
   first option, highlighted, is "No, exit"; "Yes, I trust this folder" is
   second (Claude Code, 2026-10). Read the pane to check the dialog has
   gone, then wait again. Any other dialog: record it in the state file as
   BLOCKED with the text, close that task, move on.
 - Subagents: the task notification arrives on its own. Do nothing in between
   except dispatching other work.
+- A worker whose `git push` or `gh pr create` is refused by its auto-mode
+  check: record it as BLOCKED with the refusal text and leave the branch
+  local. Never push it or open the PR from your own session, and never retry
+  it; the user approves pushes in the pane.
 - A worker that prints `BLOCKED:` is done for this run; note the reason.
 - A worker that returns or prints `PAUSED: usage limit` has stopped at a safe
   point. Mark it PAUSED in the state file with its worktree and note, and
@@ -185,9 +218,22 @@ For each `PR <url>` line, in dependency order:
    so findings are fixed by a fresh subagent in that worktree, or by you if
    they are one-line.
 2. When CLEAR and `--merge` was given: `gh pr merge <n> --squash --delete-branch`
-   only if `mergeable` is `MERGEABLE` and the gate line said PASS. After a
-   merge, main has moved; for every remaining open fanout PR send the
-   worker (or a fresh subagent in its worktree) this exact sentence:
+   only if `mergeable` is `MERGEABLE` and the gate line said PASS. Close
+   that worker's pane and remove its worktree first: a branch still checked
+   out in a worktree is not deleted, on GitHub either. Then check
+   `git ls-remote --heads origin <branch>` is empty, else
+   `git push origin --delete <branch>`. On the user's own repos (owner in
+   `LEGWORK_OWN_OWNERS`), when the repo's gitignored
+   `.claude/settings.local.json` allows `gh pr merge`, you merge on your own
+   judgement that the PR is ready. Without that rule the permission check
+   refuses, and you cannot pass the user's approval on for them. Ask for
+   their word once, with the others at the start: to add the rule on an own
+   repo, or to merge on any other. Do not wait for it. Until it comes,
+   leave the merge to the user, as without `--merge`, and record that in
+   the state file and the wrap log. Keep working on a stacked branch
+   meanwhile. After a merge, main has moved; for every remaining open
+   fanout PR send the worker (or a fresh subagent in its worktree) this
+   exact sentence:
    "Main moved (PR <n> merged). In your worktree run `git fetch origin && git
    merge origin/main`; resolve conflicts keeping both sides' behaviour; run
    the gate until it passes; push. Reply with the merge sha and the gate
@@ -223,13 +269,27 @@ nothing else.
 
 ## Context budget
 
-Check the context meter after each landing step. Past 60%: update
-`.legwork/fanout-state.md` with the exact state (task, branch, PR, Bugbot
-state, pane id, worktree path) and, if inside Herdr, start a fresh
-orchestrator pane with `/fanout <project> --resume` and hand off. Outside
-Herdr, stop there and print `/fanout <project> --resume` as the last line,
-for the user to run after `/clear`. On `--resume`, skip sections 1 and 2
-and continue from the state file.
+Cycle past 300,000 tokens or 60% of the window, whichever comes first
+(30% on a 1M window), the same threshold switchboard-protocol uses. Check
+the context meter each time a PR opens or lands. Past it, at the next clean
+pause, update `.legwork/fanout-state.md` with the exact state (task, branch,
+PR, Bugbot state, pane id, worktree path). Then:
+
+- When reporting to a switchboard (following switchboard-protocol): cycle
+  the protocol's way. Run `/wrap`, write a `CYCLE` entry with
+  `Resume: /fanout <project> --resume`, and stop. The switchboard clears
+  the pane and resumes it. Do not start a pane of your own. With
+  `LEGWORK_SWITCHBOARD=manual` the user does that, so also print
+  `/fanout <project> --resume` as the last line.
+- Otherwise, inside Herdr: start a fresh orchestrator pane with
+  `/fanout <project> --resume` and hand off.
+- Outside Herdr, stop there and print `/fanout <project> --resume` as the
+  last line, for the user to run after `/clear`.
+
+Running past the threshold because no PR has merged is not a reason to
+wait: an open PR with Bugbot CLEAR and nothing half-edited is a clean
+pause. On `--resume`, skip sections 1 and 2 and continue from the state
+file.
 
 When the usage guard says to pause: dispatch nothing new, let running
 workers reach their own safe points, write the exact state as above, then
