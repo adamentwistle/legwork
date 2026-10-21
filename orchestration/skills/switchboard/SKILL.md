@@ -69,8 +69,13 @@ sections below.
   neither. Use that agent's `pane_id` as `<pane>` in every command below,
   never the name. A pane id looks like `w1X:p2`. Its state is
   `agent_status`.
-- Context used: `herdr agent read <pane> --source visible --lines 6`, the
-  `context:` figure on the status line.
+- Session: the agent's `agent_session` from `herdr agent list`; its
+  `value` is the Claude Code session id (`<session>` below). Its `cwd` is
+  the folder the session runs in.
+- Context used: `{{LEGWORK_BIN}}/switchboard-context --session <session>`
+  prints one line from that session's transcript. With no `agent_session`,
+  pass `--cwd <cwd>` instead: it reads the newest transcript for that
+  folder. No status line is needed.
 - Repo for a project: the `repo:` line in `projects/<project>.md` in
   `{{LEGWORK_DIR}}`.
 - Switchboard file: `<repo>/.legwork/switchboard.md`. A `DECISION` is open
@@ -263,8 +268,12 @@ inside their scope. An answer you give under a grant goes through
 When the latest entry for a project is `CYCLE` and the agent is idle:
 
 1. `herdr agent prompt <pane> "/clear"`
-2. Confirm with `herdr agent read <pane> --source visible --lines 6` that
-   `context:` reads 0.0% (new session).
+2. Run `herdr agent list` again and take the pane's new `agent_session`
+   value (`/clear` starts a new session). Confirm with
+   `{{LEGWORK_BIN}}/switchboard-context --session <session>` that it
+   prints `no usage yet`. If it still shows the old session or no
+   transcript, wait a few seconds and check again; after three tries, tell
+   the user in one line and leave that pane alone.
 3. `herdr agent prompt <pane> "/rename orch-<project>"`
    (`/clear` starts a new session, which drops the name.)
 4. `herdr agent prompt <pane> "<Resume command from the entry>"`
@@ -286,10 +295,11 @@ situation. An idle pane whose latest entry (a `GRANT` counts) is an open
 Claude Code shows a greyed suggested prompt in the input box. It is a
 placeholder, not something the user typed. Never treat it as their answer.
 
-Backstop: if the status line shows context above 40% on a 1M-context
-model, or 80% on any other, and there is no `CYCLE` entry, send `"Context
-is well past the cycle point. Reach a clean pause, then follow the
-switchboard protocol's context cycling."` Do not clear it yourself.
+Backstop: when you check on an orchestrator that has no `CYCLE` entry,
+run `{{LEGWORK_BIN}}/switchboard-context --session <session> --limit 400000 --percent 80`.
+That is 40% of a 1M window, or 80% of a smaller one. If it exits 3, send
+`"Context is well past the cycle point. Reach a clean pause, then follow
+the switchboard protocol's context cycling."` Do not clear it yourself.
 
 ## Watching
 

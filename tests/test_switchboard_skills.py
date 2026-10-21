@@ -123,6 +123,19 @@ class SwitchboardSkillTests(unittest.TestCase):
         for code in ("Exit 0", "Exit 3", "Exit 2"):
             self.assertIn(code, section)
 
+    def test_orchestrator_context_reads_the_transcript_not_a_status_line(self):
+        # The setup doc says no status line is needed, so no step may wait
+        # on a context figure shown in a pane.
+        self.assertNotRegex(self.flat, re.compile(
+            r"`context:` figure|`context:` reads|status line shows", re.I))
+        cycling = self.body.split("## Cycling orchestrators", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("{{LEGWORK_BIN}}/switchboard-context --session", cycling)
+        self.assertIn("agent_session", cycling)
+        self.assertIn("no usage yet", flat(cycling))
+        backstop = flat(cycling.split("Backstop:", 1)[1])
+        self.assertIn("--limit 400000 --percent 80", backstop)
+        self.assertIn("exits 3", backstop)
+
     def test_no_reviewers_rule(self):
         self.assertNotRegex(self.flat, re.compile(r"no reviewers|reviewers", re.I))
 

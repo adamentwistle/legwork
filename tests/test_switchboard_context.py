@@ -11,6 +11,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -19,7 +20,8 @@ import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-SCRIPT = HERE.parent / "orchestration" / "bin" / "switchboard-context"
+REPO = HERE.parent
+SCRIPT = REPO / "orchestration" / "bin" / "switchboard-context"
 SESSION = "11111111-2222-3333-4444-555555555555"
 
 
@@ -46,6 +48,18 @@ def model_line(model_id):
             "attachment": {"type": "model", "identity": {"modelId": model_id}}}
 
 
+def checkout_copy(root):
+    """The script, settings.py and the module it reads config with, copied
+    into a bare checkout at `root`, so the script's last config source
+    (<checkout>/config) is one the test owns, not the developer's."""
+    for rel in ("orchestration/bin/switchboard-context", "orchestration/settings.py",
+                "core/legwork_common.py"):
+        dest = root / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(str(REPO / rel), str(dest))
+    return root / "orchestration" / "bin" / "switchboard-context"
+
+
 def user(text="hi"):
     return {"type": "user", "isSidechain": False,
             "message": {"role": "user", "content": text}}
@@ -60,6 +74,7 @@ class ContextTests(unittest.TestCase):
         self.work = self.tmp / "work dir"
         self.work.mkdir()
         self.mod = load()
+        self.script = checkout_copy(self.tmp / "checkout")
 
     def write(self, entries, session=SESSION, folder=None, tail=""):
         folder = folder or self.mod.project_slug(str(self.work))
@@ -77,7 +92,7 @@ class ContextTests(unittest.TestCase):
         if session:
             base["CLAUDE_CODE_SESSION_ID"] = session
         base.update(env)
-        done = subprocess.run([sys.executable, str(SCRIPT), *args],
+        done = subprocess.run([sys.executable, str(self.script), *args],
                               capture_output=True, text=True, env=base,
                               cwd=str(cwd or self.work))
         return done.returncode, done.stdout, done.stderr
@@ -170,6 +185,14 @@ class ContextTests(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertIn("13.0%", out)
 
+    def test_the_checkout_config_is_read_last(self):
+        self.write([assistant(0, 130000, 0)])
+        (self.tmp / "checkout" / "config").write_text(
+            "LEGWORK_CONTEXT_WINDOW=200k\n", encoding="utf-8")
+        rc, out, _ = self.run_context()
+        self.assertEqual(rc, 3, out)
+        self.assertIn("65.0%", out)
+
     def test_a_1m_model_line_gives_the_window_however_far_back(self):
         # Claude Code names the model on an attachment line near the start
         # of a session; the assistant lines carry the plain model id.
@@ -242,6 +265,19 @@ class ContextTests(unittest.TestCase):
         rc, out, err = self.run_context()
         self.assertEqual(rc, 0, err)
         self.assertIn("42,000", out)
+
+    def test_a_stale_session_id_gives_way_soon_after_a_fast_cycle(self):
+        # The health watcher cleared the session seconds after the old one
+        # last wrote, so the new transcript leads the old by less than half
+        # a minute. The old one was not written at this call, so it is stale.
+        now = time.time()
+        old = self.write([assistant(0, 310000, 0)])
+        new = self.write([assistant(0, 12000, 0)], session="after-clear")
+        os.utime(old, (now - 25, now - 25))
+        os.utime(new, (now - 3, now - 3))
+        rc, out, err = self.run_context()
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("12,000", out)
 
     def test_session_flag_wins_over_the_environment(self):
         self.write([assistant(0, 42000, 0)])
