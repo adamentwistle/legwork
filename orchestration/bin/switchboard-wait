@@ -41,8 +41,11 @@ switchboard last heard blocked and has to learn the block is gone.
 
 And while a repo's latest entry is an open DECISION that has been reported
 (the cursor is on it, whether this wait or an earlier one printed it), its
-pane going idle or done is not reported at all: the orchestrator is waiting
-on the user, which the switchboard already knows. A DECISION printed on
+pane going idle or done is not reported: the orchestrator is waiting on
+the user, which the switchboard already knows. The one exception is a pane
+going straight from blocked to idle or done, which is reported as above,
+because the switchboard last heard blocked; resting after that is quiet
+again. A DECISION printed on
 start, or one that lands in the same poll as the pane stopping, is printed
 on its own. Once the DECISION is answered or replaced, or any later entry
 lands (a GRANT from switchboard-answer too), pane reports come back as usual.
@@ -346,9 +349,10 @@ def awaiting_user(w):
 def pane_event(mem, seen, quiet=False):
     """Status to report for one pane observation, or None. Updates mem.
 
-    idle to done or done to idle with the same seq is not reported, and with
+    idle to done or done to idle with the same seq is not reported. With
     quiet (an open DECISION already reported) idle and done are not
-    reported at all.
+    reported either, except straight out of blocked: the switchboard last
+    heard blocked and has to learn the block is gone.
     """
     if seen is None:
         return None
@@ -363,7 +367,8 @@ def pane_event(mem, seen, quiet=False):
     mem["status"], mem["seq"] = status, seq
     if status not in STOPPED or (status, seq) == before:
         return None
-    if status in RESTING and (quiet or (before[0] in RESTING and seq == before[1])):
+    flip = before[0] in RESTING and seq == before[1]
+    if status in RESTING and (flip or (quiet and before[0] != "blocked")):
         return None
     return status
 

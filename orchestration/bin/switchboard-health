@@ -27,7 +27,12 @@ DIR/state.md, as for switchboard-state and switchboard-wait. It reads
      watching on purpose.
   4. The orchestrators. A pane blocked, or idle with no trailing CYCLE or
      DONE, on two passes in a row: prompt
-     "SWITCHBOARD HEALTH check-in <project>: <condition>". A pane working
+     "SWITCHBOARD HEALTH check-in <project>: <condition>". An idle pane
+     whose repo's latest entry in .legwork/switchboard.md (GRANT included)
+     is a DECISION that `switchboard-wait --status` lists as open gets no
+     check-in: the orchestrator is waiting on the user, not stalled. An
+     ANSWERED line, a later UPDATE or a GRANT brings the check-in back, and
+     a blocked pane behind a DECISION is still a check-in. A pane working
      whose .legwork/switchboard.md mtime and herdr state_change_seq have not
      moved for 60 minutes: prompt "SWITCHBOARD HEALTH stall <project>: <N>
      min with no change" and show a banner.
@@ -380,6 +385,25 @@ def wait_status(repo, pane):
             if line.startswith(name)], None
 
 
+HEADING = re.compile(r"^## (\S+) ([A-Z]+)\b", re.M)  # any entry, GRANT included
+
+
+def waiting_on_user(repo, lines):
+    """True when the repo's latest switchboard.md entry (GRANT included) is a
+    DECISION that the --status lines (repo name dropped) list as open: the
+    orchestrator is resting on the user, not stalled. An ANSWERED line, a
+    later UPDATE or a GRANT ends it."""
+    try:
+        with open(os.path.join(repo, ".legwork", "switchboard.md"), encoding="utf-8",
+                  errors="replace") as f:
+            heads = HEADING.findall(f.read())
+    except (OSError, ValueError):
+        return False
+    if not heads or heads[-1][1] != "DECISION":
+        return False
+    return [heads[-1][0], "DECISION"] in [line.split()[:2] for line in lines]
+
+
 def load_json(path):
     try:
         with open(path, encoding="utf-8") as f:
@@ -666,7 +690,7 @@ def check_repo(p, agents, project, repo, pane, sw_idle, cycle, to, stalls):
     condition = None
     if status == "blocked":
         condition = "pane blocked"
-    elif status in READY and not trailing:
+    elif status in READY and not trailing and not waiting_on_user(repo, lines):
         condition = "pane idle with no CYCLE or DONE"
     if condition:
         a = p.observe(repo, pane, f"check-in:{condition}")

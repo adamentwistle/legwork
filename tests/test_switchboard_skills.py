@@ -200,6 +200,16 @@ class SwitchboardSkillTests(unittest.TestCase):
         self.assertIn("Never pass `--run` when you attach to a run already going",
                       self.flat)
 
+    def test_an_orchestrator_behind_an_open_decision_is_not_nudged(self):
+        # It is waiting on the user, so idle there is not a stall; the health
+        # watcher sends no idle check-in for it either.
+        cycling = self.section("Cycling orchestrators")
+        self.assertIn("not stalled: it is waiting on the user; do not nudge it", cycling)
+        self.assertIn("or open `DECISION` as its latest entry", self.section("Check-in"))
+        health = self.section("Health watcher prompts")
+        self.assertIn("open `DECISION`", health)
+        self.assertIn("still prompts", health)
+
     def test_run_checks_for_any_existing_orchestrator_first(self):
         part = self.section("Opening a pane")
         self.assertNotIn("no idle `orch-<project>` pane", part)

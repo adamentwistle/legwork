@@ -826,6 +826,65 @@ class OrchestratorTests(HealthCase):
         observed = [o["condition"] for o in self.log()[-1]["observed"]]
         self.assertIn("check-in:pane idle with no CYCLE or DONE", observed)
 
+    IDLE = "check-in:pane idle with no CYCLE or DONE"
+    ASKED = ("## legwork-1 UPDATE 2026-10-10 18:00\nStarted.\n\n"
+             "## legwork-2 DECISION 2026-10-10 19:00\nAttempted: x\nOptions: A or B\n\n")
+
+    def observed(self):
+        return [o["condition"] for o in self.log()[-1]["observed"]]
+
+    def two_passes(self, orch_status="idle", start=0):
+        self.agents(sw("idle"), orch(orch_status))
+        self.run_pass(at=T0 + start * MIN)
+        self.run_pass(at=T0 + (start + 5) * MIN)
+
+    def test_idle_behind_an_open_decision_is_waiting_on_the_user(self):
+        self.watch("legwork")
+        self.board(self.repo, self.ASKED)
+        self.two_passes()
+        self.assertNotIn(self.IDLE, self.observed())
+        self.assertEqual(self.prompt_texts("SWITCHBOARD HEALTH check-in"), [])
+
+    def test_done_behind_an_open_decision_is_waiting_on_the_user(self):
+        self.watch("legwork")
+        self.board(self.repo, self.ASKED)
+        self.two_passes("done")
+        self.assertNotIn(self.IDLE, self.observed())
+
+    def test_an_answered_decision_brings_the_idle_check_in_back(self):
+        self.watch("legwork")
+        self.board(self.repo, self.ASKED + "ANSWERED legwork-2: A (2026-10-10 19:10)\n\n")
+        self.two_passes()
+        self.assertIn(self.IDLE, self.observed())
+
+    def test_a_later_update_brings_the_idle_check_in_back(self):
+        self.watch("legwork")
+        self.board(self.repo, self.ASKED + "## legwork-3 UPDATE 2026-10-10 19:20\nOn it.\n\n")
+        self.two_passes()
+        self.assertIn(self.IDLE, self.observed())
+
+    def test_a_grant_after_the_decision_brings_the_idle_check_in_back(self):
+        self.watch("legwork")
+        self.board(self.repo, self.ASKED + '## legwork-g1 GRANT 2026-10-10 19:20\n'
+                                           'User: "go on"\nScope: x\n\n')
+        self.two_passes()
+        self.assertIn(self.IDLE, self.observed())
+
+    def test_blocked_behind_an_open_decision_still_prompts(self):
+        self.watch("legwork")
+        self.world.running = True
+        self.board(self.repo, self.ASKED)
+        self.two_passes("blocked")
+        self.assertEqual(self.prompt_texts("SWITCHBOARD HEALTH check-in"),
+                         ["SWITCHBOARD HEALTH check-in legwork: pane blocked"])
+
+    def test_waiting_on_the_user_needs_the_decision_open_in_the_status(self):
+        self.board(self.repo, self.ASKED)
+        lines = ["legwork-2 DECISION Attempted: x", "pane idle", "wait none"]
+        self.assertTrue(self.mod.waiting_on_user(str(self.repo), lines))
+        self.assertFalse(self.mod.waiting_on_user(str(self.repo), lines[1:]))
+        self.assertFalse(self.mod.waiting_on_user(str(self.tmp / "nowhere"), lines))
+
     def test_check_in_waits_for_an_idle_switchboard(self):
         self.watch("legwork")
         self.agents(sw("working"), orch("blocked"))
