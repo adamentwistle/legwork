@@ -154,8 +154,9 @@ it.
    interactive wizard and will hang this session.
 4. The optional layer: `<python> orchestration/install.py --with <pieces>`,
    where the pieces are the ones they chose: `shipping`, `fanout`,
-   `switchboard` (always with fanout; with `manual` it installs the
-   protocol only), `herdr-skill`, `usage-guard`, `codex-agent`,
+   `switchboard` (always with fanout; it installs the protocol and
+   roadmap-planning skills, and the switchboard skill unless `manual`),
+   `herdr-skill`, `usage-guard`, `codex-agent`,
    `switchboard-health` (the health watcher) and `pane-notify` (the pane
    notifications). Run it with `--dry-run` first when anything already
    exists at a destination, and show what it would overwrite. Pass on every
@@ -173,6 +174,10 @@ it.
     the installer's note says, then `herdr server reload-config`
   - with `switchboard-health`: trust the legwork repo in Claude Code (start
     `claude` there once), since the watcher restarts the switchboard there
+  - with a Claude Code switchboard: the allow rules its session needs, in
+    the legwork repo's gitignored `.claude/settings.local.json`, from
+    `orchestration/docs/switchboard-setup.md`, and a status line that
+    prints the `context:` figure, so the switchboard can cycle itself
   - with orchestration: run the 15 minute plumbing test in
     `orchestration/docs/smoke-test.md`, including its clean-up step
 - In every repo an orchestrator will work in: `.legwork/` gitignored, and
