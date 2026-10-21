@@ -72,6 +72,19 @@ orchestration setting.
   `<claude dir>/switchboard`. `SWITCHBOARD_STATE` in the environment names
   the state file itself instead.
 
+The scripts find `<legwork>/config` through the environment. For each
+setting they look at the environment variable first, then the file named by
+`$LEGWORK_CONFIG`, then `$LEGWORK_DIR/config`, then `config` in the
+checkout. So when `<legwork>` is not the checkout, set
+`LEGWORK_DIR=<legwork>` in the environment the switchboard and
+`switchboard-health-ctl` run in. On a Mac, `export` it in your shell
+profile. On Windows, run `setx LEGWORK_DIR <legwork>` or add it to your
+user environment variables, then restart Herdr, since a variable set this
+way reaches only programs started after it. Without it the scripts read
+the checkout's `config`, and the health watcher restarts the switchboard in
+the checkout. `LEGWORK_CONFIG=<file>` points the scripts at a config file
+instead; set `LEGWORK_DIR` in that file too, for the restart folder.
+
 ## Allow rules the switchboard session needs
 
 Without allow rules the switchboard stalls on a permission prompt. Put them
@@ -112,7 +125,8 @@ A Bash rule matches the command as the skill types it, so `<bin>` must be
 the exact text in front of each script name in the installed skill. On a
 Mac that is the absolute path of `<checkout>/orchestration/bin`. On Windows
 it is the interpreter's path, a space, then that folder, all with forward
-slashes. Copy it from the installed skill:
+slashes. Copy it from the installed skill. On Windows, run this in
+Git Bash, the shell Claude Code's Bash tool uses there:
 
 ```
 grep -o '[^`(]*/bin/switchboard-wait' <claude dir>/skills/switchboard/SKILL.md | head -1
@@ -157,9 +171,10 @@ Run one switchboard per machine. It watches every project from the one
 session.
 
 1. Open a Herdr pane in `<legwork>` and start Claude Code there with the
-   session arguments:
+   session arguments, the value of `LEGWORK_SESSION_ARGS` (unset:
+   `--model opus --effort high`):
    ```
-   claude --model opus --effort high
+   claude <LEGWORK_SESSION_ARGS>
    ```
 2. Type `/switchboard <project>`. Name several projects to watch them all.
    A name is a legwork project or an orchestrator's session name. The skill
@@ -174,10 +189,12 @@ own:
 
 ```
 herdr tab create --cwd <legwork> --env DISABLE_AUTO_UPDATE=true --label switchboard
-herdr agent start switchboard --kind claude --pane <pane id> -- --model opus --effort high
+herdr agent start switchboard --kind claude --pane <pane id> -- <LEGWORK_SESSION_ARGS>
 ```
 
-Take the pane id from the JSON the first command prints. Add
+Take the pane id from the JSON the first command prints. Put the value of
+`LEGWORK_SESSION_ARGS` after the `--` (unset: `--model opus --effort
+high`), the same arguments the health watcher restarts it with. Add
 `--env CLAUDE_CONFIG_DIR=<claude dir>` to the first line when your Claude
 config dir is not the default. `DISABLE_AUTO_UPDATE=true` stops oh-my-zsh
 asking to update when the shell starts; that question eats the first
@@ -265,7 +282,11 @@ shows its output, then schedules the job. The dry run sends, starts and
 writes nothing, so read it before you rely on the watcher. `on` when it is
 already on, or `off` when it is already off, says so and does nothing.
 `status` says whether it is on and describes the last pass. `--state-dir
-DIR` puts the job's files in another folder than `LEGWORK_SWITCHBOARD_DIR`.
+DIR` puts the job's files in another folder than `LEGWORK_SWITCHBOARD_DIR`,
+and the watcher then also looks for the switchboard's `state.md` in DIR.
+So pass it only with `SWITCHBOARD_STATE` set to the switchboard's state
+file; otherwise the watcher finds no state file, checks nothing, and
+switches itself off after two passes.
 
 - **Mac:** a launchd agent, `dev.legwork.switchboard-health`. `on` renders
   `orchestration/launchd/dev.legwork.switchboard-health.plist.template`
