@@ -84,4 +84,5 @@ Herdr's own skill (`herdr --skill`) where Claude Code finds it.
 ## Updating
 
 The copies here are the source of truth. Re-run `install.py` with the same
-pieces after a `git pull` to refresh the installed copies.
+pieces after a `git pull` to refresh the installed copies. A piece legwork
+no longer ships is skipped with one line, and the rest still install.
