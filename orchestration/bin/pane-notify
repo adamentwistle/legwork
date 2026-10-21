@@ -1,0 +1,219 @@
+#!/usr/bin/env python3
+"""Claude Code hook: a banner and a sound from the panes the user wants to hear.
+
+Usage: pane-notify   (as a Stop and Notification hook; reads the hook's JSON on stdin)
+
+Herdr's own toasts and sounds can be muted per agent kind only, so with them
+off this hook decides per pane. It notifies from an orchestrator pane (label
+or title orch-<project>) and from a normal Claude session. Not `herdr
+notification show`: with Herdr's toasts off it answers shown:true and shows
+nothing. It says nothing from:
+
+- the switchboard pane (label, title or window title `switchboard`),
+- a /fanout worker pane (label `fw-<slug>`; the label beats the title, because
+  a worker's session title is whatever its task is called),
+- a subagent (`agent_id` in the input) or a SubagentStop,
+- headless Claude (`claude -p`, entrypoint sdk-*), which inherits the pane id
+  of whatever pane ran it,
+- outside Herdr, or a pane Herdr cannot describe (better silent than a
+  worker's ping).
+
+Stop shows "<name>: done" with the first line of the last message (or
+"Claude finished") and the done sound. Notification shows "<name>: needs
+you" with the request sound for permission_prompt and elicitation_dialog;
+other kinds (idle_prompt repeats a done) are quiet. <name> is the pane's
+label, else its title, else its window title, else its directory's name.
+
+On a Mac the banner comes from terminal-notifier (on PATH, else the Homebrew
+path) with the body on stdin, and the sound is Herdr's chime,
+~/.config/herdr/sounds/{done,request}.mp3, through afplay. On Windows the
+banner is a toast through Windows PowerShell (powershell.exe, no extra
+modules), with the title and body passed in the environment so no quoting
+can break it, and the sound is a built-in Windows sound from
+%SystemRoot%\\Media, played by Python's winsound in a detached process. The
+toast and the banner carry no sound of their own. A missing sound file
+means no sound; the banner still shows. herdr is $HERDR_BIN_PATH (Herdr sets
+it in every pane), else herdr on PATH. Always exits 0 and prints nothing.
+"""
+import base64
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+HERDR_TIMEOUT = 5
+NOTIFY_TIMEOUT = 10
+TITLE_MAX = 80
+BODY_MAX = 120
+ASKS = {"permission_prompt", "elicitation_dialog"}
+QUIET_NAME = "switchboard"
+WORKER_PREFIX = "fw-"
+
+WINDOWS = sys.platform == "win32"
+NOTIFIER = "/opt/homebrew/bin/terminal-notifier"
+HERDR_SOUNDS = Path.home() / ".config" / "herdr" / "sounds"
+MEDIA = Path(os.environ.get("SystemRoot") or "C:\\Windows") / "Media"
+WINDOWS_SOUNDS = {"done": MEDIA / "Windows Notify System Generic.wav",
+                  "request": MEDIA / "Windows Message Nudge.wav"}
+CREATE_NO_WINDOW = 0x08000000
+DETACHED = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+
+# Shown through PowerShell's own app id, so no app has to be registered.
+TOAST = r"""
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+[void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
+[void][Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, ContentType = WindowsRuntime]
+$xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+$xml.LoadXml('<toast><visual><binding template="ToastGeneric"><text/><text/></binding></visual><audio silent="true"/></toast>')
+$texts = $xml.GetElementsByTagName('text')
+[void]$texts.Item(0).AppendChild($xml.CreateTextNode($env:PANE_NOTIFY_TITLE))
+[void]$texts.Item(1).AppendChild($xml.CreateTextNode($env:PANE_NOTIFY_BODY))
+$app = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
+$toast = New-Object Windows.UI.Notifications.ToastNotification $xml
+[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($app).Show($toast)
+"""
+PLAY = ("import sys, winsound; "
+        "winsound.PlaySound(sys.argv[1], winsound.SND_FILENAME | winsound.SND_NODEFAULT)")
+
+
+def herdr(*args):
+    try:
+        done = subprocess.run([os.environ.get("HERDR_BIN_PATH") or "herdr", *args],
+                              capture_output=True, text=True, timeout=HERDR_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.stdout if done.returncode == 0 else None
+
+
+def run(argv, **kw):
+    """Run a notifier and wait for it; None when it could not run."""
+    try:
+        return subprocess.run(argv, capture_output=True, text=True,
+                              timeout=NOTIFY_TIMEOUT, **kw)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def spawn(argv, **kw):
+    """Start a player and leave it running."""
+    try:
+        subprocess.Popen(argv, **kw)
+    except (OSError, ValueError):
+        pass
+
+
+def powershell():
+    return (shutil.which("powershell")
+            or os.path.join(os.environ.get("SystemRoot") or "C:\\Windows", "System32",
+                            "WindowsPowerShell", "v1.0", "powershell.exe"))
+
+
+def banner(title, body):
+    if WINDOWS:
+        script = base64.b64encode(TOAST.encode("utf-16-le")).decode("ascii")
+        argv = [powershell(), "-NoProfile", "-NonInteractive", "-EncodedCommand", script]
+        env = dict(os.environ, PANE_NOTIFY_TITLE=title, PANE_NOTIFY_BODY=body)
+        kw = {"env": env, "creationflags": CREATE_NO_WINDOW}
+    else:
+        # A hook's PATH may lack Homebrew. The body goes on stdin: as -message,
+        # one starting with -, [, (, { or a quote is refused, and a Markdown
+        # bullet is a common first line.
+        argv = [shutil.which("terminal-notifier") or NOTIFIER, "-title", title]
+        kw = {"input": body}
+    try:
+        run(argv, **kw)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def chime(sound):
+    quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
+             "stderr": subprocess.DEVNULL}
+    if WINDOWS:
+        path = Path(WINDOWS_SOUNDS[sound])
+        argv = [sys.executable, "-I", "-c", PLAY, str(path)]
+        quiet["creationflags"] = DETACHED
+    else:
+        path = Path(HERDR_SOUNDS) / f"{sound}.mp3"
+        argv = ["afplay", str(path)]
+        quiet["start_new_session"] = True
+    if path.is_file():
+        spawn(argv, **quiet)
+
+
+def pane_info(pane_id):
+    try:
+        pane = json.loads(herdr("pane", "get", pane_id))["result"]["pane"]
+    except (TypeError, ValueError, KeyError):
+        return None
+    return pane if isinstance(pane, dict) else None
+
+
+def quiet_pane(pane):
+    label = pane.get("label") or ""
+    if label:
+        return label == QUIET_NAME or label.startswith(WORKER_PREFIX)
+    return QUIET_NAME in (pane.get("title"), pane.get("terminal_title_stripped"))
+
+
+def name_of(pane):
+    folder = re.split(r"[\\/]+", (pane.get("cwd") or "").rstrip("\\/"))[-1]
+    return (pane.get("label") or pane.get("title") or pane.get("terminal_title_stripped")
+            or folder or "Claude")
+
+
+def cut(text, limit):
+    return text if len(text) <= limit else text[:limit - 3].rstrip() + "..."
+
+
+def first_line(text):
+    for line in (text or "").splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+def message(hook):
+    """(suffix, body, sound) for this event, or None to stay quiet."""
+    event = hook.get("hook_event_name")
+    if event == "Stop":
+        return "done", first_line(hook.get("last_assistant_message")) or "Claude finished", "done"
+    if event == "Notification" and hook.get("notification_type") in ASKS:
+        return "needs you", first_line(hook.get("message")) or "Claude needs you", "request"
+    return None
+
+
+def main():
+    try:
+        hook = json.loads(sys.stdin.read() or "{}")
+    except ValueError:
+        return
+    if not isinstance(hook, dict) or hook.get("agent_id"):
+        return
+    if os.environ.get("CLAUDE_CODE_ENTRYPOINT", "").startswith("sdk"):
+        return
+    pane_id = os.environ.get("HERDR_PANE_ID")
+    if os.environ.get("HERDR_ENV") != "1" or not pane_id:
+        return
+    what = message(hook)
+    if what is None:
+        return
+    pane = pane_info(pane_id)
+    if pane is None or quiet_pane(pane):
+        return
+    suffix, body, sound = what
+    title = f"{cut(name_of(pane), TITLE_MAX - len(suffix) - 2)}: {suffix}"
+    banner(title, cut(body, BODY_MAX))
+    chime(sound)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        pass
+    sys.exit(0)
