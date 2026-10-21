@@ -9,7 +9,7 @@ __pycache__/
 /config
 
 # Your house rules: your private copy of house-rules.example.md, read by
-# /fanout, /ship, /bugbot and the Hermes install. Kept out of this repo for
+# /fanout, /ship and /bugbot. Kept out of this repo for
 # the same reason as projects/ below.
 /house-rules.md
 

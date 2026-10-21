@@ -69,7 +69,7 @@ REPO = Path(__file__).resolve().parent.parent
 # graph, which a direct run of this script does not have on sys.path.
 sys.path.insert(1, str(REPO / "core"))
 
-from legwork_common import iter_config_pairs  # noqa: E402
+from legwork_common import iter_config_pairs, switchboard_mode  # noqa: E402
 
 PLIST_TEMPLATE = REPO / "suite" / "com.legwork.runner.plist"
 START_HOOK = "session_start_hook.py"
@@ -81,10 +81,11 @@ DEFAULT_REVIEWER_MODEL = "claude-sonnet-4-6"
 # Settings owned by the optional orchestration layer (orchestration/install.py
 # writes them). This wizard never asks for them, but rewrites `config`
 # wholesale, so it carries them over under the same section header that
-# installer uses. Keep both lists and headers in step.
+# installer uses. Keep both lists and headers in step. A key that is not
+# listed here, such as one an older install wrote, is dropped on a rewrite.
 ORCHESTRATION_KEYS = (
-    "LEGWORK_ORCHESTRATION", "LEGWORK_SWITCHBOARD", "LEGWORK_HERMES_PROFILE",
-    "LEGWORK_SWITCHBOARD_DIR",
+    "LEGWORK_ORCHESTRATION", "LEGWORK_SWITCHBOARD", "LEGWORK_SWITCHBOARD_HEALTH",
+    "LEGWORK_SWITCHBOARD_DIR", "LEGWORK_SESSION_ARGS",
     "LEGWORK_OWN_OWNERS", "LEGWORK_BUGBOT_OWNERS", "LEGWORK_LINEAR_TEAM",
     "LEGWORK_LINEAR_TEAM_KEY", "LEGWORK_LINEAR_SWEEP_LABELS",
     "LEGWORK_PR_SKILL", "LEGWORK_UI_SKILL", "LEGWORK_USAGE_CACHE",
@@ -201,8 +202,12 @@ def render_schtasks_argv(legwork_dir, python_bin, minutes, task_name=TASK_NAME):
 def carried_settings(existing):
     """(key, value) pairs from an existing config that render_config must
     keep although the wizard does not ask for them: the orchestration
-    layer's settings, in ORCHESTRATION_KEYS order."""
-    return [(k, existing[k]) for k in ORCHESTRATION_KEYS if k in existing]
+    layer's settings, in ORCHESTRATION_KEYS order. LEGWORK_SWITCHBOARD is
+    `claude` or `manual`; any other value an older install wrote reads as
+    `claude`, the way the skills read it."""
+    return [(k, switchboard_mode(existing[k]) if k == "LEGWORK_SWITCHBOARD"
+             else existing[k])
+            for k in ORCHESTRATION_KEYS if k in existing]
 
 
 def _render_carried(w, carried):

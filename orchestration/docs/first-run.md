@@ -19,7 +19,8 @@ left to run.
    - `account:` is set, if you run more than one Claude account
    - there's a `## Vision` with "Escalate when" filled in. If not, run `/vision <project>` first. That section is what the orchestrator decides from, so it matters more than anything else here.
 2. Optional: add `budget: <N>` to the frontmatter to get a `DECISION` when either weekly figure passes N%. `budget: off`, or no line, means no threshold. At 99% it always stops and asks, whatever the setting. This needs the usage cache; without one the budget cannot be enforced.
-3. Check the repo's `.gitignore` has `.legwork/`.
+3. Check the repo's `.gitignore` has `.legwork/`, and its
+   `.claude/settings.local.json` has the rules in Permissions below.
 4. Write down the two weekly figures from the Claude status line.
 
 ## 3. Planning session, with you, on your strongest model
@@ -54,17 +55,14 @@ left to run.
 
 ## 5. Start the switchboard
 
-With Hermes:
+With a Claude Code switchboard:
 
-1. New Herdr pane (or any terminal), any folder: `hermes -p <profile>`
-2. Type:
-   ```
-   Use the switchboard skill. Watch orch-<project>.
-   ```
+1. New Herdr pane, in the legwork repo: `claude`
+2. Type `/switchboard <project>`. It names its pane `switchboard` and starts watching.
 3. While it runs:
    - Answer decisions with a letter, or in your own words.
-   - To talk to Hermes while it's watching, interrupt it, then say `check in` or ask what you want.
-   - Stay out of the orchestrator pane unless Hermes flags it as blocked.
+   - To talk to it while it's watching, press Esc, then say `check in` or ask what you want.
+   - Stay out of the orchestrator pane unless the switchboard flags it as blocked.
 
 By hand: run `orchestration/bin/switchboard-wait --timeout 1800 <repo>:<pane>`
 (or `<repo>:none` without Herdr) in a spare terminal; on Windows, run it
@@ -93,7 +91,17 @@ Go through these before widening it to more projects:
 - **Adversarial review:** does each pull request body show the second-model review, with confirmed and rejected findings marked OBSERVED?
 - **UI:** if the feature has UI, was the journey checked in a real browser?
 - **Usage:** each weekly figure used per hour of run.
-- **Hermes learning:** diff the installed Hermes skill against `orchestration/hermes/switchboard/SKILL.md` and bring back anything worth keeping.
+
+## Permissions
+
+Each repo an orchestrator works in needs, in its gitignored
+`.claude/settings.local.json`, allow rules for `Bash(gh pr create:*)`,
+`Bash(gh pr edit:*)` and `Bash(git push origin fanout/*)` style pushes from
+worktrees, plus `Bash(gh pr merge:*)` only on your own repos (owners in
+`LEGWORK_OWN_OWNERS`) when the roadmap says to merge. Add deny rules for
+`git push origin main`, `git push --force` and `git push -f`. Without the
+allow rules the permission classifier stalls every run waiting on an
+approval. Never commit these rules on a shared repo.
 
 ## If something goes wrong
 
