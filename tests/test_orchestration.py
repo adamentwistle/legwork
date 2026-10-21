@@ -92,14 +92,15 @@ class PiecesTests(unittest.TestCase):
         for src, _ in pairs:
             self.assertTrue(src.is_file(), src)
 
-    def test_manual_switchboard_installs_the_protocol_only(self):
-        # Orchestrators follow the protocol either way. The switchboard
-        # session's skill and the planning skill that queues its runs are
-        # for a Claude Code switchboard only.
+    def test_manual_switchboard_leaves_out_the_session_skill_only(self):
+        # Orchestrators follow the protocol either way, and a planning
+        # session works with the user relaying by hand too. Only the
+        # switchboard session's own skill is for a Claude Code switchboard.
         dest = Path("/tmp/fake-claude")
         pairs = install.plan_copies(["switchboard"], dest, switchboard="manual")
         self.assertEqual([d.relative_to(dest).as_posix() for _, d in pairs],
-                         ["skills/switchboard-protocol/SKILL.md"])
+                         ["skills/switchboard-protocol/SKILL.md",
+                          "skills/roadmap-planning/SKILL.md"])
         pairs = install.plan_copies(["switchboard"], dest, switchboard="claude")
         self.assertEqual(len(pairs), 3)
 
@@ -540,8 +541,12 @@ class InstallRunTests(unittest.TestCase):
                 Path(tmp), ["--with", "switchboard,switchboard-health"],
                 config="LEGWORK_SWITCHBOARD=manual\n")
             self.assertTrue((claude / "skills" / "switchboard-protocol" / "SKILL.md").is_file())
+            self.assertTrue((claude / "skills" / "roadmap-planning" / "SKILL.md").is_file())
             self.assertFalse((claude / "skills" / "switchboard").exists())
-            self.assertFalse((claude / "skills" / "roadmap-planning").exists())
+            skips = [ln for ln in out.splitlines() if ln.startswith("skip the ")]
+            self.assertEqual(len(skips), 1, out)
+            self.assertIn("switchboard skill", skips[0])
+            self.assertNotIn("roadmap-planning", skips[0])
             self.assertIn("skip switchboard-health", out)
             self.assertNotIn("LEGWORK_SWITCHBOARD_HEALTH", (legwork / "config").read_text())
 
@@ -578,17 +583,15 @@ class InstallRunTests(unittest.TestCase):
             self.assertNotIn("LEGWORK_SWITCHBOARD_HEALTH", (legwork / "config").read_text())
 
     def test_house_rules_note_counts_planning_sessions(self):
-        # The switchboard piece installs roadmap-planning, which commits and
-        # opens a docs PR, so it follows the house rules. With manual it is
-        # left out, and the protocol alone writes no commits.
-        for config, noted in (("LEGWORK_DIR=/x\n", True),
-                              ("LEGWORK_SWITCHBOARD=manual\n", False)):
+        # The switchboard piece installs roadmap-planning in both modes, and
+        # a planning session commits and opens a docs PR, so it follows the
+        # house rules.
+        for config in ("LEGWORK_DIR=/x\n", "LEGWORK_SWITCHBOARD=manual\n"):
             with tempfile.TemporaryDirectory() as tmp:
                 _, _, out = self.run_install(Path(tmp), ["--with", "switchboard"],
                                              config=config, rules=False)
-                self.assertEqual("house-rules.md" in out, noted, config)
-                if noted:
-                    self.assertIn("planning sessions", out)
+                self.assertIn("house-rules.md", out, config)
+                self.assertIn("planning sessions", out, config)
         with tempfile.TemporaryDirectory() as tmp:
             _, _, out = self.run_install(Path(tmp), ["--with", "shipping"], rules=False)
             self.assertIn("house-rules.md", out)
@@ -808,6 +811,72 @@ class WindowsFormTests(unittest.TestCase):
                 if command.search(line.strip()):
                     near = "\n".join(lines[i:i + 5])
                     self.assertIn("Windows", near, f"{path.name}:{i + 1}: {line}")
+
+
+class DocCommandTests(unittest.TestCase):
+    """The orchestration docs name only commands, flags and pieces the
+    scripts and the installer have: doc-versus-code drift is a defect."""
+
+    DOCS = [ORCH / "README.md", *sorted((ORCH / "docs").glob("*.md"))]
+
+    def snippets(self, path):
+        """Backtick spans and code block lines: the places commands go."""
+        text = path.read_text(encoding="utf-8")
+        found = re.findall(r"`([^`\n]+)`", re.sub(r"```.*?```", "", text, flags=re.S))
+        for block in re.findall(r"```[^\n]*\n(.*?)```", text, flags=re.S):
+            found += block.splitlines()
+        return found
+
+    def usage(self, name):
+        """The words and flags in a bin script's Usage lines, or in its
+        whole docstring when it has none."""
+        text = (ORCH / "bin" / name).read_text(encoding="utf-8")
+        doc = text.split('"""')[1]
+        lines = doc[doc.index("Usage:"):].split("\n\n", 1)[0] if "Usage:" in doc else doc
+        return set(re.findall(r"--?[\w-]+|[a-z][\w-]*", lines))
+
+    def test_scripts_flags_and_subcommands_exist(self):
+        scripts = {p.name for p in (ORCH / "bin").iterdir() if p.is_file()}
+        for path in self.DOCS:
+            for snippet in self.snippets(path):
+                for m in re.finditer(r"bin/([\w-]+)", snippet):
+                    self.assertIn(m.group(1), scripts, f"{path.name}: {snippet}")
+                for name in scripts:
+                    for m in re.finditer(rf"(?:^|[/\s]){re.escape(name)}\s+(--?[\w-]+|[a-z][\w-]*)",
+                                         snippet):
+                        self.assertIn(m.group(1), self.usage(name),
+                                      f"{path.name}: {snippet}")
+
+    def test_install_flags_and_pieces_exist(self):
+        source = (ORCH / "install.py").read_text(encoding="utf-8")
+        flags = set(re.findall(r'add_argument\("(--[\w-]+)"', source))
+        for path in self.DOCS:
+            for snippet in self.snippets(path):
+                if "install.py" not in snippet:
+                    continue
+                for flag in re.findall(r"(?<![\w-])--[\w-]+", snippet):
+                    self.assertIn(flag, flags | {"--help"}, f"{path.name}: {snippet}")
+                for m in re.finditer(r"--with ([\w,-]+)", snippet):
+                    for piece in m.group(1).split(","):
+                        self.assertIn(piece, set(install.PIECES) | {"all"},
+                                      f"{path.name}: {snippet}")
+
+    def test_switchboard_setup_is_linked_where_users_look(self):
+        for path in (REPO / "SETUP.md", REPO / "README.md", REPO / "CONFIG.md",
+                     ORCH / "README.md", ORCH / "docs" / "first-run.md"):
+            self.assertIn("docs/switchboard-setup.md" if path.parent == REPO
+                          or path.name == "README.md" else "switchboard-setup.md",
+                          path.read_text(encoding="utf-8"), path.name)
+
+    def test_switchboard_setup_covers_both_platforms(self):
+        text = (ORCH / "docs" / "switchboard-setup.md").read_text(encoding="utf-8")
+        for needle in ('delivery = "off"', 'claude = "off"', "herdr server reload-config",
+                       "~/.config/herdr/config.toml", r"%APPDATA%\herdr\config.toml",
+                       "brew install terminal-notifier", "Windows PowerShell",
+                       "launchd", "Task Scheduler", "/switchboard resume",
+                       "LEGWORK_SESSION_ARGS", "LEGWORK_SWITCHBOARD_DIR",
+                       "context:", "## Manual mode"):
+            self.assertIn(needle, text)
 
 
 if __name__ == "__main__":

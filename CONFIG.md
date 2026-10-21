@@ -70,12 +70,14 @@ Read by the optional orchestration layer (`orchestration/`): the
 switchboard-protocol, fanout, switchboard and roadmap-planning skills,
 `/ship`, `/bugbot` and the scripts in `orchestration/bin/`. The runner
 ignores them. `orchestration/install.py --set` writes them, and
-`./install.sh` keeps them when it rewrites `config`.
+`./install.sh` keeps them when it rewrites `config`. Setting up the Claude
+Code switchboard, with the health watcher and pane notifications, is in
+[orchestration/docs/switchboard-setup.md](orchestration/docs/switchboard-setup.md).
 
 | Variable | Default | What it does |
 | --- | --- | --- |
 | `LEGWORK_ORCHESTRATION` | unset | Set to `1` by the installer when fanout or the switchboard is installed. A record, nothing reads it to decide. |
-| `LEGWORK_SWITCHBOARD` | `claude` | Who relays an orchestrator's `DECISION`s: `claude` (a Claude Code session in a Herdr pane named `switchboard`, started with `/switchboard <project>`, relays your answers and writes the `ANSWERED` lines) or `manual` (you answer in the pane, and the orchestrator writes the `ANSWERED` line itself). Any other value reads as `claude`. With `manual`, the installer leaves out the switchboard and roadmap-planning skills. |
+| `LEGWORK_SWITCHBOARD` | `claude` | Who relays an orchestrator's `DECISION`s: `claude` (a Claude Code session in a Herdr pane named `switchboard`, started with `/switchboard <project>`, relays your answers and writes the `ANSWERED` lines) or `manual` (you answer in the pane, and the orchestrator writes the `ANSWERED` line itself). Any other value reads as `claude`. With `manual`, the installer leaves out the switchboard skill and the health watcher; the protocol and roadmap-planning skills install in both modes. |
 | `LEGWORK_SWITCHBOARD_HEALTH` | unset | Set to `1` by the installer's `switchboard-health` piece (macOS and Windows). It tells the switchboard the health watcher is there, so the switchboard runs `switchboard-health-ctl on` when it starts watching and `off` when it stops. The watcher checks the switchboard every 5 minutes, cycles its context and restarts it if it dies. It needs `herdr` and `claude` on your own PATH, and the legwork repo trusted in Claude Code. Unset means no watcher. |
 | `LEGWORK_SESSION_ARGS` | `--model opus --effort high` | The arguments `claude` starts with when the switchboard opens a new orchestrator, and when the health watcher restarts the switchboard. |
 | `LEGWORK_SWITCHBOARD_DIR` | `$CLAUDE_CONFIG_DIR/switchboard`, else `~/.claude/switchboard` | The switchboard's own folder. `switchboard-state` writes its state file, `state.md`, there, and `switchboard-wait` reads it and leaves out a `CYCLE` or `DONE` dated before a run's `started` line, so an earlier run's `DONE` does not end a new one. `SWITCHBOARD_STATE` in the environment, or `switchboard-wait --state FILE`, names the state file itself instead. No state file means nothing is left out. |

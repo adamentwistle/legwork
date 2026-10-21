@@ -15,9 +15,10 @@ Pieces (--with, comma-separated, or `all`):
 
   shipping     /ship and /bugbot (land a branch as a PR, then the Bugbot loop)
   fanout       the fanout skill and /fanout (one orchestrator, many PRs)
-  switchboard  the switchboard-protocol skill orchestrators follow, and, unless
-               LEGWORK_SWITCHBOARD is manual, the switchboard skill (/switchboard,
-               a Claude Code session in a Herdr pane) and roadmap-planning
+  switchboard  the switchboard-protocol skill orchestrators follow, the
+               roadmap-planning skill, and, unless LEGWORK_SWITCHBOARD is
+               manual, the switchboard skill (/switchboard, a Claude Code
+               session in a Herdr pane)
   herdr-skill  Herdr's own skill, from `herdr --skill`, if Herdr is installed
   usage-guard  a hook that tells long runs to pause before a usage limit
   codex-agent  the codex subagent: OpenAI's Codex CLI as a cross-model second
@@ -85,8 +86,9 @@ CLAUDE_FILES = {
 }
 
 # The switchboard session's own files: left out when LEGWORK_SWITCHBOARD is
-# manual, since then the user relays and no switchboard session runs.
-SESSION_FILES = ("skills/switchboard/SKILL.md", "skills/roadmap-planning/SKILL.md")
+# manual, since then the user relays and no switchboard session runs. A
+# planning session (roadmap-planning) works in both modes.
+SESSION_FILES = ("skills/switchboard/SKILL.md",)
 
 # Keys an older install wrote for a switchboard legwork no longer ships.
 RETIRED_KEYS = ("LEGWORK_HERMES_PROFILE",)
@@ -146,7 +148,7 @@ def platform_kind(platform=None):
 
 def plan_copies(pieces, claude_dir, switchboard="claude"):
     """(source, destination) pairs for the Claude Code pieces. Read-only.
-    A manual switchboard gets the protocol without the session's files."""
+    A manual switchboard gets everything but the session's own files."""
     manual = switchboard_mode(switchboard) == "manual"
     pairs = []
     for piece in pieces:
@@ -469,8 +471,7 @@ def main(argv=None):
     if not os.environ.get("LEGWORK_DIR") and legwork_dir != (Path.home() / "legwork").resolve():
         print(f"note: the skills look for the legwork repo at $LEGWORK_DIR, else ~/legwork; "
               f"add 'export LEGWORK_DIR={legwork_dir}' to your shell profile")
-    planning = "switchboard" in pieces and switchboard != "manual"
-    if (planning or any(p in pieces for p in ("shipping", "fanout"))) \
+    if any(p in pieces for p in ("shipping", "fanout", "switchboard")) \
             and not (legwork_dir / "house-rules.md").exists():
         print(f"note: no {legwork_dir / 'house-rules.md'}; workers, /ship, /bugbot "
               "and planning sessions will have no house rules (see "
@@ -484,8 +485,7 @@ def main(argv=None):
             write_lf(dest, render(src.read_text(encoding="utf-8"), legwork_dir,
                                   pane_config_dir=pane_dir))
     if "switchboard" in pieces and switchboard == "manual":
-        print("skip the switchboard and roadmap-planning skills: "
-              "LEGWORK_SWITCHBOARD is manual")
+        print("skip the switchboard skill: LEGWORK_SWITCHBOARD is manual")
         for rel in SESSION_FILES:
             if (claude_dir / rel).exists():
                 print(f"note: {claude_dir / rel} is left from a Claude Code "

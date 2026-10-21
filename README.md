@@ -139,7 +139,7 @@ Review is three options deep. Set `LEGWORK_LOCAL_REVIEW=1` and the runner triage
 
 ## Orchestration: one switchboard over many long runs
 
-Optional, and separate from the runner. An orchestrator is one long Claude Code session per project, ideally in a [Herdr](https://herdr.dev) pane: `/fanout <project>` turns the project's roadmap into PR-sized tasks, hands them to worker panes or subagents, and lands each PR through its gate and the Bugbot loop. It follows the switchboard protocol, so instead of stopping on a question it writes a `DECISION` to `.legwork/switchboard.md` in the repo and carries on with whatever does not depend on it. A switchboard puts those decisions in front of you one at a time: a Claude Code session in a Herdr pane that watches every orchestrator and relays your answers, or you, by hand. `/ship` and `/bugbot` come with it and work on their own too. Every piece is optional, and `/onboard` installs only the ones you pick. See [orchestration/README.md](orchestration/README.md).
+Optional, and separate from the runner. An orchestrator is one long Claude Code session per project, ideally in a [Herdr](https://herdr.dev) pane: `/fanout <project>` turns the project's roadmap into PR-sized tasks, hands them to worker panes or subagents, and lands each PR through its gate and the Bugbot loop. It follows the switchboard protocol, so instead of stopping on a question it writes a `DECISION` to `.legwork/switchboard.md` in the repo and carries on with whatever does not depend on it. A switchboard puts those decisions in front of you one at a time: a Claude Code session in a Herdr pane that watches every orchestrator and relays your answers, or you, by hand. `/ship` and `/bugbot` come with it and work on their own too. Every piece is optional, and `/onboard` installs only the ones you pick. See [orchestration/README.md](orchestration/README.md), and [orchestration/docs/switchboard-setup.md](orchestration/docs/switchboard-setup.md) to set up the switchboard on a Mac or on Windows.
 
 ## What this is not
 
@@ -154,6 +154,7 @@ Optional, and separate from the runner. An orchestrator is one long Claude Code 
 - [SETUP.md](SETUP.md): install the runner and wire the optional pipelines.
 - [CONFIG.md](CONFIG.md): every config variable.
 - [orchestration/README.md](orchestration/README.md): the optional orchestrator and switchboard layer.
+- [orchestration/docs/switchboard-setup.md](orchestration/docs/switchboard-setup.md): setting up the Claude Code switchboard on a Mac or on Windows.
 - [SECURITY.md](SECURITY.md): the permission and escalation model.
 - [CONTRIBUTING.md](CONTRIBUTING.md): scope, non-goals, and how to send a PR.
 - [LICENSE](LICENSE): the license.
