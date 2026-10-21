@@ -1038,6 +1038,32 @@ class PaneFlipTests(unittest.TestCase):
         self.assertEqual(self.run_wait((0.3, self.set_pane, ["done", 9]), timeout=10),
                          (0, ["legwork pane done"]))
 
+    def test_blocked_working_then_idle_behind_a_decision_is_an_event(self):
+        # A poll sees the pane working between blocked and idle. The
+        # switchboard still last heard blocked, so idle is news; resting
+        # after that is quiet again.
+        self.append(DECISION)
+        self.assertEqual(self.run_wait(), (0, ["legwork legwork-200 DECISION"]))
+        self.set_pane("blocked", 8)
+        self.assertEqual(self.run_wait(), (0, ["legwork pane blocked"]))
+        self.set_pane("working", 9)
+        self.assertEqual(self.run_wait((0.5, self.set_pane, ["idle", 10]), timeout=10),
+                         (0, ["legwork pane idle"]))
+        self.assertEqual(self.run_wait((0.3, self.set_pane, ["working", 11]),
+                                       (0.6, self.set_pane, ["idle", 12])),
+                         (124, ["timeout"]))
+
+    def test_a_decision_in_the_poll_a_pane_leaves_blocked_prints_both(self):
+        self.set_pane("blocked", 8)
+        self.assertEqual(self.run_wait(), (0, ["legwork pane blocked"]))
+
+        def ask_and_stop():
+            self.append(DECISION)
+            self.set_pane("idle", 9)
+
+        self.assertEqual(self.run_wait((0.3, ask_and_stop, []), timeout=10),
+                         (0, ["legwork legwork-200 DECISION", "legwork pane idle"]))
+
     def test_an_answered_decision_brings_pane_reports_back(self):
         self.append(DECISION)
         self.assertEqual(self.run_wait(), (0, ["legwork legwork-200 DECISION"]))

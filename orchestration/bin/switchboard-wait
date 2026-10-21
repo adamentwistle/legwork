@@ -43,14 +43,15 @@ And while a repo's latest entry is an open DECISION that has been reported
 (the cursor is on it, whether this wait or an earlier one printed it), its
 pane going idle or done is not reported: the orchestrator is waiting on
 the user, which the switchboard already knows. The one exception is a pane
-going straight from blocked to idle or done, which is reported as above,
-because the switchboard last heard blocked; resting after that is quiet
-again. A DECISION printed on
+whose last reported state is blocked: its first idle or done is reported,
+even if a poll saw it working in between, because the switchboard last
+heard blocked; resting after that is quiet again. A DECISION printed on
 start, or one that lands in the same poll as the pane stopping, is printed
-on its own. Once the DECISION is answered or replaced, or any later entry
-lands (a GRANT from switchboard-answer too), pane reports come back as usual.
-blocked, gone and unreachable are always reported. --status is a snapshot,
-not an event, and always shows the pane as it is.
+without a pane line, unless the pane is coming out of blocked: then both
+lines are printed. Once the DECISION is answered or replaced, or any later
+entry lands (a GRANT from switchboard-answer too), pane reports come back
+as usual. blocked, gone and unreachable are always reported. --status is
+a snapshot, not an event, and always shows the pane as it is.
 
 A CYCLE or DONE from an earlier run is never reported, by the wait or by
 --status. The switchboard's state file (written by switchboard-state) has a
@@ -64,8 +65,9 @@ A cursor per repo, .legwork/switchboard-wait.cursor (JSON: switchboard file
 path -> last entry reported, as its id, or "<id>#<n>" for the nth entry
 with an id used more than once), stops the same entry being reported twice
 and makes sure entries written while no wait was running are reported on the
-next start. The last pane state seen (status and seq) is kept in the same
-file, so a pane that stays idle is reported once, not on every start. Saves take a lock
+next start. The last pane state seen (status and seq), and the last one
+reported, are kept in the same file, so a pane that stays idle is reported
+once, not on every start. Saves take a lock
 (.legwork/switchboard-wait.cursor.lock) and merge with what is on disk, so
 two waits on one repo keep each other's state.
 
@@ -351,7 +353,8 @@ def pane_event(mem, seen, quiet=False):
 
     idle to done or done to idle with the same seq is not reported. With
     quiet (an open DECISION already reported) idle and done are not
-    reported either, except straight out of blocked: the switchboard last
+    reported either, except when the last state reported (mem["reported"])
+    is blocked, even with working seen in between: the switchboard last
     heard blocked and has to learn the block is gone.
     """
     if seen is None:
@@ -364,12 +367,14 @@ def pane_event(mem, seen, quiet=False):
         return UNREACHABLE
     mem[UNREACHABLE] = False
     before = (mem.get("status"), mem.get("seq"))
+    heard = mem.get("reported", before[0])  # a state saved before "reported" existed
     mem["status"], mem["seq"] = status, seq
     if status not in STOPPED or (status, seq) == before:
         return None
     flip = before[0] in RESTING and seq == before[1]
-    if status in RESTING and (flip or (quiet and before[0] != "blocked")):
+    if status in RESTING and (flip or (quiet and heard != "blocked")):
         return None
+    mem["reported"] = status
     return status
 
 
