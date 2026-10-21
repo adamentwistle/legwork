@@ -253,8 +253,8 @@ class HealthCase(unittest.TestCase):
     def log(self):
         if not self.log_path.exists():
             return []
-        return [json.loads(l) for l in self.log_path.read_text(encoding="utf-8").splitlines()
-                if l.strip()]
+        return [json.loads(line) for line in self.log_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()]
 
 
 def sw(status="idle", seq=1, pane="wB:p1", name="switchboard", title=None):

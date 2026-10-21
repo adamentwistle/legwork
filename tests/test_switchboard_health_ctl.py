@@ -171,7 +171,7 @@ class CtlCase(unittest.TestCase):
 
     def write_log(self, *lines):
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        (self.state_dir / "health.jsonl").write_text("".join(l + "\n" for l in lines),
+        (self.state_dir / "health.jsonl").write_text("".join(line + "\n" for line in lines),
                                                      encoding="utf-8")
 
 
