@@ -352,9 +352,16 @@ Add `usage-guard` to install the pause-before-a-limit hook, `codex-agent`
 for the codex subagent (needs the `codex` CLI), `switchboard-health` for the
 switchboard's health watcher and `pane-notify` for banners from the panes
 worth hearing (both macOS and Windows). With `LEGWORK_SWITCHBOARD=manual`,
-`switchboard` installs the protocol only. On Windows, run the installer as
-`python orchestration/install.py`. `--dry-run` shows the plan first. The pieces, settings and a first run are in
+`switchboard` installs the protocol and roadmap-planning skills and leaves
+out the switchboard skill. On Windows, run the installer as
+`python orchestration/install.py`. `--dry-run` shows the plan first. The
+pieces, settings and a first run are in
 [orchestration/README.md](orchestration/README.md).
+
+Setting up the Claude Code switchboard on a Mac or on Windows (what it
+needs, the allow rules its session needs, starting it in a Herdr pane, the
+health watcher and pane notifications) is in
+[orchestration/docs/switchboard-setup.md](orchestration/docs/switchboard-setup.md).
 
 ## Verify
 
