@@ -257,7 +257,8 @@ class RoadmapPlanningSkillTests(unittest.TestCase):
         # It commits the legwork repo and opens a docs PR, so the user's
         # authorship and attribution rules apply, as in /ship and /fanout.
         self.assertIn("`{{LEGWORK_DIR}}/house-rules.md`", self.body)
-        self.assertIn("house-rules.md` applies to each commit, pull request", self.flat)
+        self.assertIn("house-rules.md`, except those in its `Pull request reviews` section, "
+                      "applies to each commit, pull request", self.flat)
 
     def test_keeps_the_tracker_skill_and_the_live_machine_rule(self):
         self.assertIn("legwork-tracker", self.body)

@@ -91,7 +91,7 @@ class ReviewerTests(unittest.TestCase):
     def test_after_the_bot_reviewers_are_requested_without_bugbot_too(self):
         land = " ".join(section(text(), "5. Land").split())
         self.assertIn("after the review bot is clear", land)
-        self.assertIn("With no Bugbot on the repo, request them yourself", land)
+        self.assertIn("Held, or with no Bugbot on the repo, request them yourself", land)
 
     def test_wrap_names_the_reviewers_requested(self):
         self.assertIn("reviewers requested", section(text(), "7. Wrap"))

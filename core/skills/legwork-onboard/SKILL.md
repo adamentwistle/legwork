@@ -134,8 +134,11 @@ Run these from the checkout, in order, with `--legwork-dir <legwork repo>`
 on every `orchestration/install.py` call. Show each command before running
 it.
 
-1. House rules, if they gave any: write `house-rules.md` in the legwork
-   repo, one `- ` list item per rule, under a `# House rules` heading.
+1. House rules, if they gave any rules or review answers: write
+   `house-rules.md` in the legwork repo, one `- ` list item per rule, under
+   a `# House rules` heading. Then the review answers, one `- ` list item
+   per repo or owner, under a `## Pull request reviews` heading after the
+   rules.
 2. Settings: `<python> orchestration/install.py --set KEY=VALUE ...` with
    every setting they chose:
    - runner: `LEGWORK_DAILY_CAP`, `LEGWORK_DAILY_COST_CAP`, and

@@ -36,7 +36,8 @@ direction.
   them as it says, never the PR's author: when the PR opens, or after the
   review bot is clear. `/bugbot` does the second on `CLEAR`; on a repo
   whose owner is not in `LEGWORK_BUGBOT_OWNERS`, request them once step 3
-  of the quality gate passes. If it names nothing for the repo, request
+  of the quality gate passes, and run `/ship` or `/bugbot` there with
+  `--hold-reviewers` until then. If it names nothing for the repo, request
   nobody and leave reviews to the user. The section is the user's
   standing word, so do not escalate it.
 - The switchboard file is `<repo>/.legwork/switchboard.md`. Create it if
@@ -47,7 +48,10 @@ direction.
 - Read `CONTEXT.md`, any ADRs and the project's `## Vision` before deciding
   anything. They are what you decide from.
 - If the start prompt says you may merge pull requests that pass the gate,
-  that covers every merge in this run. Do not escalate merges.
+  that covers every merge in this run. Do not escalate merges. A PR whose
+  repo's review item names any reviewers still waits for their approval:
+  merge it only once `gh pr view <n> --json reviewDecision` says
+  `APPROVED`, and otherwise leave it open for them and the user.
 - After each merge, delete its branch yourself. `gh pr merge
   --delete-branch` leaves the remote branch behind while a worktree still
   has it checked out, and a squash merge leaves the local one. From the main

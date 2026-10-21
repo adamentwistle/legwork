@@ -57,8 +57,9 @@ full command here, use it as written). Do not re-derive any of them.
 3. Repo instructions: `CLAUDE.md`, `docs/claude/` if present, `PROJECT.md`
    or `README.md`. Note the gate command (`scripts/pr-gate.sh`,
    `scripts/secret-sweep.sh`, `make ...`, `go test ./...`, `npm test`).
-4. House rules: `<legwork>/house-rules.md`. Every list item in it goes into
-   every brief below, verbatim. If the file does not exist, say so in the
+4. House rules: `<legwork>/house-rules.md`. Every list item in it, except
+   those in its `Pull request reviews` section, goes into every brief
+   below, verbatim. If the file does not exist, say so in the
    state file and in the wrap log: the workers then have no house rules.
    Its `Pull request reviews` section, if any, says per repo or per owner
    who reviews pull requests and when; take this repo's item (a repo's
@@ -102,7 +103,8 @@ Gate: <exact command(s); must print PASS or exit 0>
 Reviewers: <who this repo's Pull request reviews item says to request when
   the PR opens, or none>
 Rules: house rules ("me" and "I" in them mean the user whose git and gh
-  identity this repo uses): <every list item of house-rules.md, verbatim>;
+  identity this repo uses): <every list item of house-rules.md, verbatim,
+  except those in its Pull request reviews section>;
   PR to main from this branch only, never push main; every result line in
   the PR body marked OBSERVED, STALE or NOT RUN; do not touch files outside
   <paths> unless the task requires it; do not ask questions, decide and note
@@ -223,15 +225,20 @@ record it in the state file and the wrap log as left for the user.
 
 For each `PR <url>` line, in dependency order:
 
-1. `/bugbot <n>` (three rounds max). The worker's pane is closed by now,
-   so findings are fixed by a fresh subagent in that worktree, or by you if
+1. `/bugbot <n>` (three rounds max), or `/bugbot <n> --hold-reviewers`
+   when the gate line said FAIL. The worker's pane is closed by now, so
+   findings are fixed by a fresh subagent in that worktree, or by you if
    they are one-line. On `CLEAR` it requests the reviewers this repo's item
-   names for after the review bot is clear. With no Bugbot on the repo,
-   request them yourself once the gate line says PASS, never the PR's
-   author.
+   names for after the review bot is clear, unless held. Held, or with no
+   Bugbot on the repo, request them yourself once the gate passes, never
+   the PR's author.
 2. When CLEAR and `--merge` was given: `gh pr merge <n> --squash --delete-branch`
-   only if `mergeable` is `MERGEABLE` and the gate line said PASS. Close
-   that worker's pane and remove its worktree first: a branch still checked
+   only if `mergeable` is `MERGEABLE` and the gate line said PASS. If this
+   repo's review item names any reviewers, merge only once
+   `gh pr view <n> --json reviewDecision` says `APPROVED`; until then,
+   leave the PR open for them and the user, as without `--merge`, and say
+   so in the state file and the wrap log. Before a merge, close
+   that worker's pane and remove its worktree: a branch still checked
    out in a worktree is not deleted, on GitHub either. Then check
    `git ls-remote --heads origin <branch>` is empty, else
    `git push origin --delete <branch>`. On the user's own repos (owner in
