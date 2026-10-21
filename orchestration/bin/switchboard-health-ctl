@@ -1,0 +1,458 @@
+#!/usr/bin/env python3
+"""Switch the switchboard health watcher on and off.
+
+Usage: switchboard-health-ctl on|off|status [--state-dir DIR]
+
+on      Run one pass of `switchboard-health --once --dry-run` and show it,
+        then schedule the watcher: one pass now, then one every 5 minutes.
+        Already on: says so and does nothing.
+off     Stop the schedule. Already off: says so and does nothing.
+status  Whether the watcher is on, and the last pass in health.jsonl in plain
+        words.
+
+The same commands work on macOS and Windows.
+
+macOS: `on` renders orchestration/launchd/dev.legwork.switchboard-health.plist.template
+into DIR/dev.legwork.switchboard-health.plist and runs `launchctl bootstrap
+gui/<uid>` on it (RunAtLoad gives the first pass); `off` runs `launchctl
+bootout`. The plist lives in DIR, never in ~/Library/LaunchAgents, so the
+watcher is off after every login or reboot until you switch it on. If an old
+plist is at ~/Library/LaunchAgents/dev.legwork.switchboard-health.plist, `on`
+and `status` warn that it loads at login and print the command to remove it.
+This script never deletes it. claude is looked for on PATH, then under
+~/.nvm/versions/node/*/bin (newest first), and its folder goes on the job's PATH.
+
+Windows: `on` writes a Task Scheduler task, DIR/dev.legwork.switchboard-health.xml,
+registers it as dev.legwork.switchboard-health with `schtasks /Create /XML`,
+and starts its first pass with `schtasks /Run`; `off` runs `schtasks /Delete`.
+The task runs only while you are signed in, every 5 minutes, with the
+interpreter running this script (its windowless pythonw.exe when there is
+one, so no console window opens). It carries this sign-in's logon time, and
+a pass in a later sign-in switches the watcher off, so here too it is off
+after every sign-in or restart until you switch it on. A task left from an
+earlier sign-in counts as off: `on` replaces it and `off` deletes it.
+
+The job gets CLAUDE_CONFIG_DIR and the legwork settings LEGWORK_DIR,
+LEGWORK_CONFIG and LEGWORK_SESSION_ARGS from this script's environment, the
+ones that are set: in the plist's environment on macOS, as --env flags on the
+task's command line on Windows. DIR is --state-dir, else
+LEGWORK_SWITCHBOARD_DIR (environment or legwork config), else
+$CLAUDE_CONFIG_DIR/switchboard, else ~/.claude/switchboard.
+
+Exit 0 on success, 1 when something failed, 2 on bad arguments.
+Needs Python 3.9 and the standard library only.
+"""
+import glob
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+from xml.sax.saxutils import escape
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(1, os.path.join(HERE, ".."))
+try:
+    from settings import setting  # orchestration/settings.py, same checkout
+except ImportError:  # copied out of the checkout: environment only
+    def setting(key, default=None):
+        return os.environ.get(key) or default
+
+LABEL = "dev.legwork.switchboard-health"
+TASK = LABEL  # the Task Scheduler task's name on Windows
+WINDOWS = os.name == "nt"
+ROOT = os.path.dirname(os.path.dirname(HERE))  # the legwork checkout
+TEMPLATE = os.path.join(ROOT, "orchestration", "launchd", LABEL + ".plist.template")
+HEALTH = os.path.join(HERE, "switchboard-health")
+PASS_ENV = ("CLAUDE_CONFIG_DIR", "LEGWORK_DIR", "LEGWORK_CONFIG", "LEGWORK_SESSION_ARGS")
+USAGE = "Usage: switchboard-health-ctl on|off|status [--state-dir DIR]"
+TASK_XML = """<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>legwork switchboard health watcher: one pass every 5 minutes. Switch it on and off with switchboard-health-ctl.</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <TimeTrigger>
+      <Repetition>
+        <Interval>PT5M</Interval>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+      <StartBoundary>{start}</StartBoundary>
+      <Enabled>true</Enabled>
+    </TimeTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <StartWhenAvailable>false</StartWhenAvailable>
+    <ExecutionTimeLimit>PT15M</ExecutionTimeLimit>
+    <Enabled>true</Enabled>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{command}</Command>
+      <Arguments>{arguments}</Arguments>
+      <WorkingDirectory>{workdir}</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+"""
+
+
+def home():
+    return os.path.expanduser("~")
+
+
+def uid():
+    return os.getuid()
+
+
+def default_state_dir():
+    return (setting("LEGWORK_SWITCHBOARD_DIR")
+            or os.path.join(os.environ.get("CLAUDE_CONFIG_DIR")
+                            or os.path.join(home(), ".claude"), "switchboard"))
+
+
+def call(argv, timeout=60):
+    """Run one command and return its CompletedProcess, output as text. The
+    tests replace this."""
+    return subprocess.run(argv, capture_output=True, text=True, errors="replace",
+                          timeout=timeout)
+
+
+def launchctl(*args):
+    return call(["launchctl", *args])
+
+
+def schtasks(*args):
+    return call(["schtasks.exe", *args])
+
+
+def job_env():
+    """The settings the job carries, the ones set in this environment."""
+    return {k: os.environ[k] for k in PASS_ENV if os.environ.get(k)}
+
+
+def interpreter():
+    """The interpreter the job runs the watcher with: this one, as its
+    windowless pythonw.exe on Windows when that is beside it."""
+    exe = sys.executable
+    if WINDOWS and os.path.basename(exe).lower() == "python.exe":
+        windowless = os.path.join(os.path.dirname(exe), "pythonw.exe")
+        if os.path.exists(windowless):
+            return windowless
+    return exe
+
+
+def console_python():
+    """This interpreter as a console program, for the dry run."""
+    exe = sys.executable
+    if os.path.basename(exe).lower() == "pythonw.exe":
+        twin = os.path.join(os.path.dirname(exe), "python.exe")
+        if os.path.exists(twin):
+            return twin
+    return exe
+
+
+def login_mark():
+    """This Windows sign-in's logon time, read the way the watcher reads it."""
+    loader = importlib.machinery.SourceFileLoader("switchboard_health", HEALTH)
+    spec = importlib.util.spec_from_loader("switchboard_health", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod.login_mark()
+
+
+def failure(what, done):
+    detail = ((done.stderr or "") or (done.stdout or "")).strip()
+    return f"{what} failed (exit {done.returncode}): {detail}"
+
+
+# macOS: launchd.
+
+def old_plist():
+    return os.path.join(home(), "Library", "LaunchAgents", LABEL + ".plist")
+
+
+def target():
+    return f"gui/{uid()}/{LABEL}"
+
+
+def loaded():
+    return launchctl("print", target()).returncode == 0
+
+
+def version_key(path):
+    tail = re.split(r"[\\/]versions[\\/]node[\\/]", path)[-1]
+    return [int(n) for n in re.findall(r"\d+", tail)]
+
+
+def find_claude():
+    """The directory holding claude, from PATH, else the newest ~/.nvm node, else None."""
+    found = shutil.which("claude")
+    if found:
+        return os.path.dirname(found)
+    pattern = os.path.join(home(), ".nvm", "versions", "node", "*", "bin", "claude")
+    hits = [p for p in glob.glob(pattern) if os.access(p, os.X_OK)]
+    if hits:
+        return os.path.dirname(max(hits, key=version_key))
+    return None
+
+
+def render(state_dir, claude_bin, env):
+    """The template with its placeholders filled in. The leading comment stays as it is."""
+    with open(TEMPLATE, encoding="utf-8") as f:
+        text = f.read()
+    head, sep, body = text.partition("-->")
+    pairs = "".join(f"\t\t<key>{escape(k)}</key>\n\t\t<string>{escape(v)}</string>\n"
+                    for k, v in env.items())
+    body = body.replace("@ENVIRONMENT@\n", pairs)
+    for key, value in (("@PYTHON@", interpreter()), ("@LEGWORK@", ROOT),
+                       ("@STATE_DIR@", state_dir), ("@CLAUDE_BIN@", claude_bin)):
+        body = body.replace(key, escape(value))
+    return head + sep + body
+
+
+def warn_old_plist():
+    path = old_plist()
+    if os.path.exists(path):
+        print(f"Warning: {path} loads the health watcher at login.")
+        print(f"Remove it once the watcher is off: rm {shlex.quote(path)}")
+
+
+def mac_on(state_dir):
+    if loaded():
+        print("The health watcher is already on.")
+        warn_old_plist()
+        return 0
+    claude_bin = find_claude()
+    if claude_bin is None:
+        print("could not find claude on PATH or under ~/.nvm/versions/node/*/bin",
+              file=sys.stderr)
+        return 1
+    os.makedirs(state_dir, exist_ok=True)
+    plist = os.path.join(state_dir, LABEL + ".plist")
+    with open(plist, "w", encoding="utf-8", newline="\n") as f:
+        f.write(render(state_dir, claude_bin, job_env()))
+    print(f"Wrote {plist}")
+    if not dry_run(state_dir):
+        return 1
+    done = launchctl("bootstrap", f"gui/{uid()}", plist)
+    if done.returncode != 0:
+        print(failure("launchctl bootstrap", done), file=sys.stderr)
+        return 1
+    print("The health watcher is switched on. It runs one pass now, then every 5 minutes.")
+    print("It stays on until you run: switchboard-health-ctl off, or log out or reboot.")
+    warn_old_plist()
+    return 0
+
+
+def mac_off():
+    if not loaded():
+        print("The health watcher is already off.")
+        return 0
+    done = launchctl("bootout", target())
+    if done.returncode != 0:
+        print(failure("launchctl bootout", done), file=sys.stderr)
+        return 1
+    print("The health watcher is switched off.")
+    return 0
+
+
+# Windows: Task Scheduler.
+
+def task_state():
+    """"on", "off", or "stale" for a task registered in an earlier sign-in."""
+    done = schtasks("/Query", "/TN", TASK, "/XML")
+    if done.returncode != 0:
+        return "off"
+    m = re.search(r"--login\s+\"?(\d+)", done.stdout or "")
+    current = login_mark()
+    if m and current and m.group(1) != current:
+        return "stale"
+    return "on"
+
+
+def task_arguments(state_dir, mark):
+    args = [HEALTH, "--once", "--state-dir", state_dir]
+    for key, value in job_env().items():
+        args += ["--env", f"{key}={value}"]
+    if mark:
+        args += ["--login", mark]
+    return subprocess.list2cmdline(args)
+
+
+def task_xml(state_dir, mark):
+    return TASK_XML.format(start=time.strftime("%Y-%m-%dT%H:%M:%S"),
+                           command=escape(interpreter()),
+                           arguments=escape(task_arguments(state_dir, mark)),
+                           workdir=escape(state_dir))
+
+
+def delete_task():
+    done = schtasks("/Delete", "/TN", TASK, "/F")
+    if done.returncode != 0:
+        print(failure("schtasks /Delete", done), file=sys.stderr)
+        return False
+    return True
+
+
+def windows_on(state_dir):
+    state = task_state()
+    if state == "on":
+        print("The health watcher is already on.")
+        return 0
+    os.makedirs(state_dir, exist_ok=True)
+    mark = login_mark()
+    path = os.path.join(state_dir, LABEL + ".xml")
+    with open(path, "w", encoding="utf-16", newline="\n") as f:
+        f.write(task_xml(state_dir, mark))
+    print(f"Wrote {path}")
+    if not mark:
+        print("Note: this sign-in's logon time could not be read, so the watcher will not "
+              "switch itself off at the next sign-in. Switch it off yourself.")
+    if not dry_run(state_dir):
+        return 1
+    if state == "stale":
+        print("Replacing the task left from an earlier sign-in.")
+        if not delete_task():
+            return 1
+    done = schtasks("/Create", "/TN", TASK, "/XML", path)
+    if done.returncode != 0:
+        print(failure("schtasks /Create", done), file=sys.stderr)
+        return 1
+    started = schtasks("/Run", "/TN", TASK)
+    print("The health watcher is switched on. It runs every 5 minutes"
+          + (", starting now." if started.returncode == 0 else "."))
+    if started.returncode != 0:
+        print(f"Note: the first pass did not start now ({failure('schtasks /Run', started)}); "
+              "it runs within 5 minutes.")
+    print("It stays on until you run: switchboard-health-ctl off, or sign out or restart.")
+    return 0
+
+
+def windows_off():
+    if task_state() == "off":
+        print("The health watcher is already off.")
+        return 0
+    if not delete_task():
+        return 1
+    print("The health watcher is switched off.")
+    return 0
+
+
+# Both.
+
+def dry_run(state_dir):
+    """Show one dry-run pass. False when it failed, and then nothing is switched on."""
+    print("Dry run, nothing sent or written:")
+    try:
+        done = call([console_python(), HEALTH, "--once", "--dry-run", "--state-dir", state_dir],
+                    timeout=180)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(f"the dry run did not run: {e}: not switching on", file=sys.stderr)
+        return False
+    print(((done.stdout or "") + (done.stderr or "")).rstrip())
+    if done.returncode != 0:
+        print(f"the dry run exited {done.returncode}: not switching on", file=sys.stderr)
+        return False
+    return True
+
+
+def plain_time(stamp):
+    try:
+        return time.strftime("%Y-%m-%d %H:%M", time.strptime(stamp, "%Y-%m-%dT%H:%M:%S%z"))
+    except (TypeError, ValueError):
+        return str(stamp)
+
+
+def last_pass(state_dir):
+    path = os.path.join(state_dir, "health.jsonl")
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            lines = [l for l in f.read().splitlines() if l.strip()]
+    except OSError:
+        return "There is no pass logged yet."
+    if not lines:
+        return "There is no pass logged yet."
+    try:
+        rec = json.loads(lines[-1])
+        observed = rec.get("observed") or []
+        conditions = []
+        for o in observed:
+            c = o.get("condition", "?") if isinstance(o, dict) else str(o)
+            if c not in conditions:
+                conditions.append(c)
+        if conditions:
+            n = len(observed)
+            alerts = f"{n} alert{'' if n == 1 else 's'} ({', '.join(conditions)})"
+        else:
+            alerts = "no alerts"
+        actions = len(rec.get("actions") or [])
+        errors = rec.get("errors") or []
+        text = (f"Last pass {plain_time(rec.get('time'))}: {alerts}, "
+                f"{actions} action{'' if actions == 1 else 's'}, "
+                f"{len(errors)} error{'' if len(errors) == 1 else 's'}.")
+        for e in errors[:3]:
+            text += f"\n  error: {e}"
+        return text
+    except (ValueError, AttributeError, TypeError):
+        return "The last line of health.jsonl is unreadable."
+
+
+def cmd_on(state_dir):
+    return windows_on(state_dir) if WINDOWS else mac_on(state_dir)
+
+
+def cmd_off():
+    return windows_off() if WINDOWS else mac_off()
+
+
+def cmd_status(state_dir):
+    if WINDOWS:
+        state = task_state()
+        print("The health watcher is on." if state == "on" else "The health watcher is off.")
+        if state == "stale":
+            print("A task from an earlier sign-in is still registered; "
+                  "it switches itself off on its next pass.")
+    else:
+        print("The health watcher is on." if loaded() else "The health watcher is off.")
+    print(last_pass(state_dir))
+    if not WINDOWS:
+        warn_old_plist()
+    return 0
+
+
+def main(argv):
+    if any(a in ("-h", "--help") for a in argv):
+        print(__doc__.strip())
+        return 0
+    state_dir, rest, args = None, [], list(argv)
+    while args:
+        a = args.pop(0)
+        if a == "--state-dir" and args:
+            state_dir = args.pop(0)
+        else:
+            rest.append(a)
+    if len(rest) != 1 or rest[0] not in ("on", "off", "status"):
+        print(USAGE, file=sys.stderr)
+        return 2
+    state_dir = os.path.abspath(os.path.expanduser(state_dir or default_state_dir()))
+    return {"on": lambda: cmd_on(state_dir), "off": cmd_off,
+            "status": lambda: cmd_status(state_dir)}[rest[0]]()
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
