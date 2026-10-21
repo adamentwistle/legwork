@@ -67,6 +67,12 @@ class ProtocolRulesTests(unittest.TestCase):
         self.assertIn("A branch you could not delete goes in your `DONE`", setup)
         self.assertIn("left for the user", setup)
 
+    def test_undeleted_branch_is_the_one_hands_job_reported_in_done(self):
+        escalate = section(self.text, "Decide or escalate")
+        self.assertIn("The one exception is a branch you could not delete "
+                      "after a merge", escalate)
+        self.assertIn("is not a `DECISION`", escalate)
+
     def test_switchboard_is_claude_or_manual(self):
         self.assertIn("`LEGWORK_SWITCHBOARD`: `claude`", self.text)
         self.assertNotRegex(self.text, re.compile("hermes", re.I))

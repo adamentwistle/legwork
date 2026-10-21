@@ -61,7 +61,9 @@ If one is, write a `DECISION` entry:
 - You cannot pick between the options on the evidence you have.
 - It needs the user's hands: a step, an approval, a reinstall, a merge.
   That never goes inside an `UPDATE` or `DONE`, because the switchboard
-  only surfaces `DECISION`s.
+  only surfaces `DECISION`s. The one exception is a branch you could not
+  delete after a merge: list it in your `DONE` with the error, as Setup
+  says. It is not a `DECISION`, so it never holds up the run.
 
 Everything else is yours: implementation choices, ordering, library use
 inside the plan, and fixes.
