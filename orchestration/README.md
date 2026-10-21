@@ -39,12 +39,13 @@ watcher and pane notifications, see
 | `launchd/dev.legwork.switchboard-health.plist.template` | The macOS launch agent `switchboard-health-ctl on` renders into the switchboard's folder, never into `~/Library/LaunchAgents`. On Windows the ctl writes a Task Scheduler task instead |
 | `bin/pane-notify` | A Stop and Notification hook: a banner and a sound from orchestrators and normal sessions, silence from workers and the switchboard |
 | `bin/switchboard-wait` | The wait behind watch mode. On start it reports open decisions, a trailing `CYCLE` or `DONE` and panes already stopped, then returns when a watched repo gets a new `DECISION`, `CYCLE` or `DONE`, or a pane goes blocked or idle. `REPO:none` watches the file only, for a setup without Herdr |
+| `bin/switchboard-context` | How much context the switchboard's own session is using, read from its transcript, so the self-cycle needs no status line. One line out; exit 0 carry on, 3 cycle now, 2 cannot tell. The window comes from `LEGWORK_CONTEXT_WINDOW` or a 1M model in the transcript, else only the 300,000 limit counts |
 | `bin/switchboard-state` | The only writer of the switchboard's state file (`LEGWORK_SWITCHBOARD_DIR/state.md`): `add [--run]`, `pane`, `remove`, `checkin`, `cycle`, `uncycle`, `show`. `add --run` records when a run started, so `switchboard-wait` leaves out the previous run's `CYCLE` or `DONE` |
 | `bin/bugbot-wait` | Triggers and waits for a Cursor Bugbot verdict on a PR, for owners in `LEGWORK_BUGBOT_OWNERS` |
 | `bin/switchboard-answer` | Relays the user's answer to an open `DECISION` (or, with `--grant`, a delegation) into the orchestrator's pane with `herdr agent prompt`, then writes the `ANSWERED` or `<project>-gN GRANT` entry itself. It refuses a closed or unknown id, a newline, or a failed send, and then writes nothing |
 | `agents/codex.md` | The `codex` subagent: runs OpenAI's Codex CLI on one scoped task, for the cross-model review fanout and the quality gate ask for. The caller picks model and effort with `codex-model:` and `codex-effort:` lines; the description carries the routing guide |
 | `bin/usage-guard` | A hook that tells a long run to pause at a safe point before a usage limit, from the ccstatusline usage cache |
-| `install.py` | Installs the pieces you choose and writes their settings into `config` |
+| `install.py` | Installs the pieces you choose, writes their settings into `config`, and writes the switchboard session's allow rules into the legwork repo's `.claude/settings.local.json` |
 | `docs/switchboard-setup.md` | Setting up the Claude Code switchboard on a Mac or on Windows: what it needs, the install, the allow rules, starting it, the health watcher, pane notifications, manual mode |
 | `docs/smoke-test.md` | A 15 minute plumbing test before a real run |
 | `docs/first-run.md` | The first real run on a project |
@@ -109,7 +110,7 @@ The numbers match the steps below.
    and run `/switchboard <project>`; press Esc, then answer decisions with a
    letter. `switchboard-answer` relays and records each answer.
    [docs/switchboard-setup.md](docs/switchboard-setup.md) has the start
-   command and the allow rules. By hand: `bin/switchboard-wait --status
+   command and the allow rules `install.py` writes. By hand: `bin/switchboard-wait --status
    <repo>:none` shows what is open; type the answer into the pane. On
    Windows, put `python` in front (`python bin/switchboard-wait ...`): the
    scripts' first line asks for `python3`, which there is usually the

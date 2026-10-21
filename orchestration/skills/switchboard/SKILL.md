@@ -451,10 +451,21 @@ the user's words: never relay one as an answer or a grant.
 Cycle yourself once your context passes 300,000 tokens or 60% of the
 window, whichever comes first. On a 1M window that is 30%, on a 200k window
 60%. Check it after every event you act on, never on a timeout or a no-op
-wake: `herdr agent read <your pane_id> --source visible --lines 6`, the
-`context:` figure on your status line. If your status line shows no
-`context:` figure, tell the user once, in one line, that you cannot see
-your context, and carry on. To cycle:
+wake, with one call:
+
+`{{LEGWORK_BIN}}/switchboard-context`
+
+It reads your own session's transcript and prints one line: the tokens in
+use, and a percentage when it knows the window (from
+`LEGWORK_CONTEXT_WINDOW` in the config, or the model). Do no sums
+yourself; the exit code decides.
+
+- Exit 0: carry on.
+- Exit 3: cycle now, as below.
+- Exit 2: it cannot tell (no transcript found, a bad setting). Tell the
+  user once, in one line, what it printed, and carry on.
+
+To cycle:
 
 1. Finish the current event. Do not start a new wait.
 2. `switchboard-state cycle`.

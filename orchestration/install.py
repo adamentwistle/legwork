@@ -18,7 +18,8 @@ Pieces (--with, comma-separated, or `all`):
   switchboard  the switchboard-protocol skill orchestrators follow, the
                roadmap-planning skill, and, unless LEGWORK_SWITCHBOARD is
                manual, the switchboard skill (/switchboard, a Claude Code
-               session in a Herdr pane)
+               session in a Herdr pane) and that session's allow rules,
+               merged into <legwork>/.claude/settings.local.json
   herdr-skill  Herdr's own skill, from `herdr --skill`, if Herdr is installed
   usage-guard  a hook that tells long runs to pause before a usage limit
   codex-agent  the codex subagent: OpenAI's Codex CLI as a cross-model second
@@ -48,12 +49,16 @@ one line, so a re-run of that command still refreshes everything else.
 
 --set KEY=VALUE writes a setting into the legwork `config` file, replacing
 the key if it is already there. Re-running is safe: files are overwritten
-with the current copy and each hook is registered once.
+with the current copy, each hook is registered once, and each allow rule
+goes in once. The rules written last time are recorded in
+<legwork>/.legwork/switchboard-allow-rules.json, so a re-run replaces the
+ones whose paths changed and leaves the user's own rules alone.
 
 The functions that compute what to write (plan_copies, render,
-set_config_keys, upgrade_config, merge_usage_guard_hook,
-merge_pane_notify_hook, health_check, pane_notify_check) are pure, so the
-test suite exercises them directly. Nothing runs until main() is called.
+script_line, set_config_keys, upgrade_config, merge_usage_guard_hook,
+merge_pane_notify_hook, session_rules, rule_path, merge_allow_rules,
+health_check, pane_notify_check) are pure, so the test suite exercises
+them directly. Nothing runs until main() is called.
 """
 
 import argparse
@@ -70,7 +75,8 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 sys.path.insert(1, str(REPO / "core"))
 
-from legwork_common import iter_config_pairs, switchboard_mode, write_lf  # noqa: E402
+from legwork_common import (  # noqa: E402
+    iter_config_pairs, parse_frontmatter, switchboard_mode, write_lf)
 
 PIECES = ("shipping", "fanout", "switchboard", "herdr-skill", "usage-guard",
           "codex-agent", "switchboard-health", "pane-notify")
@@ -103,6 +109,24 @@ NOTIFY_EVENTS = ("Stop", "Notification")
 NOTIFY_TIMEOUT = 10
 HOMEBREW_NOTIFIER = "/opt/homebrew/bin/terminal-notifier"
 SCHEDULERS = {"mac": "launchctl", "windows": "schtasks"}
+
+# The switchboard session's permission rules (session_rules). Each script the
+# switchboard skill calls gets a Bash rule as the skill types it; usage-guard
+# only with --check. Then the herdr commands it runs, and grep and tail.
+SESSION_SCRIPTS = ("switchboard-wait", "switchboard-answer", "switchboard-state",
+                   "switchboard-health-ctl", "switchboard-context")
+SESSION_COMMANDS = ("herdr agent list", "herdr agent read", "herdr agent prompt",
+                    "herdr agent start", "herdr agent rename", "herdr tab create",
+                    "herdr pane current", "herdr pane read", "herdr pane send-text",
+                    "grep", "tail")
+# A Bash rule for one of those scripts, by any path: how merge_allow_rules
+# finds one written for an older checkout path.
+SCRIPT_RULE = re.compile(r"^Bash\(.*/(?:%s)(?::\*| --check)\)$" % "|".join(
+    re.escape(s) for s in SESSION_SCRIPTS + ("usage-guard",)))
+# Where the rules go, in the legwork repo, and the record of what was written
+# there last time (.legwork/ is kept out of git, like settings.local.json).
+LOCAL_SETTINGS = Path(".claude") / "settings.local.json"
+RULES_RECORD = Path(".legwork") / "switchboard-allow-rules.json"
 
 
 def parse_pieces(raw):
@@ -166,6 +190,16 @@ def script_python():
     return hook_python() if os.name == "nt" else None
 
 
+def script_line(script, bin_dir=None, python=None):
+    """How an installed file calls bin/<script>: its absolute path with
+    forward slashes, and the interpreter in front when there is one
+    (`python`, else script_python()), POSIX-quoted. On POSIX there is none
+    and the script runs by its first line."""
+    path = f"{Path(bin_dir or HERE / 'bin').as_posix()}/{script}"
+    python = python or script_python()
+    return shlex.join([Path(python).as_posix(), path]) if python else path
+
+
 def render(text, legwork_dir, bin_dir=None, pane_config_dir=None, python=None):
     """Fill an installed file's placeholders. {{LEGWORK_DIR}} becomes the
     absolute legwork repo path; {{LEGWORK_BIN}} the absolute path of the
@@ -179,19 +213,14 @@ def render(text, legwork_dir, bin_dir=None, pane_config_dir=None, python=None):
     every backslash eaten. Forward slashes work in Git Bash and in Windows
     file APIs alike, and change nothing on POSIX.
 
-    A {{LEGWORK_BIN}}/<script> call also gets the interpreter in front when
-    there is one (`python`, else script_python()), POSIX-quoted, so it runs
-    without the shebang. On POSIX there is none and the line is unchanged."""
+    A {{LEGWORK_BIN}}/<script> call becomes script_line(): the interpreter
+    in front when there is one, so it runs without the shebang."""
     env = (f" --env\n   CLAUDE_CONFIG_DIR={Path(pane_config_dir).as_posix()}"
            if pane_config_dir else "")
     bin_path = Path(bin_dir or HERE / "bin").as_posix()
     python = python or script_python()
-
-    def script(match):
-        path = f"{bin_path}/{match.group(1)}"
-        return shlex.join([Path(python).as_posix(), path]) if python else path
-
-    out = re.sub(r"\{\{LEGWORK_BIN\}\}/([\w.-]+)", script, text)
+    out = re.sub(r"\{\{LEGWORK_BIN\}\}/([\w.-]+)",
+                 lambda m: script_line(m.group(1), bin_dir, python), text)
     out = (out.replace("{{LEGWORK_DIR}}", Path(legwork_dir).as_posix())
            .replace("{{LEGWORK_BIN}}", bin_path)
            .replace("{{PANE_ENV}}", env))
@@ -304,9 +333,86 @@ def pane_notify_command(bin_dir=None, python=None):
     render() would write: slashed for Git Bash, and on Windows with the
     interpreter in front (`python`, else script_python()), as the
     usage-guard hook has it. On POSIX the script runs by its first line."""
-    script = f"{Path(bin_dir or HERE / 'bin').as_posix()}/pane-notify"
-    python = python or script_python()
-    return shlex.join(([Path(python).as_posix()] if python else []) + [script])
+    return script_line("pane-notify", bin_dir, python)
+
+
+def rule_path(path, home=None):
+    """A path as a permission rule writes it: `~/...` under the home folder,
+    else `//` and the absolute path. Windows paths go in POSIX form, the
+    drive as a lowercase first folder (E:\\dev becomes //e/dev), compared
+    with the home folder without regard to case."""
+    def posix(raw):
+        raw = str(raw).replace("\\", "/")
+        m = re.match(r"^([A-Za-z]):(/.*)?$", raw)
+        if m:
+            return f"/{m.group(1).lower()}{m.group(2) or ''}", True
+        return raw, False
+
+    target, windows = posix(path)
+    base, _ = posix(home if home is not None else Path.home())
+    target, base = target.rstrip("/") or "/", base.rstrip("/")
+    fold = str.lower if windows else str
+    if base and (fold(target) == fold(base) or fold(target).startswith(fold(base) + "/")):
+        return "~" + target[len(base):]
+    return "/" + target
+
+
+def session_rules(bin_dir, python, parents, switchboard_dir, home=None):
+    """(allow, deny): the permission rules the switchboard session needs.
+    A Bash rule for each script the switchboard skill calls, as
+    script_line() writes it (usage-guard only with --check), the herdr
+    commands it runs, `grep` and `tail`, a Read rule for the `.legwork/`
+    folders under each folder in `parents`, and Read on the switchboard dir
+    with a deny on hand edits of its state file."""
+    lines = [script_line(s, bin_dir, python) for s in SESSION_SCRIPTS]
+    allow = [f"Bash({line}:*)" for line in lines]
+    allow.append(f"Bash({script_line('usage-guard', bin_dir, python)} --check)")
+    allow += [f"Bash({command}:*)" for command in SESSION_COMMANDS]
+    for parent in parents:
+        rule = f"Read({rule_path(parent, home).rstrip('/')}/**/.legwork/**)"
+        if rule not in allow:
+            allow.append(rule)
+    folder = rule_path(switchboard_dir, home).rstrip("/")
+    allow.append(f"Read({folder}/**)")
+    return allow, [f"Edit({folder}/state.md)"]
+
+
+def repo_parents(legwork_dir):
+    """The folders the project repos on this machine sit in: the parent of
+    each `repo:` in <legwork>/projects/*.md that is a folder here, once
+    each, sorted."""
+    found = set()
+    for path in sorted(Path(legwork_dir, "projects").glob("*.md")):
+        try:
+            repo = parse_frontmatter(path.read_text(encoding="utf-8")).get("repo", "")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if repo and repo.lower() != "none":
+            repo = Path(os.path.expanduser(repo))
+            if repo.is_absolute() and repo.is_dir():
+                found.add(repo.parent)
+    return sorted(found)
+
+
+def merge_allow_rules(settings, allow, deny, last=None):
+    """A copy of a Claude settings dict with the switchboard session's rules
+    merged in. The user's own rules stay, in their order, and every rule goes
+    in once. A rule legwork wrote last time (`last`, the record of the last
+    run) that is not wanted now goes, and so does any Bash rule that names a
+    session script by a path the skill no longer types (copied by hand from
+    an older setup), so a re-run re-points changed paths."""
+    out = json.loads(json.dumps(settings or {}))
+    perms = out.setdefault("permissions", {})
+    last = last or {}
+    for key, wanted in (("allow", allow), ("deny", deny)):
+        stale = set(last.get(key) or []) - set(wanted)
+        kept = []
+        for rule in perms.get(key) or []:
+            if rule in stale or (rule not in wanted and SCRIPT_RULE.match(str(rule))):
+                continue
+            kept.append(rule)
+        perms[key] = kept + [r for r in wanted if r not in kept]
+    return out
 
 
 def _merge_hook(settings, events, marker, command, timeout, matchers=()):
@@ -392,6 +498,54 @@ def pane_notify_check(kind, which, exists=os.path.exists):
                  '([ui.toast] delivery = "off" and [ui.sound.agents] claude = "off"), '
                  "then run `herdr server reload-config`, or each one comes twice")
     return None, notes
+
+
+def read_settings_file(path):
+    """A JSON settings file as a dict, {} when it is not there. Raises
+    ValueError when it is not a JSON object."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, UnicodeDecodeError, ValueError) as e:
+        raise ValueError(f"{path} cannot be read as JSON ({e})")
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} is not a JSON object")
+    return data
+
+
+def write_session_rules(legwork_dir, switchboard_dir, dry_run, say):
+    """Merge the switchboard session's rules into <legwork>/LOCAL_SETTINGS
+    and keep what was written in RULES_RECORD, for the next run to re-point.
+    A file that is not valid JSON is left alone, with one line."""
+    local, record = legwork_dir / LOCAL_SETTINGS, legwork_dir / RULES_RECORD
+    parents = repo_parents(legwork_dir)
+    allow, deny = session_rules(HERE / "bin", None, parents, switchboard_dir)
+    try:
+        current = read_settings_file(local)
+    except ValueError as e:
+        print(f"skip the allow rules: {e}; fix or remove it, then run this again")
+        return
+    try:
+        last = read_settings_file(record)
+    except ValueError:
+        last = {}
+    say(f"write the switchboard session's permission rules into {local} "
+        f"({len(allow)} allow, {len(deny)} deny), merged with the rules there")
+    if dry_run:
+        for rule in allow:
+            print(f"  allow {rule}")
+        for rule in deny:
+            print(f"  deny {rule}")
+    else:
+        merged = merge_allow_rules(current, allow, deny, last)
+        for path, data in ((local, merged), (record, {"allow": allow, "deny": deny})):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            write_lf(path, json.dumps(data, indent=2) + "\n")
+    if not parents:
+        print(f"note: no project in {legwork_dir / 'projects'} has a repo: folder on "
+              "this machine, so no Read rule covers the repos' .legwork/ folders; "
+              "run this again once one does")
 
 
 def parse_set(values):
@@ -490,6 +644,12 @@ def main(argv=None):
             if (claude_dir / rel).exists():
                 print(f"note: {claude_dir / rel} is left from a Claude Code "
                       "switchboard; delete it if you no longer want it")
+    if "switchboard" in pieces and switchboard != "manual":
+        raw = (given.get("LEGWORK_SWITCHBOARD_DIR") or os.environ.get("LEGWORK_SWITCHBOARD_DIR")
+               or settings.get("LEGWORK_SWITCHBOARD_DIR"))
+        sb_dir = (Path(os.path.expanduser(os.path.expandvars(raw))) if raw
+                  else claude_dir / "switchboard")
+        write_session_rules(legwork_dir, sb_dir, args.dry_run, say)
 
     if "herdr-skill" in pieces:
         dest = claude_dir / "skills" / "herdr" / "SKILL.md"

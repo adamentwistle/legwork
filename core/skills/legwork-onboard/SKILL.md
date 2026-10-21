@@ -179,10 +179,12 @@ it.
     the installer's note says, then `herdr server reload-config`
   - with `switchboard-health`: trust the legwork repo in Claude Code (start
     `claude` there once), since the watcher restarts the switchboard there
-  - with a Claude Code switchboard: the allow rules its session needs, in
-    the legwork repo's gitignored `.claude/settings.local.json`, from
-    `orchestration/docs/switchboard-setup.md`, and a status line that
-    prints the `context:` figure, so the switchboard can cycle itself
+  - with a Claude Code switchboard: on a 200k context window,
+    `LEGWORK_CONTEXT_WINDOW=200k` in `config`, so the switchboard cycles
+    itself before Claude Code compacts it. The installer has already
+    written its session's allow rules into the legwork repo's gitignored
+    `.claude/settings.local.json`; a re-run after a project repo is added
+    on a new folder adds the `Read` rule for it
   - with orchestration: run the 15 minute plumbing test in
     `orchestration/docs/smoke-test.md`, including its clean-up step
 - In every repo an orchestrator will work in: `.legwork/` gitignored, and

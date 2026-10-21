@@ -19,13 +19,12 @@ are usually the same folder. `<claude dir>` is your Claude config dir:
 - **Claude Code**, with `claude` on your PATH.
 - **Python 3.9 or newer.** On a Mac that is `python3`. On Windows it is
   `python`: `python3` there is usually the Microsoft Store stub.
-- **A status line that prints the context figure.** The switchboard reads
-  its own context from the `context:` figure on the Claude Code status
-  line (`herdr agent read <pane> --source visible --lines 6`), and cycles
-  itself past 300,000 tokens or 60% of the window. Set your status line to
-  print `context:` followed by the percentage used. Without it the
-  switchboard tells you once that it cannot see its context, and never
-  cycles itself.
+- **No status line needed.** The switchboard checks its own context with
+  `orchestration/bin/switchboard-context`, which reads the session's
+  transcript under `<claude dir>/projects/`, and cycles itself past
+  300,000 tokens or 60% of the window. It learns the window from a 1M
+  model named in the transcript, or from `LEGWORK_CONTEXT_WINDOW` (see
+  Settings). Without either it goes by the 300,000 limit alone.
 - **The legwork repo trusted in Claude Code.** Start `claude` in
   `<legwork>` once and answer the "trust this folder" question. The
   switchboard runs there, and the health watcher restarts it there.
@@ -50,7 +49,7 @@ runs the same command for you.
 
 | Piece | What it installs |
 |---|---|
-| `switchboard` | The skills `switchboard-protocol` (orchestrators follow it), `switchboard` (the `/switchboard` command) and `roadmap-planning`, into `<claude dir>/skills/`. It also sets `LEGWORK_ORCHESTRATION=1` in `config` |
+| `switchboard` | The skills `switchboard-protocol` (orchestrators follow it), `switchboard` (the `/switchboard` command) and `roadmap-planning`, into `<claude dir>/skills/`, and the switchboard session's allow rules (below). It also sets `LEGWORK_ORCHESTRATION=1` in `config` |
 | `switchboard-health` | Sets `LEGWORK_SWITCHBOARD_HEALTH=1` in `config`, after checking that `herdr` and the system scheduler (`launchctl` on a Mac, `schtasks` on Windows) are on PATH. It registers no job: the switchboard runs `switchboard-health-ctl on` itself |
 | `pane-notify` | `Stop` and `Notification` hooks in `<claude dir>/settings.json` that run `orchestration/bin/pane-notify`, with a timeout of 10 seconds |
 
@@ -71,6 +70,12 @@ orchestration setting.
   state file, `state.md`, and the health watcher's files. Default
   `<claude dir>/switchboard`. `SWITCHBOARD_STATE` in the environment names
   the state file itself instead.
+- `LEGWORK_CONTEXT_WINDOW`: the switchboard session's context window, as a
+  number of tokens or with `k` or `m` after it (`200k`, `1m`). Unset, the
+  window comes from a 1M model named in the transcript, else it is unknown
+  and only the 300,000 limit counts. On a 200k window set it to `200k`, so
+  the switchboard cycles at 60% (120,000 tokens), before Claude Code
+  compacts the session.
 
 The scripts find `<legwork>/config` through the environment. For each
 setting they look at the environment variable first, then the file named by
@@ -87,77 +92,46 @@ instead; set `LEGWORK_DIR` in that file too, for the restart folder.
 
 ## Allow rules the switchboard session needs
 
-Without allow rules the switchboard stalls on a permission prompt. Put them
-in `<legwork>/.claude/settings.local.json`, merged with any rules already
-there. legwork's `.gitignore` keeps that file out of git; never commit it.
+Without allow rules the switchboard stalls on a permission prompt. The
+`switchboard` piece writes them into `<legwork>/.claude/settings.local.json`,
+unless `LEGWORK_SWITCHBOARD` is `manual`. It merges them with the rules
+already there: each rule goes in once, and your own rules stay as they are.
+It keeps a record of what it wrote in
+`<legwork>/.legwork/switchboard-allow-rules.json`, so a re-run after you
+move the checkout, the switchboard's folder or your repos replaces its old
+rules instead of adding new ones beside them. legwork's `.gitignore` keeps
+both files out of git; never commit them. `--dry-run` prints every rule it
+would write. A `settings.local.json` that is not valid JSON is left alone,
+with one line saying so.
 
-```json
-{
-  "permissions": {
-    "allow": [
-      "Bash(<bin>/switchboard-wait:*)",
-      "Bash(<bin>/switchboard-answer:*)",
-      "Bash(<bin>/switchboard-state:*)",
-      "Bash(<bin>/switchboard-health-ctl:*)",
-      "Bash(<bin>/usage-guard --check)",
-      "Bash(herdr agent list:*)",
-      "Bash(herdr agent read:*)",
-      "Bash(herdr agent prompt:*)",
-      "Bash(herdr agent start:*)",
-      "Bash(herdr agent rename:*)",
-      "Bash(herdr tab create:*)",
-      "Bash(herdr pane current:*)",
-      "Bash(herdr pane read:*)",
-      "Bash(herdr pane send-text:*)",
-      "Bash(grep:*)",
-      "Bash(tail:*)",
-      "Read(<repos>/**/.legwork/**)",
-      "Read(<switchboard dir>/**)"
-    ],
-    "deny": [
-      "Edit(<switchboard dir>/state.md)"
-    ]
-  }
-}
-```
+What it writes:
 
-A Bash rule matches the command as the skill types it, so `<bin>` must be
-the exact text in front of each script name in the installed skill. On a
-Mac that is the absolute path of `<checkout>/orchestration/bin`. On Windows
-it is the interpreter's path, a space, then that folder, all with forward
-slashes. Copy it from the installed skill. On Windows, run this in
-Git Bash, the shell Claude Code's Bash tool uses there:
-
-```
-grep -o '[^`(]*/bin/switchboard-wait' <claude dir>/skills/switchboard/SKILL.md | head -1
-```
-
-and use everything before `/switchboard-wait`.
-
-For the `Read` rules, `<repos>` is the folder your project repos sit under
-and `<switchboard dir>` is `LEGWORK_SWITCHBOARD_DIR`. Write a folder under
-your home as `~/...`, such as `~/.claude/switchboard`. Write any other
-absolute path with a leading `//`. On Windows, Claude Code matches paths in
-POSIX form, so a folder on drive E is `//e/...`.
-
-What each group is for:
-
-- The wait, answer and state scripts, and `switchboard-health-ctl on`,
-  `off` and `status`, so the switchboard can watch, relay, keep its state
-  and switch its health watcher. `usage-guard --check` reads the usage
-  cache for a weekly figure at 99%.
-- `herdr agent list`, `read` and `pane read` find panes and read them.
-  `agent prompt` relays and cycles. `tab create` and `agent start` open an
-  orchestrator pane for "run <project>", and `pane send-text` answers a
-  shell question there. `pane current` and `agent rename` let the
-  switchboard give its own pane the name `switchboard`.
-- `grep` and `tail` read the switchboard files. A Bash rule cannot be
+- A Bash rule for each script the switchboard runs, in the exact form the
+  installed skill types it: `switchboard-wait`, `switchboard-answer`,
+  `switchboard-state`, `switchboard-health-ctl` and `switchboard-context`,
+  each followed by `:*`, and `usage-guard --check` on its own. On a Mac
+  that is the script's absolute path. On Windows the interpreter's path
+  comes first, as the skill writes each line for Git Bash, the shell
+  Claude Code's Bash tool uses there.
+- `herdr agent list`, `herdr agent read` and `herdr pane read`, to find
+  panes and read them; `herdr agent prompt`, to relay and cycle;
+  `herdr tab create` and `herdr agent start`, to open an orchestrator pane
+  for "run <project>", and `herdr pane send-text`, to answer a shell
+  question there; `herdr pane current` and `herdr agent rename`, so the
+  switchboard can give its own pane the name `switchboard`.
+- `grep` and `tail`, to read the switchboard files. A Bash rule cannot be
   limited to one file, so they are allowed for any path. They only read.
-- `Read` on the repos' `.legwork/` folders and the switchboard's own
-  folder. There is no `Edit` rule: the state file changes only through
-  `switchboard-state`, and the deny rule stops a hand edit. An `Edit` rule
-  covers every tool that writes a file; Claude Code ignores `Write(path)`
-  rules.
+- `Read(<repos>/**/.legwork/**)` for each folder your project repos sit in,
+  from the `repo:` lines in `<legwork>/projects/` that name a folder on
+  this machine, and `Read(<switchboard dir>/**)` for
+  `LEGWORK_SWITCHBOARD_DIR`. A folder under your home is written `~/...`,
+  any other absolute path with a leading `//`, and a Windows drive in
+  POSIX form, so drive E is `//e/...`. With no project repo on this
+  machine yet, the installer says so; run it again once there is one.
+- One deny rule, `Edit(<switchboard dir>/state.md)`: the state file changes
+  only through `switchboard-state`. There is no `Edit` allow rule. An
+  `Edit` rule covers every tool that writes a file; Claude Code ignores
+  `Write(path)` rules.
 
 Push notifications use Claude Code's `PushNotification` tool, which needs
 no rule.

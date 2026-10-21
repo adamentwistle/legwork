@@ -342,6 +342,8 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("# LEGWORK_SESSION_ARGS=--model opus --effort high\n", example)
         self.assertIn("# LEGWORK_SWITCHBOARD_HEALTH=1\n", example)
         self.assertIn("# LEGWORK_SWITCHBOARD=claude\n", example)
+        self.assertIn("# LEGWORK_CONTEXT_WINDOW=1m\n", example)
+        self.assertIn("LEGWORK_CONTEXT_WINDOW", legwork_install.ORCHESTRATION_KEYS)
         doc = (REPO / "CONFIG.md").read_text(encoding="utf-8")
         rows = {m.group(1): m.group(2) for m in re.finditer(
             r"^\| `(LEGWORK_[A-Z_]+)` \| ([^|]+) \|", doc, re.M)}
@@ -413,6 +415,133 @@ class HookTests(unittest.TestCase):
                 r"E:\dev\engine\bin", python=r"C:\Program Files\Py\python.exe")
         self.assertEqual(cmd, "'C:/Program Files/Py/python.exe' "
                               "E:/dev/engine/bin/pane-notify")
+
+
+class AllowRulesTests(unittest.TestCase):
+    """The allow rules the switchboard piece writes into the legwork repo's
+    .claude/settings.local.json. A Bash rule matches the command as the
+    skill types it, so each rule must be the rendered line exactly."""
+
+    def rules(self, python=None, bin_dir="/engine/bin", parents=("/src",),
+              sb="/state/sb", home="/home-x"):
+        with mock.patch.object(install, "script_python", return_value=None):
+            return install.session_rules(bin_dir, python, list(parents), sb, home=home)
+
+    def test_every_script_the_skill_calls_has_a_rule_that_matches_its_line(self):
+        body = (ORCH / "skills" / "switchboard" / "SKILL.md").read_text(encoding="utf-8")
+        called = set(re.findall(r"\{\{LEGWORK_BIN\}\}/([\w.-]+)", body))
+        self.assertIn("switchboard-context", called)
+        for python in (None, "C:/Program Files/Py/python.exe"):
+            allow, _ = self.rules(python=python)
+            with mock.patch.object(install, "script_python", return_value=None):
+                out = install.render(body, "/q", "/engine/bin", python=python)
+                lines = {s: install.script_line(s, "/engine/bin", python) for s in called}
+            prefixes = [r[len("Bash("):-len(")")] for r in allow if r.startswith("Bash(")]
+            for script, line in lines.items():
+                self.assertIn(line, out, script)
+                self.assertTrue(any(p in (line + ":*", line + " --check")
+                                    for p in prefixes), (script, prefixes))
+
+    def test_windows_rules_put_the_interpreter_in_front(self):
+        with mock.patch.object(install, "Path", PureWindowsPath):
+            allow, _ = self.rules(python=r"C:\Program Files\Py\python.exe",
+                                  bin_dir=r"E:\dev\engine\bin", parents=(),
+                                  sb=r"E:\sb", home=r"C:\Users\u")
+        self.assertIn("Bash('C:/Program Files/Py/python.exe' "
+                      "E:/dev/engine/bin/switchboard-wait:*)", allow)
+        self.assertIn("Bash('C:/Program Files/Py/python.exe' "
+                      "E:/dev/engine/bin/usage-guard --check)", allow)
+
+    def test_posix_rules_name_the_bare_script(self):
+        allow, _ = self.rules()
+        self.assertIn("Bash(/engine/bin/switchboard-context:*)", allow)
+        self.assertIn("Bash(/engine/bin/usage-guard --check)", allow)
+
+    def test_herdr_read_and_deny_rules(self):
+        allow, deny = self.rules(parents=("/src", "/home-x/code"), sb="/home-x/.claude/sb")
+        for command in ("herdr agent list", "herdr agent read", "herdr agent prompt",
+                        "herdr agent start", "herdr agent rename", "herdr tab create",
+                        "herdr pane current", "herdr pane read", "herdr pane send-text",
+                        "grep", "tail"):
+            self.assertIn(f"Bash({command}:*)", allow)
+        self.assertIn("Read(//src/**/.legwork/**)", allow)
+        self.assertIn("Read(~/code/**/.legwork/**)", allow)
+        self.assertIn("Read(~/.claude/sb/**)", allow)
+        self.assertEqual(deny, ["Edit(~/.claude/sb/state.md)"])
+        self.assertEqual(len(allow), len(set(allow)))
+
+    def test_rule_path_forms(self):
+        self.assertEqual(install.rule_path("/home-x/a/b", home="/home-x"), "~/a/b")
+        self.assertEqual(install.rule_path("/srv/a", home="/home-x"), "//srv/a")
+        self.assertEqual(install.rule_path(r"E:\dev\projects", home=r"C:\Users\u"),
+                         "//e/dev/projects")
+        self.assertEqual(install.rule_path(r"c:\users\u\x", home=r"C:\Users\u"), "~/x")
+
+    def test_merge_adds_once_keeps_the_users_rules_and_repoints_old_paths(self):
+        old_allow, old_deny = self.rules(bin_dir="/old/bin", parents=("/old",),
+                                         sb="/old/sb")
+        mine = {"permissions": {
+            "defaultMode": "acceptEdits",
+            "allow": ["Bash(npm test:*)", *old_allow, "Read(//mine/**)"],
+            "deny": ["Bash(rm -rf:*)", *old_deny, "Edit(//mine/state.md)"]},
+            "env": {"A": "1"}}
+        allow, deny = self.rules()
+        # The record of what legwork wrote last time is how the old
+        # switchboard dir's Read and Edit rules are told from the user's own
+        # rules of the same shape.
+        last = {"allow": old_allow, "deny": old_deny}
+        once = install.merge_allow_rules(mine, allow, deny, last)
+        twice = install.merge_allow_rules(once, allow, deny, {"allow": allow, "deny": deny})
+        self.assertEqual(once, twice)
+        perms = once["permissions"]
+        self.assertEqual(perms["defaultMode"], "acceptEdits")
+        self.assertEqual(once["env"], {"A": "1"})
+        for rule in ("Bash(npm test:*)", "Read(//mine/**)"):
+            self.assertIn(rule, perms["allow"])
+        for rule in ("Bash(rm -rf:*)", "Edit(//mine/state.md)"):
+            self.assertIn(rule, perms["deny"])
+        for rule in allow:
+            self.assertEqual(perms["allow"].count(rule), 1, rule)
+        self.assertEqual(perms["deny"].count(deny[0]), 1)
+        self.assertNotIn("old", json.dumps(perms))
+        self.assertIn("/old/bin", json.dumps(mine))  # the input is not changed
+
+    def test_without_a_record_only_script_rules_are_repointed(self):
+        # Rules copied by hand from an older setup doc: the Bash rules that
+        # name a legwork script at an old path are replaced, since they no
+        # longer match what the skill types; Read and Edit rules stay, as
+        # they cannot be told from the user's own.
+        hand = {"permissions": {
+            "allow": ["Bash(/old/bin/switchboard-wait:*)",
+                      "Bash(/old/bin/usage-guard --check)",
+                      "Bash(/old/bin/switchboard-wait --status:*)",
+                      "Read(//old/sb/**)"],
+            "deny": ["Edit(//old/sb/state.md)"]}}
+        allow, deny = self.rules()
+        perms = install.merge_allow_rules(hand, allow, deny)["permissions"]
+        self.assertNotIn("Bash(/old/bin/switchboard-wait:*)", perms["allow"])
+        self.assertNotIn("Bash(/old/bin/usage-guard --check)", perms["allow"])
+        for rule in ("Bash(/old/bin/switchboard-wait --status:*)", "Read(//old/sb/**)"):
+            self.assertIn(rule, perms["allow"])
+        self.assertEqual(perms["deny"], ["Edit(//old/sb/state.md)", *deny])
+
+    def test_merge_into_nothing(self):
+        allow, deny = self.rules()
+        out = install.merge_allow_rules({}, allow, deny)
+        self.assertEqual(out, {"permissions": {"allow": allow, "deny": deny}})
+
+    def test_repo_parents_come_from_the_project_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp).resolve()
+            (tmp / "code" / "a").mkdir(parents=True)
+            projects = tmp / "legwork" / "projects"
+            projects.mkdir(parents=True)
+            (projects / "a.md").write_text(f"---\nrepo: {tmp / 'code' / 'a'}\n---\n")
+            (projects / "b.md").write_text(f"---\nrepo: {tmp / 'code' / 'b'}\n---\n")
+            (projects / "c.md").write_text("---\nrepo: none\n---\n")
+            (projects / "d.md").write_text(f"---\nrepo: {tmp / 'gone' / 'd'}\n---\n")
+            self.assertEqual(install.repo_parents(tmp / "legwork"), [tmp / "code"])
+            self.assertEqual(install.repo_parents(tmp / "nowhere"), [])
 
 
 class PlatformCheckTests(unittest.TestCase):
@@ -630,6 +759,83 @@ class InstallRunTests(unittest.TestCase):
                 self.assertEqual(len(note), 1, out)
                 self.assertEqual("profile key" in note[0], profile, note)
                 self.assertEqual("now reads claude" in note[0], mode, note)
+
+    def local_rules(self, legwork):
+        path = legwork / ".claude" / "settings.local.json"
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+
+    def test_switchboard_writes_the_session_allow_rules(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            (tmp / "code" / "a").mkdir(parents=True)
+            (tmp / "legwork" / "projects").mkdir(parents=True)
+            (tmp / "legwork" / "projects" / "a.md").write_text(
+                f"---\nrepo: {(tmp / 'code' / 'a').resolve()}\n---\n")
+            local = tmp / "legwork" / ".claude" / "settings.local.json"
+            local.parent.mkdir()
+            local.write_text(json.dumps({"permissions": {"allow": ["Bash(npm test:*)"]}}))
+            legwork, claude, out = self.run_install(tmp, ["--with", "switchboard"])
+            perms = self.local_rules(legwork)["permissions"]
+            self.assertEqual(perms["allow"][0], "Bash(npm test:*)")
+            wait = install.script_line("switchboard-wait")
+            self.assertIn(f"Bash({wait}:*)", perms["allow"])
+            self.assertIn(f"Bash({install.script_line('switchboard-context')}:*)",
+                          perms["allow"])
+            skill = (claude / "skills" / "switchboard" / "SKILL.md").read_text()
+            self.assertIn(f"`{wait} ", skill)
+            sb = install.rule_path(claude / "switchboard", home=tmp)
+            self.assertIn(f"Read({sb}/**)", perms["allow"])
+            self.assertEqual(perms["deny"], [f"Edit({sb}/state.md)"])
+            code = install.rule_path((tmp / "code").resolve(), home=tmp)
+            self.assertIn(f"Read({code}/**/.legwork/**)", perms["allow"])
+            self.assertIn("settings.local.json", out)
+            self.assertNotIn(b"\r", local.read_bytes())
+            record = json.loads((legwork / ".legwork" / "switchboard-allow-rules.json")
+                                .read_text(encoding="utf-8"))
+            self.assertNotIn("Bash(npm test:*)", record["allow"])
+            # A re-run with another switchboard dir re-points, adds nothing twice.
+            before = len(perms["allow"])
+            self.run_install(tmp, ["--with", "switchboard", "--set",
+                                   f"LEGWORK_SWITCHBOARD_DIR={tmp / 'sb2'}"])
+            again = self.local_rules(legwork)["permissions"]
+            self.assertEqual(len(again["allow"]), before)
+            sb2 = install.rule_path(tmp / "sb2", home=tmp)
+            self.assertIn(f"Read({sb2}/**)", again["allow"])
+            self.assertNotIn(f"Read({sb}/**)", again["allow"])
+            self.assertEqual(again["deny"], [f"Edit({sb2}/state.md)"])
+
+    def test_manual_switchboard_writes_no_allow_rules(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            legwork, _, out = self.run_install(
+                Path(tmp), ["--with", "switchboard"], config="LEGWORK_SWITCHBOARD=manual\n")
+            self.assertIsNone(self.local_rules(legwork))
+            self.assertNotIn("settings.local.json", out)
+
+    def test_no_project_repos_is_a_note(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            legwork, _, out = self.run_install(Path(tmp), ["--with", "switchboard"])
+            self.assertIn(".legwork", out)
+            perms = self.local_rules(legwork)["permissions"]
+            self.assertFalse([r for r in perms["allow"] if ".legwork" in r])
+
+    def test_unreadable_local_settings_are_left_alone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp) / "legwork" / ".claude" / "settings.local.json"
+            local.parent.mkdir(parents=True)
+            local.write_text("{not json")
+            _, _, out = self.run_install(Path(tmp), ["--with", "switchboard"])
+            self.assertEqual(local.read_text(), "{not json")
+            self.assertIn("skip the allow rules", out)
+
+    def test_dry_run_shows_the_allow_rules_and_writes_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            legwork, _, out = self.run_install(Path(tmp), ["--with", "switchboard",
+                                                           "--dry-run"])
+            self.assertIsNone(self.local_rules(legwork))
+            self.assertIn("would write", out)
+            self.assertIn(f"Bash({install.script_line('switchboard-wait')}:*)", out)
+            self.assertIn("Bash(herdr agent prompt:*)", out)
+            self.assertIn("deny Edit(", out)
 
     def test_dry_run_writes_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -884,9 +1090,32 @@ class DocCommandTests(unittest.TestCase):
                        "brew install terminal-notifier", "Windows PowerShell",
                        "launchd", "Task Scheduler", "/switchboard resume",
                        "LEGWORK_SESSION_ARGS", "LEGWORK_SWITCHBOARD_DIR",
-                       "context:", "## Manual mode", "LEGWORK_DIR", "LEGWORK_CONFIG",
+                       "switchboard-context", "LEGWORK_CONTEXT_WINDOW",
+                       "## Manual mode", "LEGWORK_DIR", "LEGWORK_CONFIG",
                        "Git Bash", "SWITCHBOARD_STATE"):
             self.assertIn(needle, text)
+
+    def test_switchboard_setup_lets_the_installer_write_the_allow_rules(self):
+        text = (ORCH / "docs" / "switchboard-setup.md").read_text(encoding="utf-8")
+        section = text.split("## Allow rules", 1)[1].split("\n## ", 1)[0]
+        # No copy step: the installer writes them.
+        for gone in ("grep -o", "Copy it from", '"permissions"'):
+            self.assertNotIn(gone, section)
+        for needle in ("settings.local.json", "switchboard-allow-rules.json",
+                       "--dry-run", "switchboard-context", "usage-guard --check",
+                       "herdr agent prompt", "Edit(", ".legwork/"):
+            self.assertIn(needle, section)
+        # The switchboard needs no status line of its own.
+        needs = text.split("## What you need", 1)[1].split("\n## ", 1)[0]
+        self.assertNotIn("context:", needs)
+        self.assertIn("No status line", needs)
+
+    def test_readme_table_lists_every_script(self):
+        text = (ORCH / "README.md").read_text(encoding="utf-8")
+        table = text.split("## What's here", 1)[1].split("\n## ", 1)[0]
+        for path in sorted((ORCH / "bin").iterdir()):
+            if path.is_file():
+                self.assertIn(f"`bin/{path.name}`", table, path.name)
 
     def test_flow_diagram_shows_the_watcher_banner(self):
         text = (ORCH / "README.md").read_text(encoding="utf-8")
