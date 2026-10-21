@@ -65,11 +65,12 @@ in `house-rules.md` beside `config`; see `house-rules.example.md`.
 
 ```
  User --- 1. planning session, roadmap-planning ---> a queued /fanout prompt
-  ^ |                                                    run <project>  |
-  | | 3. press Esc, then answer with a letter                           |
-  | |    (a push comes for a DECISION, a DONE or a                      |
-  | |    blocked pane)                                                  |
-  | v                                                                   |
+  ^ | ^                                                  run <project>  |
+  | | : banner if the switchboard is stuck ...............              |
+  | | 3. press Esc, then answer with a letter            :              |
+  | |    (a push comes for a DECISION, a DONE or a       :              |
+  | |    blocked pane)                                   :              |
+  | v                                                    :              |
  +-----------------------------+  on, off   +-----------------------+   |
  | switchboard                 |<---------->| 5. switchboard-health |   |
  | a Claude Code session in    |  prompts,  | a script, every 5 min |   |
