@@ -363,7 +363,8 @@ def session_rules(bin_dir, python, parents, switchboard_dir, home=None):
     script_line() writes it (usage-guard only with --check), the herdr
     commands it runs, `grep` and `tail`, a Read rule for the `.legwork/`
     folders under each folder in `parents`, and Read on the switchboard dir
-    with a deny on hand edits of its state file."""
+    with a deny on hand edits of its state file (none when the dir is
+    None)."""
     lines = [script_line(s, bin_dir, python) for s in SESSION_SCRIPTS]
     allow = [f"Bash({line}:*)" for line in lines]
     allow.append(f"Bash({script_line('usage-guard', bin_dir, python)} --check)")
@@ -372,9 +373,39 @@ def session_rules(bin_dir, python, parents, switchboard_dir, home=None):
         rule = f"Read({rule_path(parent, home).rstrip('/')}/**/.legwork/**)"
         if rule not in allow:
             allow.append(rule)
+    if switchboard_dir is None:
+        return allow, []
     folder = rule_path(switchboard_dir, home).rstrip("/")
     allow.append(f"Read({folder}/**)")
     return allow, [f"Edit({folder}/state.md)"]
+
+
+def switchboard_dir(raw, claude_dir, env=None, home=None):
+    """The switchboard dir the scripts will use, from LEGWORK_SWITCHBOARD_DIR
+    `raw`, or <claude dir>/switchboard when it is unset. $VAR, ${VAR},
+    %VAR% and ~ are expanded. HOME and USERPROFILE fall back to the home
+    folder: the scripts run in Git Bash on Windows, where $HOME is set even
+    when the installer's shell has none. None when the result is still not
+    an absolute path, so no rule is written for it."""
+    if not raw:
+        return Path(claude_dir) / "switchboard"
+    env = os.environ if env is None else env
+    home = str(home if home is not None else Path.home())
+
+    def expand(m):
+        name = m.group(1) or m.group(2) or m.group(3)
+        value = env.get(name) or (home if name in ("HOME", "USERPROFILE") else None)
+        return value if value is not None else m.group(0)
+
+    text = re.sub(r"\$\{(\w+)\}|\$(\w+)|%(\w+)%", expand, str(raw).strip())
+    if text == "~" or text.startswith(("~/", "~\\")):
+        text = home + text[1:]
+    if "$" in text or "%" in text:
+        return None
+    path = Path(text)
+    if not (path.is_absolute() or text.startswith("/")):
+        return None
+    return path
 
 
 def repo_parents(legwork_dir):
@@ -647,8 +678,11 @@ def main(argv=None):
     if "switchboard" in pieces and switchboard != "manual":
         raw = (given.get("LEGWORK_SWITCHBOARD_DIR") or os.environ.get("LEGWORK_SWITCHBOARD_DIR")
                or settings.get("LEGWORK_SWITCHBOARD_DIR"))
-        sb_dir = (Path(os.path.expanduser(os.path.expandvars(raw))) if raw
-                  else claude_dir / "switchboard")
+        sb_dir = switchboard_dir(raw, claude_dir)
+        if sb_dir is None:
+            print(f"note: LEGWORK_SWITCHBOARD_DIR={raw} is not an absolute path here, "
+                  "so no rule covers the switchboard dir; set it to a full path "
+                  "and run this again")
         write_session_rules(legwork_dir, sb_dir, args.dry_run, say)
 
     if "herdr-skill" in pieces:
