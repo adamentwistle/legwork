@@ -18,9 +18,10 @@ Which session:
                 Bash call to the session running it, else the newest
                 transcript for the current folder. The session's own
                 transcript was written at the very call that runs this, so
-                when another transcript in its folder is more than 30
-                seconds newer, the id is taken as stale (one left from
-                before a /clear) and that newest one is read instead.
+                when it was last written more than 10 seconds ago and a
+                newer transcript is in its folder, the id is taken as stale
+                (one left from before a /clear) and that newest one is
+                read instead.
 
 The context in use is the last assistant message's input_tokens plus
 cache_read_input_tokens plus cache_creation_input_tokens. Subagent and
@@ -46,6 +47,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(1, os.path.join(os.path.dirname(os.path.realpath(__file__)), ".."))
@@ -58,7 +60,7 @@ except ImportError:  # copied out of the checkout: environment only
 LIMIT = 300000
 PERCENT = 60
 SLUG_MAX = 200
-FRESH = 30  # seconds a newer transcript may lead the own one by
+STALE = 10  # seconds since its last write that make the own transcript stale
 CARRY_ON, CANNOT_TELL, CYCLE = 0, 2, 3
 ONE_M = re.compile(r"\[1m\]", re.I)
 
@@ -140,10 +142,12 @@ def own_transcript(projects, session):
     hits = sorted(projects.glob(f"*/{session}.jsonl"), key=mtime, reverse=True)
     if not hits:
         return None
-    top = newest(hits[0].parent)
-    if top and top != hits[0] and mtime(top) - mtime(hits[0]) > FRESH:
+    own = hits[0]
+    top = newest(own.parent)
+    if (top and top != own and mtime(top) > mtime(own)
+            and time.time() - mtime(own) > STALE):
         return top
-    return hits[0]
+    return own
 
 
 def find_transcript(config_dir, session=None, cwd=None, own=None):

@@ -19,12 +19,12 @@ are usually the same folder. `<claude dir>` is your Claude config dir:
 - **Claude Code**, with `claude` on your PATH.
 - **Python 3.9 or newer.** On a Mac that is `python3`. On Windows it is
   `python`: `python3` there is usually the Microsoft Store stub.
-- **No status line needed.** The switchboard checks its own context with
-  `orchestration/bin/switchboard-context`, which reads the session's
-  transcript under `<claude dir>/projects/`, and cycles itself past
-  300,000 tokens or 60% of the window. It learns the window from a 1M
-  model named in the transcript, or from `LEGWORK_CONTEXT_WINDOW` (see
-  Settings). Without either it goes by the 300,000 limit alone.
+- **No status line needed.** The switchboard checks its own context, and
+  each orchestrator's, with `orchestration/bin/switchboard-context`, which
+  reads the session's transcript under `<claude dir>/projects/`. It cycles
+  itself past 300,000 tokens or 60% of the window. It learns the window
+  from a 1M model named in the transcript, or from `LEGWORK_CONTEXT_WINDOW`
+  (see Settings). Without either it goes by the 300,000 limit alone.
 - **The legwork repo trusted in Claude Code.** Start `claude` in
   `<legwork>` once and answer the "trust this folder" question. The
   switchboard runs there, and the health watcher restarts it there.

@@ -477,6 +477,30 @@ class AllowRulesTests(unittest.TestCase):
                          "//e/dev/projects")
         self.assertEqual(install.rule_path(r"c:\users\u\x", home=r"C:\Users\u"), "~/x")
 
+    def test_switchboard_dir_expands_home_even_when_the_variable_is_unset(self):
+        # PowerShell on Windows has no HOME, but the scripts run in Git Bash,
+        # where $HOME is the home folder, so the rules must name that folder.
+        claude, home = Path("/c-dir").resolve(), Path("/h-dir").resolve()
+        sb = install.switchboard_dir
+        self.assertEqual(sb(None, claude, env={}, home=home), claude / "switchboard")
+        for raw in ("$HOME/.claude/sb", "${HOME}/.claude/sb", "%USERPROFILE%/.claude/sb",
+                    "~/.claude/sb"):
+            self.assertEqual(sb(raw, claude, env={}, home=home),
+                             home / ".claude" / "sb", raw)
+        self.assertEqual(sb("$HOME/sb", claude, env={"HOME": str(claude)}, home=home),
+                         claude / "sb")
+        self.assertEqual(sb("$STATE/sb", claude, env={"STATE": str(claude)}, home=home),
+                         claude / "sb")
+        self.assertEqual(install.rule_path(sb("/c/sb", claude, env={}, home=home),
+                                           home="/h-x"), "//c/sb")
+        for raw in ("relative/sb", "$NOT_SET/sb"):
+            self.assertIsNone(sb(raw, claude, env={}, home=home), raw)
+
+    def test_no_switchboard_dir_means_no_dir_rules(self):
+        allow, deny = self.rules(sb=None)
+        self.assertEqual(deny, [])
+        self.assertFalse([r for r in allow if r.startswith("Read(") and ".legwork" not in r])
+
     def test_merge_adds_once_keeps_the_users_rules_and_repoints_old_paths(self):
         old_allow, old_deny = self.rules(bin_dir="/old/bin", parents=("/old",),
                                          sb="/old/sb")
@@ -803,6 +827,17 @@ class InstallRunTests(unittest.TestCase):
             self.assertIn(f"Read({sb2}/**)", again["allow"])
             self.assertNotIn(f"Read({sb}/**)", again["allow"])
             self.assertEqual(again["deny"], [f"Edit({sb2}/state.md)"])
+
+    def test_a_switchboard_dir_that_is_not_absolute_gets_no_rules_and_a_note(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            legwork, _, out = self.run_install(
+                Path(tmp), ["--with", "switchboard"],
+                config="LEGWORK_SWITCHBOARD_DIR=$NOT_SET_HERE/sb\n")
+            perms = self.local_rules(legwork)["permissions"]
+            self.assertNotIn("NOT_SET_HERE", json.dumps(perms))
+            self.assertEqual(perms.get("deny", []), [])
+            self.assertIn("LEGWORK_SWITCHBOARD_DIR", out)
+            self.assertIn("not an absolute path", out)
 
     def test_manual_switchboard_writes_no_allow_rules(self):
         with tempfile.TemporaryDirectory() as tmp:
