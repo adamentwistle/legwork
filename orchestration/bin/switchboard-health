@@ -1,0 +1,772 @@
+#!/usr/bin/env python3
+"""Check on the switchboard and the orchestrators it watches. No LLM.
+
+Usage: switchboard-health --once [--dry-run] [--state-dir DIR]
+                          [--env KEY=VALUE ...] [--login MARK]
+
+Run every 5 minutes by switchboard-health-ctl: a launch agent on macOS, a
+Task Scheduler task on Windows. One pass reads the switchboard's state file,
+DIR/state.md (written only by switchboard-state), and `herdr agent list`,
+then checks in this order:
+
+  1. The switchboard pane: the agent whose name is "switchboard", else whose
+     title is (herdr's title, else its terminal title). Blocked (a prompt it
+     cannot clear itself): banner to the user. Missing (pane gone or its
+     agent exited): restart it, see below.
+  2. Its cycle: state.md's last line is "CYCLE <date>" and the pane is idle:
+     send "/clear", then, once herdr reports a new session id for the pane
+     (the sign /clear took, waited for up to 30 s), "/rename switchboard"
+     and "/switchboard resume". The fingerprint holds the CYCLE line's date.
+     Still the last line, with the pane idle, on a later pass: send the
+     three again, once. Still there on the pass after that: banner.
+  3. The waits: `switchboard-wait --status` on every watched repo. "wait none"
+     with the switchboard idle, on two passes in a row: prompt
+     "SWITCHBOARD HEALTH wait-none: <repo>". Not counted while the CYCLE
+     marker is there, because a switchboard asking to be cycled has stopped
+     watching on purpose.
+  4. The orchestrators. A pane blocked, or idle with no trailing CYCLE or
+     DONE, on two passes in a row: prompt
+     "SWITCHBOARD HEALTH check-in <project>: <condition>". A pane working
+     whose .legwork/switchboard.md mtime and herdr state_change_seq have not
+     moved for 60 minutes: prompt "SWITCHBOARD HEALTH stall <project>: <N>
+     min with no change" and show a banner.
+
+"Idle" means herdr's idle or done: both mean the agent is ready for input.
+Prompts go only to an idle switchboard, never with Esc or any other key, so
+a running wait is never cut short. At most one prompt lands per pass: once
+one is sent the switchboard is busy with it, so the rest are logged as
+deferred and sent on later passes, in check order. A prompt that has to
+wait for an idle switchboard is deferred the same way.
+
+Every alert has a fingerprint (repo, pane, condition). One fingerprint
+prompts once and banners once, until a pass no longer sees the condition. A
+banner is terminal-notifier on macOS (found on PATH, else in /opt/homebrew/bin)
+and a Windows toast through powershell.exe on Windows. A banner that cannot be
+shown writes a note to stderr and is logged as failed, and the fingerprint
+stays open, so the next pass tries again.
+
+Restart: when the switchboard is missing, open a workspace in the legwork
+folder (LEGWORK_DIR, else this checkout) with DISABLE_AUTO_UPDATE=true and the
+job's CLAUDE_CONFIG_DIR, when it has one (a scheduled job has no current pane
+to split), name the pane, `herdr agent start switchboard --kind claude ...
+-- <LEGWORK_SESSION_ARGS>` (default "--model opus --effort high"), then send
+"/rename switchboard" and "/switchboard resume". The folder must be one Claude
+Code already trusts, or the start stops at the trust question. At most one
+restart an hour. Missing again inside that hour, or a start that ends in
+agent_not_ready, shows a banner asking the user to start it by hand, and does
+not retry until the hour is up. With no state.md the switchboard has never
+run, so nothing is checked or restarted. A state.md that watches nothing is
+not restarted either: the user may have closed the switchboard on purpose.
+Both are logged as a note.
+
+Switching itself off: a pass that finds nothing to watch (no state.md, or a
+state.md that watches nothing and has no CYCLE marker), after a pass that
+found the same, runs `switchboard-health-ctl off` as its last act, once the
+pass is logged. The switchboard switches the watcher on when it starts and
+off when its watch list empties; this catches the times it could not, such
+as a /clear or a closed pane. The count starts again after a long gap and
+after switching off, so a watcher switched on again gets two passes.
+
+--login MARK (Windows): the sign-in the task was switched on in. A pass in a
+later sign-in switches the watcher off and checks nothing, so on Windows too
+the watcher is off after every sign-in until it is switched on again. A
+macOS launch agent goes at logout by itself.
+
+--env KEY=VALUE sets one environment variable for the pass, before any
+setting is read. The Windows task uses it to carry CLAUDE_CONFIG_DIR and the
+legwork settings, as the launch agent's environment does on macOS.
+
+Each pass appends one JSON line to DIR/health.jsonl and keeps fingerprints,
+two-pass counts, the off count, stall clocks, the last pass and the last
+restart in DIR/health-state.json. A pass more than 15 minutes after the last
+one (the computer slept, or the job did not run) restarts every stall clock
+and two-pass count, so a sleep is never read as a stall. Prompts and banners
+already sent stay sent. It never writes state.md.
+
+A pane id that is not a plain id or name (not a string, empty, or starting
+with "-") never reaches herdr: it is logged as an error and that check is
+skipped. A check of one repo that fails for any reason is logged as an
+error line, its alerts carried over, and the pass goes on to the next.
+
+--dry-run prints what the pass would do, sends nothing, starts nothing and
+writes nothing (not even the log), so it is safe against the real state.
+--state-dir defaults to LEGWORK_SWITCHBOARD_DIR (environment or legwork
+config), else $CLAUDE_CONFIG_DIR/switchboard, else ~/.claude/switchboard:
+the folder switchboard-state and switchboard-wait use.
+
+Exit 0 after a pass, 2 on bad arguments.
+"""
+import base64
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(1, os.path.join(HERE, ".."))
+try:
+    from settings import setting  # orchestration/settings.py, same checkout
+except ImportError:  # copied out of the checkout: environment only
+    def setting(key, default=None):
+        return os.environ.get(key) or default
+
+WINDOWS = os.name == "nt"
+ROOT = os.path.dirname(os.path.dirname(HERE))  # the legwork checkout this script is in
+HOMEBREW_NOTIFIER = "/opt/homebrew/bin/terminal-notifier"
+NOTIFIER = shutil.which("terminal-notifier") or (
+    HOMEBREW_NOTIFIER if os.path.exists(HOMEBREW_NOTIFIER) else None)
+POWERSHELL = shutil.which("powershell.exe") or (
+    os.path.join(os.environ["SystemRoot"], "System32", "WindowsPowerShell", "v1.0",
+                 "powershell.exe") if os.environ.get("SystemRoot") else None)
+WAIT = os.path.join(HERE, "switchboard-wait")
+CTL = os.path.join(HERE, "switchboard-health-ctl")
+STATE_FILE = None  # DIR/state.md, set per pass
+NAME = "switchboard"
+TITLE = "legwork switchboard"
+SESSION_ARGS = "--model opus --effort high"
+READY = ("idle", "done")
+CYCLE_PROMPTS = ("/clear", "/rename switchboard", "/switchboard resume")
+RESUME_PROMPTS = ("/rename switchboard", "/switchboard resume")
+HERDR_TIMEOUT = 30
+CLEAR_TIMEOUT = 30  # seconds to wait for /clear to start a new session
+CLEAR_POLL = 1
+START_TIMEOUT = 90  # seconds herdr gives Claude Code to come up
+STALL = 60 * 60
+RESTART_GAP = 60 * 60
+PASS_GAP = 15 * 60  # longer than this between passes: start counting again
+OFF_PASSES = 2  # passes in a row with nothing to watch before switching off
+BY_HAND = ("Start it yourself: run /switchboard resume in a Claude Code pane "
+           "named switchboard.")
+ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+# The toast, shown by Windows PowerShell 5.1 through the WinRT types it can
+# load with no module. The text comes in through the environment, never
+# into the script. The app id is PowerShell's own, which Windows knows.
+TOAST = r"""
+$ErrorActionPreference = 'Stop'
+$null = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
+$null = [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime]
+$e = [System.Security.SecurityElement]
+$xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+$xml.LoadXml('<toast><visual><binding template="ToastGeneric"><text>' + $e::Escape($env:LEGWORK_TOAST_TITLE) + '</text><text>' + $e::Escape($env:LEGWORK_TOAST_TEXT) + '</text></binding></visual></toast>')
+$app = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
+[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($app).Show([Windows.UI.Notifications.ToastNotification]::new($xml))
+"""
+
+PANE = re.compile(r"[A-Za-z0-9][A-Za-z0-9:_.-]*")
+
+
+def now():
+    return time.time()
+
+
+def default_state_dir():
+    return (setting("LEGWORK_SWITCHBOARD_DIR")
+            or os.path.join(os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR")
+                                               or "~/.claude"), "switchboard"))
+
+
+def legwork_dir():
+    """The switchboard pane's start folder: LEGWORK_DIR, else this checkout."""
+    return setting("LEGWORK_DIR") or ROOT
+
+
+def session_args():
+    return shlex.split(setting("LEGWORK_SESSION_ARGS") or SESSION_ARGS)
+
+
+def call(argv, timeout, env=None):
+    """Run one command and return its CompletedProcess, output as text. On
+    Windows no console window opens for it. The tests replace this."""
+    extra = {}
+    if os.name == "nt":
+        extra["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    return subprocess.run(argv, capture_output=True, text=True, errors="replace",
+                          timeout=timeout, env=env, **extra)
+
+
+def child_python():
+    """The interpreter for the scripts this pass runs. The Windows task runs
+    under pythonw.exe; its console twin keeps their own herdr calls from
+    opening a window."""
+    exe = sys.executable
+    if os.path.basename(exe).lower() == "pythonw.exe":
+        twin = os.path.join(os.path.dirname(exe), "python.exe")
+        if os.path.exists(twin):
+            return twin
+    return exe
+
+
+def login_mark():
+    """This Windows sign-in's logon time, as a string, or None when it cannot
+    be read (or off Windows). An RDP reconnect keeps it; a new sign-in or a
+    reboot changes it."""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class Info(ctypes.Structure):  # WTSINFOW
+            _fields_ = ([("State", ctypes.c_int), ("SessionId", wintypes.DWORD)]
+                        + [(n, wintypes.DWORD) for n in (
+                            "InBytes", "OutBytes", "InFrames", "OutFrames",
+                            "InCompressed", "OutCompressed")]
+                        + [("Station", ctypes.c_wchar * 32), ("Domain", ctypes.c_wchar * 17),
+                           ("User", ctypes.c_wchar * 21)]
+                        + [(n, ctypes.c_longlong) for n in (
+                            "ConnectTime", "DisconnectTime", "LastInputTime", "LogonTime",
+                            "CurrentTime")])
+
+        wts = ctypes.WinDLL("wtsapi32")
+        buf, size = ctypes.c_void_p(), wintypes.DWORD()
+        # WTS_CURRENT_SESSION, WTSSessionInfo
+        if not wts.WTSQuerySessionInformationW(None, wintypes.DWORD(0xFFFFFFFF), 24,
+                                               ctypes.byref(buf), ctypes.byref(size)):
+            return None
+        try:
+            if size.value < ctypes.sizeof(Info):
+                return None
+            logon = ctypes.cast(buf, ctypes.POINTER(Info)).contents.LogonTime
+        finally:
+            wts.WTSFreeMemory(buf)
+        return str(logon) if logon > 0 else None
+    except (OSError, AttributeError, ValueError):
+        return None
+
+
+def valid_pane(pane):
+    """True for a pane id or agent name herdr can take as one argument, never a flag."""
+    return isinstance(pane, str) and PANE.fullmatch(pane) is not None
+
+
+def herdr(*args, timeout=HERDR_TIMEOUT):
+    """(result, None) when herdr succeeded, else (None, why)."""
+    try:
+        done = call(["herdr"] + list(args), timeout)
+    except subprocess.TimeoutExpired:
+        return None, f"herdr {' '.join(args[:2])} timed out after {timeout} s"
+    except OSError as e:
+        return None, f"could not run herdr: {e}"
+    # herdr prints a result on stdout, and an error as JSON on stderr.
+    raw = done.stdout if (done.stdout or "").strip() else (done.stderr or "")
+    try:
+        reply = json.loads(raw)
+    except ValueError:
+        reply = None
+    if done.returncode == 0:
+        result = reply.get("result") if isinstance(reply, dict) else None
+        return (result if isinstance(result, dict) else {}), None
+    try:
+        detail = reply["error"]["code"]
+    except (TypeError, KeyError):
+        detail = raw.strip()[:200]
+    return None, f"herdr {' '.join(args[:2])} failed (exit {done.returncode}) {detail}".strip()
+
+
+def read_state(path):
+    """The switchboard's state file as {"watching": [...], "cycle": line or None}, or None."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            lines = [l.strip() for l in f.read().splitlines()]
+    except OSError:
+        return None
+    watching, section = [], None
+    for line in lines:
+        if line.startswith("## "):
+            section = line[3:].strip()
+        elif section == "watching" and line and not line.startswith("#"):
+            parts = line.split()
+            if len(parts) >= 3:
+                repo = os.path.expanduser(" ".join(parts[1:-1]))
+                watching.append((parts[0], repo, parts[-1]))
+    filled = [l for l in lines if l]
+    cycle = filled[-1] if filled and filled[-1].startswith("CYCLE") else None
+    return {"watching": watching, "cycle": cycle}
+
+
+def find_switchboard(agents):
+    for field in ("name", "title", "terminal_title_stripped"):
+        for a in agents:
+            if isinstance(a, dict) and a.get(field) == NAME:
+                return a
+    return None
+
+
+def find_pane(agents, pane):
+    for a in agents:
+        if isinstance(a, dict) and pane in (a.get("pane_id"), a.get("name")):
+            return a
+    return None
+
+
+def wait_status(repo, pane):
+    """switchboard-wait --status lines for one repo, repo name dropped, or (None, why).
+
+    The wait reads the same state file, so a CYCLE or DONE from before the run
+    started is left out and never counts as this run's end.
+    """
+    try:
+        done = call([child_python(), WAIT, "--status", "--state", STATE_FILE,
+                     f"{repo}:{pane}"], HERDR_TIMEOUT + 15)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return None, f"switchboard-wait --status {repo}: {e}"
+    if done.returncode != 0:
+        return None, (f"switchboard-wait --status {repo} exit {done.returncode}: "
+                      f"{(done.stderr or '').strip()[:200]}")
+    return [l.split(" ", 1)[1] for l in (done.stdout or "").splitlines() if " " in l], None
+
+
+def load_json(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_json(path, d):
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(d, f, indent=1, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
+class Pass:
+    """One pass: what was seen, what was done, and the state carried to the next."""
+
+    def __init__(self, state, dry, t, state_dir):
+        self.state, self.dry, self.t, self.state_dir = state, dry, t, state_dir
+        alerts = state.get("alerts")
+        self.alerts = alerts if isinstance(alerts, dict) else {}
+        self.can_prompt = False  # the switchboard is idle and nothing has gone to it yet
+        self.switch_off = False
+        self.seen = set()
+        self.record = {"time": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(t)),
+                       "switchboard": None, "observed": [], "actions": [], "cleared": [],
+                       "notes": [], "errors": []}
+
+    def observe(self, repo, pane, condition):
+        """The alert for this fingerprint, its pass count raised by one."""
+        key = f"{repo}|{pane}|{condition}"
+        old = self.alerts.get(key)
+        a = old if isinstance(old, dict) else {"first": self.t, "count": 0}
+        a["count"] = a.get("count", 0) + 1
+        self.alerts[key] = a
+        self.seen.add(key)
+        self.record["observed"].append({"repo": repo, "pane": pane, "condition": condition,
+                                        "count": a["count"]})
+        a["key"] = key
+        return a
+
+    def keep(self, repo=None):
+        """Carry alerts over unchanged when a pass could not look at them."""
+        for key in self.alerts:
+            if repo is None or key.startswith(f"{repo}|"):
+                self.seen.add(key)
+
+    def act(self, **action):
+        self.record["actions"].append(action)
+        if self.dry and action.get("ok") is None and action.get("dry_run"):
+            what = action["kind"]
+            if what == "banner":
+                print(f"would banner: {action['text']}")
+            elif what == "restart":
+                print(f"would restart the switchboard in {legwork_dir()}")
+            else:
+                for text in action.get("texts") or [action["text"]]:
+                    print(f"would prompt {action['to']}: {text}")
+
+    def prompt(self, a, to, text):
+        if a.get("prompt"):
+            return
+        base = {"kind": "prompt", "fingerprint": a["key"], "to": to, "text": text}
+        if not self.can_prompt:
+            self.act(ok=None, note="switchboard not idle or already prompted this pass, "
+                                   "sent on a later pass", **base)
+        elif self.dry:
+            self.act(ok=None, dry_run=True, **base)
+            self.can_prompt = False
+        else:
+            err = send(to, [text])
+            a["prompt"] = err is None
+            self.can_prompt = err is not None
+            self.act(ok=err is None, error=err, **base)
+
+    def banner(self, a, text):
+        if a.get("banner"):
+            return
+        base = {"kind": "banner", "fingerprint": a["key"], "text": text}
+        if self.dry:
+            self.act(ok=None, dry_run=True, **base)
+            return
+        err = notify(text)
+        if err:
+            print(f"switchboard-health: no banner: {err}", file=sys.stderr)
+        a["banner"] = err is None
+        self.act(ok=err is None, error=err, **base)
+
+    def save(self):
+        os.makedirs(self.state_dir, exist_ok=True)
+        save_json(os.path.join(self.state_dir, "health-state.json"), self.state)
+
+    def finish(self, state_dir):
+        alerts = {}
+        for key, a in self.alerts.items():
+            if key in self.seen:
+                a.pop("key", None)
+                alerts[key] = a
+            else:
+                self.record["cleared"].append(key)
+        self.state["alerts"] = alerts
+        self.state["last_pass"] = self.t
+        line = json.dumps(self.record, sort_keys=True)
+        if self.dry:
+            print(line)
+            if self.switch_off:
+                print("would switch the health watcher off: "
+                      + ("a new sign-in" if self.record.get("new_login") else "nothing to watch"))
+            return
+        self.save()
+        with open(os.path.join(state_dir, "health.jsonl"), "a", encoding="utf-8",
+                  newline="\n") as f:
+            f.write(line + "\n")
+        if self.switch_off:
+            # Last, because under launchd this ends the pass's own process.
+            try:
+                call([child_python(), CTL, "off"], 60)
+            except (OSError, subprocess.TimeoutExpired) as e:
+                print(f"switchboard-health: could not switch off: {e}", file=sys.stderr)
+
+
+def count_off(p, sb):
+    """Count passes with nothing to watch; the second in a row switches the watcher off."""
+    if sb is None or (not sb["watching"] and not sb["cycle"]):
+        n = p.state.get("off_count")
+        n = (n if isinstance(n, int) else 0) + 1
+    else:
+        n = 0
+    if n >= OFF_PASSES:
+        p.switch_off = True
+        p.act(kind="self-off")
+        n = 0
+    p.state["off_count"] = n
+
+
+def send(pane, texts):
+    """Send prompts in order, letting the agent settle between them. None or why not."""
+    for i, text in enumerate(texts):
+        if i:
+            # Best effort: a slash command may never show as working.
+            herdr("agent", "wait", pane, "--timeout", str(HERDR_TIMEOUT * 1000),
+                  timeout=HERDR_TIMEOUT + 5)
+        _, err = herdr("agent", "prompt", pane, text)
+        if err:
+            return err
+    return None
+
+
+def session_of(pane):
+    """(herdr's session id for the agent in pane, None), or (None, why not)."""
+    result, err = herdr("agent", "get", pane)
+    if err:
+        return None, err
+    try:
+        return result["agent"]["agent_session"]["value"], None
+    except (KeyError, TypeError):
+        return None, None
+
+
+def cycle(pane):
+    """Send the cycle prompts, the rest only once /clear has taken. None or why not."""
+    before, err = session_of(pane)
+    if err:
+        return err
+    if before is None:
+        return "herdr shows no session id for the switchboard, so /clear cannot be confirmed"
+    _, err = herdr("agent", "prompt", pane, CYCLE_PROMPTS[0])
+    if err:
+        return err
+    # /clear starts a new Claude Code session, and herdr reports its new id.
+    deadline = time.time() + CLEAR_TIMEOUT
+    while True:
+        after, _ = session_of(pane)
+        if after is not None and after != before:
+            break
+        if time.time() >= deadline:
+            return f"/clear did not start a new session within {CLEAR_TIMEOUT} s"
+        time.sleep(CLEAR_POLL)
+    # Best effort: if the new session lost herdr's name, the next pass still finds it.
+    herdr("agent", "rename", pane, NAME)
+    return send(pane, CYCLE_PROMPTS[1:])
+
+
+def notify(text):
+    """Show a banner. None when it was shown, else why not."""
+    if WINDOWS:
+        if not POWERSHELL:
+            return "powershell.exe not found, so no Windows toast"
+        script = base64.b64encode(TOAST.encode("utf-16-le")).decode("ascii")
+        argv = [POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                "-EncodedCommand", script]
+        env = dict(os.environ, LEGWORK_TOAST_TITLE=TITLE, LEGWORK_TOAST_TEXT=text)
+        tool = "powershell.exe toast"
+    else:
+        if not NOTIFIER:
+            return "terminal-notifier not found on PATH or in /opt/homebrew/bin"
+        argv, env, tool = [NOTIFIER, "-title", TITLE, "-message", text], None, "terminal-notifier"
+    try:
+        done = call(argv, 30, env=env)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return f"{tool}: {e}"
+    if done.returncode != 0:
+        detail = ((done.stderr or "") or (done.stdout or "")).strip()[:200]
+        return f"{tool} exit {done.returncode} {detail}".strip()
+    return None
+
+
+def restart():
+    """(ok, pane, error) for one attempt to bring the switchboard back."""
+    env = []
+    if os.environ.get("CLAUDE_CONFIG_DIR"):
+        env += ["--env", f"CLAUDE_CONFIG_DIR={os.environ['CLAUDE_CONFIG_DIR']}"]
+    # An oh-my-zsh update question at shell start eats the first letter herdr
+    # types, so `claude` arrives as `laude`. Elsewhere the variable does nothing.
+    env += ["--env", "DISABLE_AUTO_UPDATE=true"]
+    result, err = herdr("workspace", "create", "--cwd", legwork_dir(), "--label", NAME,
+                        *env, "--no-focus")
+    if err:
+        return False, None, err
+    try:
+        pane = result["root_pane"]["pane_id"]
+    except (KeyError, TypeError):
+        pane = None
+    if not valid_pane(pane):
+        return False, None, f"herdr workspace create returned no usable root pane id: {pane!r}"
+    _, err = herdr("pane", "rename", pane, NAME)
+    if not err:
+        _, err = herdr("agent", "start", NAME, "--kind", "claude", "--pane", pane,
+                       "--timeout", str(START_TIMEOUT * 1000), "--", *session_args(),
+                       timeout=START_TIMEOUT + 15)
+    if not err:
+        err = send(pane, RESUME_PROMPTS)
+    return err is None, pane, err
+
+
+def check_down(p):
+    """Check 1 when the switchboard is missing: restart, or banner if that already failed."""
+    a = p.observe("", "", "switchboard-down")
+    last = p.state.get("last_restart")
+    if isinstance(last, (int, float)) and p.t - last < RESTART_GAP:
+        again = time.strftime("%H:%M", time.localtime(last + RESTART_GAP))
+        p.banner(a, f"The switchboard is down and was restarted under an hour ago. "
+                    f"No restart before {again}. {BY_HAND}")
+        return
+    if p.dry:
+        p.act(kind="restart", ok=None, dry_run=True)
+        return
+    p.state["last_restart"] = p.t
+    p.save()  # before the attempt, so a crash in it still holds the hourly cap
+    ok, pane, err = restart()
+    p.act(kind="restart", ok=ok, pane=pane, error=err)
+    if err and "agent_not_ready" in err:
+        p.banner(a, f"The switchboard restart stopped at agent_not_ready in pane {pane}. "
+                    f"No retry this hour. {BY_HAND}")
+
+
+def check_repo(p, agents, project, repo, pane, sw_idle, cycle, to, stalls):
+    """Checks 3 and 4 for one watched repo."""
+    lines, err = wait_status(repo, pane)
+    if err:
+        p.record["errors"].append(err)
+        p.keep(repo)
+        old = p.state.get("stalls", {}).get(f"{repo}|{pane}")
+        if old:
+            stalls[f"{repo}|{pane}"] = old
+        return
+    words = [l.split() for l in lines]
+    if sw_idle and not cycle and ["wait", "none"] in words:
+        a = p.observe(repo, "", "wait-none")
+        if a["count"] >= 2:
+            p.prompt(a, to, f"SWITCHBOARD HEALTH wait-none: {repo}")
+
+    agent = find_pane(agents, pane)
+    status = agent.get("agent_status") if agent else "gone"
+    trailing = any(len(w) > 1 and w[0] not in ("pane", "wait") and w[1] in ("CYCLE", "DONE")
+                   for w in words)
+    condition = None
+    if status == "blocked":
+        condition = "pane blocked"
+    elif status in READY and not trailing:
+        condition = "pane idle with no CYCLE or DONE"
+    if condition:
+        a = p.observe(repo, pane, f"check-in:{condition}")
+        if a["count"] >= 2:
+            p.prompt(a, to, f"SWITCHBOARD HEALTH check-in {project}: {condition}")
+
+    if status != "working":
+        return
+    try:
+        mtime = os.path.getmtime(os.path.join(repo, ".legwork", "switchboard.md"))
+    except OSError:
+        mtime = None
+    seq = agent.get("state_change_seq")
+    key = f"{repo}|{pane}"
+    old = p.state.get("stalls", {}).get(key)
+    if isinstance(old, dict) and old.get("mtime") == mtime and old.get("seq") == seq:
+        stalls[key] = old
+        still = p.t - old.get("since", p.t)
+        if still >= STALL:
+            a = p.observe(repo, pane, "stall")
+            minutes = int(still // 60)
+            p.prompt(a, to, f"SWITCHBOARD HEALTH stall {project}: {minutes} min with no change")
+            p.banner(a, f"{project}: pane {pane} working {minutes} min with no change "
+                        "to its switchboard file or herdr state.")
+    else:
+        stalls[key] = {"mtime": mtime, "seq": seq, "since": p.t}
+
+
+def check_cycle(p, marker, to, sw_idle):
+    """Check 2: send the cycle, resend it once, then banner if it never takes."""
+    a = p.observe("", to, f"cycle {marker[5:].strip()}")
+    sends = a.get("sends", 0)
+    base = {"kind": "cycle", "fingerprint": a["key"], "to": to,
+            "texts": list(CYCLE_PROMPTS), "attempt": sends + 1}
+    if not sw_idle:
+        if not sends:
+            p.act(ok=None, note="switchboard not idle, sent on a later pass", **base)
+    elif sends < 2:
+        if p.dry:
+            p.act(ok=None, dry_run=True, **base)
+            return
+        a["sends"] = sends + 1
+        err = cycle(to)
+        p.act(ok=err is None, error=err, **base)
+    else:
+        p.banner(a, f"The switchboard did not cycle: {marker} is still the last line of "
+                    f"its state file after two tries and pane {to} is idle. Send "
+                    f"/switchboard resume there yourself.")
+
+
+def run_pass(state_dir, dry, login=None):
+    global STATE_FILE
+    STATE_FILE = os.path.join(state_dir, "state.md")
+    p = Pass(load_json(os.path.join(state_dir, "health-state.json")), dry, now(), state_dir)
+    current = login_mark() if login else None
+    if current and current != login:
+        p.record["notes"].append("a new sign-in since the watcher was switched on: "
+                                 "switching it off, nothing checked")
+        p.record["new_login"] = True
+        p.switch_off = True
+        p.act(kind="self-off")
+        p.keep()
+        p.finish(state_dir)
+        return 0
+    last = p.state.get("last_pass")
+    if isinstance(last, (int, float)) and p.t - last > PASS_GAP:
+        for a in p.alerts.values():
+            if isinstance(a, dict):
+                a["count"] = 0
+        p.state["stalls"] = {}
+        p.state["off_count"] = 0
+        p.record["notes"].append(f"gap of {int((p.t - last) // 60)} min since the last pass: "
+                                 "stall clocks and two-pass counts restarted")
+    sb = read_state(STATE_FILE)
+    count_off(p, sb)
+    if sb is None:
+        p.record["notes"].append(f"no state file in {state_dir}: the switchboard has not run")
+        p.keep()
+        p.finish(state_dir)
+        return 0
+    result, err = herdr("agent", "list")
+    agents = result.get("agents") if result else None
+    if err or not isinstance(agents, list):
+        err = err or "herdr agent list gave no agents"
+        p.record["errors"].append(err)
+        p.keep()
+        p.banner(p.observe("", "", "herdr-unreachable"),
+                 f"herdr is not answering, so the switchboard cannot be checked: {err}")
+        p.finish(state_dir)
+        return 0
+
+    sw = find_switchboard(agents)
+    sw_idle = False
+    to = None
+    if sw is None and not sb["watching"]:
+        p.record["notes"].append("switchboard missing but its state file watches nothing: "
+                                 "not restarted")
+    elif sw is None:
+        check_down(p)
+    else:
+        to, status = sw.get("pane_id"), sw.get("agent_status")
+        p.record["switchboard"] = {"pane": to, "status": status}
+        if status == "blocked":
+            p.banner(p.observe("", to, "switchboard-blocked"),
+                     f"The switchboard is blocked on a prompt in pane {to}. It needs you.")
+        sw_idle = p.can_prompt = status in READY
+        if not valid_pane(to):
+            p.record["errors"].append(f"switchboard pane id {to!r} is not usable: nothing sent")
+            sw_idle = p.can_prompt = False
+        elif sb["cycle"]:
+            check_cycle(p, sb["cycle"], to, sw_idle)
+            if sw_idle:
+                # It is cycling, or stuck at its cycle: nothing else goes to it this pass.
+                p.can_prompt = False
+
+    stalls = {}
+    for project, repo, pane in sb["watching"]:
+        try:
+            if not valid_pane(pane):
+                raise ValueError(f"pane id {pane!r} in the state file is not usable")
+            check_repo(p, agents, project, repo, pane, sw_idle, sb["cycle"], to, stalls)
+        except Exception as e:  # one bad repo must not stop the pass
+            p.record["errors"].append(f"check of {repo} failed: {type(e).__name__}: {e}")
+            p.keep(repo)
+            old = p.state.get("stalls")
+            for key, clock in (old.items() if isinstance(old, dict) else ()):
+                if key.startswith(f"{repo}|"):
+                    stalls[key] = clock
+    p.state["stalls"] = stalls
+    p.finish(state_dir)
+    return 0
+
+
+def main(argv):
+    if "-h" in argv or "--help" in argv:
+        print(__doc__.strip())
+        return 0
+    once, dry, state_dir, login, env = False, False, None, None, {}
+    args = list(argv)
+    while args:
+        arg = args.pop(0)
+        if arg == "--once":
+            once = True
+        elif arg == "--dry-run":
+            dry = True
+        elif arg == "--state-dir" and args:
+            state_dir = args.pop(0)
+        elif arg == "--login" and args:
+            login = args.pop(0)
+        elif arg == "--env" and args and ENV_KEY.fullmatch(args[0].partition("=")[0]) \
+                and "=" in args[0]:
+            key, _, value = args.pop(0).partition("=")
+            env[key] = value
+        else:
+            once = False
+            break
+    if not once:
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    os.environ.update(env)
+    state_dir = state_dir or default_state_dir()
+    return run_pass(os.path.abspath(os.path.expanduser(state_dir)), dry, login)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
