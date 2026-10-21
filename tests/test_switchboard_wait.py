@@ -389,8 +389,8 @@ class SwitchboardWaitTests(SwitchboardCase):
     def test_open_decision_stays_report_once_while_pane_idle(self):
         self.write(BOARD["legwork-150"], BOARD["legwork-151"])
         self.herdr("idle", seq=4)
-        self.assertEqual(self.run_wait()[:2],
-                         (0, ["legwork legwork-151 DECISION", "legwork pane idle"]))
+        # The pane resting is not news while the DECISION printed on start is open.
+        self.assertEqual(self.run_wait()[:2], (0, ["legwork legwork-151 DECISION"]))
         self.assertEqual(self.run_wait()[:2], (124, ["timeout"]))
 
     # Finding 3: only agent_not_found means the pane is gone.
@@ -901,9 +901,11 @@ DECISION = "## legwork-200 DECISION 2026-10-20 09:00\nAttempted: x\n\n"
 
 class PaneFlipTests(unittest.TestCase):
     """Pane states that wake the switchboard, with herdr faked in process, so
-    these run on Windows too. A pane that only flips between idle and done
-    did nothing new, and while the latest entry is an open DECISION already
-    reported, the orchestrator is waiting on the user."""
+    these run on Windows too. herdr's done is idle not yet seen, and its
+    state_change_seq is one counter for all panes that moves only when an
+    agent's own state changes, so an idle and done flip keeps its seq. A
+    pane that only flips did nothing new, and while the latest entry is an
+    open DECISION already reported, the orchestrator is waiting on the user."""
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -947,17 +949,38 @@ class PaneFlipTests(unittest.TestCase):
     def test_idle_to_done_between_waits_is_not_an_event(self):
         self.set_pane("idle", 1)
         self.assertEqual(self.run_wait(), (0, ["legwork pane idle"]))
-        self.set_pane("done", 2)
+        self.set_pane("done", 1)
         self.assertEqual(self.run_wait(), (124, ["timeout"]))
-        self.set_pane("idle", 3)
+        self.set_pane("idle", 1)
         self.assertEqual(self.run_wait(), (124, ["timeout"]))
 
     def test_flips_during_a_wait_are_not_events(self):
         self.set_pane("done", 1)
         self.assertEqual(self.run_wait(), (0, ["legwork pane done"]))
-        self.assertEqual(self.run_wait((0.3, self.set_pane, ["idle", 2]),
-                                       (0.6, self.set_pane, ["done", 3])),
+        self.assertEqual(self.run_wait((0.3, self.set_pane, ["idle", 1]),
+                                       (0.6, self.set_pane, ["done", 1])),
                          (124, ["timeout"]))
+
+    def test_a_turn_no_poll_saw_between_waits_is_an_event(self):
+        # The switchboard relays a prompt after a wake; the turn runs and ends
+        # before the next wait starts, so only the new seq shows it.
+        self.set_pane("idle", 1)
+        self.assertEqual(self.run_wait(), (0, ["legwork pane idle"]))
+        self.set_pane("done", 3)
+        self.assertEqual(self.run_wait(), (0, ["legwork pane done"]))
+
+    def test_a_turn_inside_one_poll_is_an_event(self):
+        self.set_pane("done", 1)
+        self.assertEqual(self.run_wait(), (0, ["legwork pane done"]))
+        self.assertEqual(self.run_wait((0.3, self.set_pane, ["idle", 7]), timeout=10),
+                         (0, ["legwork pane idle"]))
+
+    def test_blocked_then_idle_is_an_event(self):
+        # The switchboard last heard blocked; it needs to know the block is gone.
+        self.set_pane("blocked", 1)
+        self.assertEqual(self.run_wait(), (0, ["legwork pane blocked"]))
+        self.set_pane("idle", 2)
+        self.assertEqual(self.run_wait(), (0, ["legwork pane idle"]))
 
     def test_working_then_stopped_is_still_an_event(self):
         self.set_pane("idle", 1)
@@ -1016,12 +1039,32 @@ class PaneFlipTests(unittest.TestCase):
     def test_a_new_decision_that_replaces_it_is_reported(self):
         self.append(DECISION)
         self.set_pane("idle", 2)
-        self.assertEqual(self.run_wait()[0], 0)
+        self.assertEqual(self.run_wait(), (0, ["legwork legwork-200 DECISION"]))
         self.append("## legwork-202 DECISION 2026-10-20 10:00 Replaces legwork-200\n"
                     "Attempted: y\n\n")
         self.assertEqual(self.run_wait(), (0, ["legwork legwork-202 DECISION"]))
         self.set_pane("done", 3)
         self.assertEqual(self.run_wait(), (124, ["timeout"]))
+
+    def test_a_decision_and_the_pane_stopping_in_one_poll_report_the_decision(self):
+        self.assertEqual(self.run_wait(), (124, ["timeout"]))
+
+        def ask():
+            self.append(DECISION)
+            self.set_pane("idle", 2)
+
+        self.assertEqual(self.run_wait((0.3, ask, []), timeout=10),
+                         (0, ["legwork legwork-200 DECISION"]))
+
+    def test_a_grant_after_the_decision_brings_pane_reports_back(self):
+        self.append(DECISION)
+        self.assertEqual(self.run_wait(), (0, ["legwork legwork-200 DECISION"]))
+        self.set_pane("idle", 2)
+        self.assertEqual(self.run_wait(), (124, ["timeout"]))
+        self.append('## legwork-g1 GRANT 2026-10-20 09:30\nUser: "go on"\nScope: x\n\n')
+        self.assertEqual(self.run_wait((0.3, self.set_pane, ["working", 3]),
+                                       (0.6, self.set_pane, ["idle", 4]), timeout=10),
+                         (0, ["legwork pane idle"]))
 
     def test_status_still_shows_the_pane_while_a_decision_is_open(self):
         self.append(DECISION)
