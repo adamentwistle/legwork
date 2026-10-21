@@ -60,6 +60,11 @@ full command here, use it as written). Do not re-derive any of them.
 4. House rules: `<legwork>/house-rules.md`. Every list item in it goes into
    every brief below, verbatim. If the file does not exist, say so in the
    state file and in the wrap log: the workers then have no house rules.
+   Its `Pull request reviews` section, if any, says per repo or per owner
+   who reviews pull requests and when; take this repo's item (a repo's
+   item beats its owner's) and note it in the state file. If it names
+   nothing for this repo, request nobody and leave reviews to the user.
+   Never request the PR's author.
 5. Write `.legwork/fanout-state.md` in the repo (gitignored): the plan
    below, one line per task, updated after every state change. This is the
    handoff file if the orchestrator's context runs out.
@@ -94,6 +99,8 @@ Context: <3-6 lines: what the project is, why this task, what is already done>
 Task: <the work, concrete>
 Done when: <verifiable finish line>
 Gate: <exact command(s); must print PASS or exit 0>
+Reviewers: <who this repo's Pull request reviews item says to request when
+  the PR opens, or none>
 Rules: house rules ("me" and "I" in them mean the user whose git and gh
   identity this repo uses): <every list item of house-rules.md, verbatim>;
   PR to main from this branch only, never push main; every result line in
@@ -104,7 +111,9 @@ Finish: open the PR with gh pr create (title <= 70 chars; body in the
   shape of the <LEGWORK_PR_SKILL> skill, with its checks, when that is set,
   and this brief is the user's word to open the PR with it; else a TL;DR
   first, then what changed and why, then a Verification section with
-  every line marked OBSERVED, STALE or NOT RUN), then print exactly:
+  every line marked OBSERVED, STALE or NOT RUN); then, if Reviewers names
+  anyone, `gh pr edit <n> --add-reviewer <them>`, never the PR's author;
+  then print exactly:
   PR <url> | GATE <PASS|FAIL> | UNPROVEN <list or none>
 ```
 
@@ -216,7 +225,10 @@ For each `PR <url>` line, in dependency order:
 
 1. `/bugbot <n>` (three rounds max). The worker's pane is closed by now,
    so findings are fixed by a fresh subagent in that worktree, or by you if
-   they are one-line.
+   they are one-line. On `CLEAR` it requests the reviewers this repo's item
+   names for after the review bot is clear. With no Bugbot on the repo,
+   request them yourself once the gate line says PASS, never the PR's
+   author.
 2. When CLEAR and `--merge` was given: `gh pr merge <n> --squash --delete-branch`
    only if `mergeable` is `MERGEABLE` and the gate line said PASS. Close
    that worker's pane and remove its worktree first: a branch still checked
@@ -262,10 +274,10 @@ Subagent worktrees are removed by the harness when unchanged; list
 ## 7. Wrap
 
 Run `/wrap <project>`. The log entry lists, one line each: PRs opened
-(number, title, Bugbot state, merged or open), tasks skipped and why,
-BLOCKED workers and the blocker text, anything UNPROVEN. Mint the next
-prompt from what is left in the queue. Then reply with the same list and
-nothing else.
+(number, title, Bugbot state, reviewers requested, merged or open), tasks
+skipped and why, BLOCKED workers and the blocker text, anything UNPROVEN.
+Mint the next prompt from what is left in the queue. Then reply with the
+same list and nothing else.
 
 ## Context budget
 

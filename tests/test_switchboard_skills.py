@@ -230,8 +230,18 @@ class RoadmapPlanningSkillTests(unittest.TestCase):
         self.body = text("roadmap-planning")
         self.flat = flat(self.body)
 
-    def test_no_reviewers_rule(self):
-        self.assertNotRegex(self.flat, re.compile(r"reviewers", re.I))
+    def test_run_rules_carry_the_repos_review_process(self):
+        # Was a check that no reviewer rule exists. The rule is now the
+        # user's, per repo, in the house rules' Pull request reviews section;
+        # the roadmap's run rules carry it to the run.
+        self.assertNotRegex(self.flat, re.compile(r"no reviewers", re.I))
+        self.assertIn("The run rules say who reviews this repo's PRs and when",
+                      self.flat)
+        self.assertIn("`Pull request reviews` item for the repo", self.flat)
+
+    def test_design_doc_pr_follows_the_review_section(self):
+        self.assertIn("The design doc's pull request follows it as `/ship` does",
+                      self.flat)
 
     def test_linear_sweep_reads_the_settings_and_is_skipped_when_unset(self):
         for key in ("LEGWORK_LINEAR_TEAM", "LEGWORK_LINEAR_TEAM_KEY",

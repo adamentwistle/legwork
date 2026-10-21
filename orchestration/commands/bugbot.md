@@ -19,7 +19,10 @@ The script is `{{LEGWORK_BIN}}/bugbot-wait` (the installer wrote the full
 command; run it as written). It only waits on repos whose owner is in `LEGWORK_BUGBOT_OWNERS`
 (the legwork `config`, or the environment). The house rules are the list
 items of `house-rules.md` in the legwork repo ($LEGWORK_DIR, else
-~/legwork); if it does not exist, say so in the final reply.
+~/legwork); if it does not exist, say so in the final reply. Its
+`Pull request reviews` section, if any, says per repo or per owner who
+reviews pull requests and when; a repo's item beats its owner's. If it
+names nothing for this repo, request nobody and leave reviews to the user.
 
 Steps, per round (max 3 rounds):
 1. If this is round 1 and Bugbot has not yet run on the current head
@@ -29,11 +32,16 @@ Steps, per round (max 3 rounds):
    `{{LEGWORK_BIN}}/bugbot-wait <pr> --after <ISO time of the last push> --timeout 60` first.
 2. Read the JSON it prints.
    - `CLEAR`: stop. Report the review time and the commit it reviewed.
+     Then request the reviewers that section names for this repo for
+     after the review bot is clear, those not already requested:
+     `gh pr edit <pr> --add-reviewer <logins>`, never the PR's author.
    - `TIMEOUT`: wait again as above while the round has time left. After 20
      minutes, stop. Report that Bugbot did not answer; do not retrigger blindly.
    - `NO_BUGBOT`: stop. The repo's owner has no Bugbot (it is not in
      `LEGWORK_BUGBOT_OWNERS`). Nothing was posted. Report "no Bugbot on
      <owner>" and do not wait, retrigger or post a "bugbot run" comment by hand.
+     There is no bot to wait for, so request the after-the-bot reviewers
+     now, as for `CLEAR`.
    - `FINDINGS`: go to step 3.
 3. For each item in `comments`, open the file at the line, decide whether
    the finding is real. Fix the real ones. For a finding you reject, reply
@@ -44,6 +52,10 @@ Steps, per round (max 3 rounds):
    house rules. Push the branch. Never push to main.
 5. Next round: `{{LEGWORK_BIN}}/bugbot-wait <pr> --trigger --timeout 540`.
 
+Findings still open or a `TIMEOUT`: request none of the after-the-bot
+reviewers; the review bot is not clear.
+
 After the loop, reply with: final state (CLEAR, FINDINGS left, TIMEOUT or
-NO_BUGBOT), rounds used, what was fixed, and each rejected finding with its reason.
-Findings still open after round 3 are listed, not fixed.
+NO_BUGBOT), rounds used, what was fixed, each rejected finding with its
+reason, and the reviewers requested (or none). Findings still open after
+round 3 are listed, not fixed.
