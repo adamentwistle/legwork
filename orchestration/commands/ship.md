@@ -4,12 +4,15 @@ description: Land the current work. Commit, push the branch, open or refresh the
 
 Ship what is in the working tree, then close the session.
 Project for the tracker: $ARGUMENTS if given, otherwise infer it from the repo.
+A `--hold-reviewers` in $ARGUMENTS is not part of the project: it goes on
+to /bugbot in step 6, for a caller whose own gate has not passed yet.
 
 The legwork repo is $LEGWORK_DIR if set, otherwise ~/legwork. Rules that
 apply to every step: every list item of its `house-rules.md` (authorship,
-attribution and style). If that file does not exist, say so in the final
-reply. Its `Pull request reviews` section, if any, says per repo or per
-owner who reviews pull requests and when; a repo's item beats its owner's.
+attribution and style), except those in its `Pull request reviews` section.
+If that file does not exist, say so in the final reply. That section, if
+any, says per repo or per owner who reviews pull requests and when; a
+repo's item beats its owner's.
 Work lands on a branch through a pull request, never by pushing to main.
 
 Steps:
@@ -33,9 +36,10 @@ Steps:
    wait for step 6. If it names nothing for this repo, request nobody and
    leave reviews to the user. If a PR exists, update the body only if the
    change set moved beyond what it describes.
-6. Run /bugbot for that PR. It triggers Bugbot, waits, fixes real findings,
-   pushes, and retriggers, up to three rounds. When it ends clear, it
-   requests the reviewers the house rules name for after the review bot.
+6. Run /bugbot for that PR, with `--hold-reviewers` if this run was given
+   it. It triggers Bugbot, waits, fixes real findings, pushes, and
+   retriggers, up to three rounds. When it ends clear, it requests the
+   reviewers the house rules name for after the review bot, unless held.
 7. Run /wrap for the project. The log entry names the PR and the Bugbot
    state.
 8. Reply in three lines: PR URL and branch; Bugbot state and rounds, and

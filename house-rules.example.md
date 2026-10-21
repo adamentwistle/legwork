@@ -3,11 +3,12 @@
 Rules every worker, orchestrator and planning session follows, whatever
 the repo. Copy this file to `house-rules.md` (same folder) and make it
 yours, or let `/onboard` write it from your answers. Only the list items
-below are rules: `/fanout` pastes them into every worker's brief, `/ship`
-and `/bugbot` follow them for commits, PRs and replies, and the
-roadmap-planning skill follows them for its design doc PR and commits.
-The `Pull request reviews` section at the end says who reviews your pull
-requests, if anyone.
+above the `Pull request reviews` section are rules: `/fanout` pastes them
+into every worker's brief, `/ship` and `/bugbot` follow them for commits,
+PRs and replies, and the roadmap-planning skill follows them for its
+design doc PR and commits. The items in that section at the end are not
+rules and are not pasted into briefs: they say who reviews your pull
+requests, if anyone, and only the steps that request reviewers read them.
 
 - Everything is authored as me. No attribution trailer, no co-author line, no mention of an AI agent in commits, pull requests, comments or documents.
 - Work lands on a branch through a pull request. Never commit to or push main.
