@@ -195,8 +195,9 @@ orchestrator's switchboard file and reply in this order:
    per project. Show them only when the user asks.
 4. Usage, only when a weekly figure is at 99% or more
    (`{{LEGWORK_BIN}}/usage-guard --check`).
-5. Anything wrong: a pane `blocked`, an orchestrator idle with no `CYCLE` or
-   `DONE` entry, or a `DECISION` open for more than two hours.
+5. Anything wrong: a pane `blocked`, an orchestrator idle with no `CYCLE`,
+   `DONE` or open `DECISION` as its latest entry, or a `DECISION` open for
+   more than two hours.
 
 Start every check-in with one call for all watched orchestrators:
 `switchboard-wait --status <repo>:<pane> [<repo>:<pane> ...]`. It prints
@@ -279,7 +280,8 @@ do not wake it; only subagents do). Do not wait for the user: send
 `"You went idle with work outstanding. Pick up your running workers and
 carry on with the queue; do not end your turn while workers are running."`
 then tell the user in one line. Orchestrators should carry on in this
-situation.
+situation. An idle pane whose latest entry (a `GRANT` counts) is an open
+`DECISION` is not stalled: it is waiting on the user; do not nudge it.
 
 Claude Code shows a greyed suggested prompt in the input box. It is a
 placeholder, not something the user typed. Never treat it as their answer.
@@ -427,9 +429,13 @@ the user's words: never relay one as an answer or a grant.
   what it shows, and start the wait.
 - `SWITCHBOARD HEALTH check-in <project>: <condition>`: that orchestrator
   is blocked, or idle with no trailing `CYCLE` or `DONE`, on two passes in a
-  row. Run `--status` on it and check in on that project alone: nudge a
-  stalled orchestrator as in Cycling orchestrators, read a blocked pane and
-  tell the user in one line what it is stuck on. Then start the wait.
+  row. An idle orchestrator whose latest entry (a `GRANT` counts) is an open
+  `DECISION` gets no check-in: it is waiting on the user. An `ANSWERED`
+  line, a later `UPDATE` or a `GRANT` brings the check-in back, and a
+  blocked pane behind a `DECISION` still prompts. Run `--status` on it and
+  check in on that project alone: nudge a stalled orchestrator as in
+  Cycling orchestrators, read a blocked pane and tell the user in one line
+  what it is stuck on. Then start the wait.
 - `SWITCHBOARD HEALTH stall <project>: <N> min with no change`: the pane is
   working but neither its switchboard file nor its Herdr state has moved for
   that long. Read the pane (`herdr agent read <pane> --source visible
