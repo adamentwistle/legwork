@@ -27,18 +27,27 @@ each watched repo:
   - the pane, if it is already idle, done, blocked or gone
 If anything is printed on start it exits 0 straight away.
 
-Not every pane change is news. A pane that goes from idle to done, or from
-done to idle, did no work in between, so that is not reported; a move into
-idle or done from working, from herdr's unknown, or with no state kept yet
-(as on the first start) is. The same idle or done again with a new
-state_change_seq means the pane moved without the wait seeing it, so that is
-still reported. And while a repo's latest entry is an open DECISION that has
-already been reported (the cursor is on it), its pane going idle or done is
-not reported at all: the orchestrator is waiting on the user, which the
-switchboard already knows. Once the DECISION is answered or replaced, or any
-later entry lands, pane reports come back as usual. blocked, gone and
-unreachable are always reported. --status is a snapshot, not an event, and
-always shows the pane as it is.
+Not every pane change is news. To herdr, done is idle that nobody has
+looked at yet, so a pane goes from idle to done, or done to idle, when only
+that flag changes. Its state_change_seq stays the same then: herdr moves
+that number (one counter for all panes) only when the agent's own state
+changes. So a move between idle and done with the same seq is not
+reported. A move into idle or done from working, blocked or herdr's
+unknown, with no state kept yet (as on the first start), or with a new seq
+is reported. A new seq on idle or done means the pane ran or stopped
+without the wait seeing it, such as a short turn between two polls or
+between two waits. blocked to idle or done is reported on purpose: the
+switchboard last heard blocked and has to learn the block is gone.
+
+And while a repo's latest entry is an open DECISION that has been reported
+(the cursor is on it, whether this wait or an earlier one printed it), its
+pane going idle or done is not reported at all: the orchestrator is waiting
+on the user, which the switchboard already knows. A DECISION printed on
+start, or one that lands in the same poll as the pane stopping, is printed
+on its own. Once the DECISION is answered or replaced, or any later entry
+lands (a GRANT from switchboard-answer too), pane reports come back as usual.
+blocked, gone and unreachable are always reported. --status is a snapshot,
+not an event, and always shows the pane as it is.
 
 A CYCLE or DONE from an earlier run is never reported, by the wait or by
 --status. The switchboard's state file (written by switchboard-state) has a
@@ -52,8 +61,8 @@ A cursor per repo, .legwork/switchboard-wait.cursor (JSON: switchboard file
 path -> last entry reported, as its id, or "<id>#<n>" for the nth entry
 with an id used more than once), stops the same entry being reported twice
 and makes sure entries written while no wait was running are reported on the
-next start. The last pane state reported is kept in the same file, so a pane
-that stays idle is reported once, not on every start. Saves take a lock
+next start. The last pane state seen (status and seq) is kept in the same
+file, so a pane that stays idle is reported once, not on every start. Saves take a lock
 (.legwork/switchboard-wait.cursor.lock) and merge with what is on disk, so
 two waits on one repo keep each other's state.
 
@@ -96,7 +105,7 @@ except ImportError:  # Windows: lock with msvcrt instead
 
 WAKE = ("DECISION", "CYCLE", "DONE")
 STOPPED = ("idle", "done", "blocked", "gone")
-RESTING = ("idle", "done")  # moving between these two is not news
+RESTING = ("idle", "done")  # herdr's idle, seen or not; a flip keeps its seq
 sys.path.insert(1, os.path.join(os.path.dirname(os.path.realpath(__file__)), ".."))
 try:
     from settings import setting  # orchestration/settings.py, same checkout
@@ -141,6 +150,7 @@ def weekly_usage():
 
 
 ENTRY = re.compile(r"^## (\S+) (DECISION|UPDATE|DECIDED|CYCLE|DONE)\b", re.M)
+HEADING = re.compile(r"^## \S+ ([A-Z]+)\b", re.M)  # any entry, GRANT included
 ANSWERED = re.compile(r"^ANSWERED (\S+?)(?::|\s|$)", re.M)
 REPLACES = re.compile(r"^Replaces (\S+-\d+)", re.M)
 HEAD_REPLACES = re.compile(r"\bReplaces (\S+-\d+)\s*$")
@@ -310,12 +320,23 @@ def pane_status(pane, deadline):
         return (UNREACHABLE, None)
 
 
+def latest_kind(path):
+    """The kind on the file's last entry heading, GRANT included, or None.
+    parse() leaves GRANT out, so it cannot say this."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            kinds = HEADING.findall(f.read())
+    except (OSError, ValueError):
+        return None
+    return kinds[-1] if kinds else None
+
+
 def awaiting_user(w):
     """True while the repo's latest entry is an open DECISION the cursor is on:
     the orchestrator waits on the user, so its pane resting is not news."""
     entries, answered = parse(w["path"])
     last = len(entries) - 1
-    if last < 0 or entries[last][1] != "DECISION":
+    if last < 0 or entries[last][1] != "DECISION" or latest_kind(w["path"]) != "DECISION":
         return False
     if reportable(entries, answered, last - 1, latest_only=False) != [last]:
         return False  # answered, or replaced by an entry that reuses an id
@@ -325,8 +346,9 @@ def awaiting_user(w):
 def pane_event(mem, seen, quiet=False):
     """Status to report for one pane observation, or None. Updates mem.
 
-    idle to done or done to idle is not reported, and with quiet (an open
-    DECISION already reported) idle and done are not reported at all.
+    idle to done or done to idle with the same seq is not reported, and with
+    quiet (an open DECISION already reported) idle and done are not
+    reported at all.
     """
     if seen is None:
         return None
@@ -341,7 +363,7 @@ def pane_event(mem, seen, quiet=False):
     mem["status"], mem["seq"] = status, seq
     if status not in STOPPED or (status, seq) == before:
         return None
-    if status in RESTING and (quiet or (before[0] in RESTING and before[0] != status)):
+    if status in RESTING and (quiet or (before[0] in RESTING and seq == before[1])):
         return None
     return status
 
@@ -550,9 +572,9 @@ def poll(watched, since_start, deadline):
     for w in watched:
         since = w["seen"] if since_start else 0
         seen = pane_status(w["pane"], deadline)
-        quiet = awaiting_user(w)  # before this poll's entries move the cursor
         stopped = not since_start and seen is not None and seen[0] in ("idle", "done")
         events += entry_events(w, since, latest_only=not since_start, pane_stopped=stopped)
+        quiet = awaiting_user(w)  # after the entries: a DECISION printed now counts
         panes = w["state"].setdefault("panes", {})
         if not isinstance(panes, dict):
             panes = w["state"]["panes"] = {}
