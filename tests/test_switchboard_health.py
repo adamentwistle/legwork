@@ -67,6 +67,7 @@ class FakeWorld:
         self.root_pane, self.clear_takes = "wS:p1", True
         self.herdr_calls, self.banner_calls, self.ctl_calls = [], [], []
         self.banner_code, self.running = 0, False
+        self.banner_err = "Could not show the notification"
 
     def __call__(self, argv, timeout, env=None):
         argv = list(argv)
@@ -74,8 +75,7 @@ class FakeWorld:
             return self.herdr(argv[1:])
         if argv[0] in (NOTIFIER, POWERSHELL):
             self.banner_calls.append((argv, env))
-            return done(argv, self.banner_code, "",
-                        "Could not show the notification" if self.banner_code else "")
+            return done(argv, self.banner_code, "", self.banner_err if self.banner_code else "")
         if len(argv) > 1 and argv[1] == self.mod.CTL:
             self.ctl_calls.append(argv[2:])
             return done(argv)
@@ -197,13 +197,13 @@ class HealthCase(unittest.TestCase):
     def heal(self):
         self.world.failing = {}
 
-    def state(self, watching=(), cycle=False, when="2026-10-10 18:40"):
+    def state(self, watching=(), cycle=False, when="2026-10-10 18:40", path=None):
         lines = ["# switchboard state", "updated: 2026-10-10 18:40", "## watching"]
         lines += [f"{p} {r} {pane}" for p, r, pane in watching]
         lines += ["## check-ins"] + [f"{p} 2026-10-10 18:40" for p, _, _ in watching]
         if cycle:
             lines.append(f"CYCLE {when}")
-        (self.dir / "state.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        (path or self.dir / "state.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     def watch(self, *repos):
         rows = {"legwork": (self.repo, "w1:p2"), "recipe-box": (self.repo2, "w2:p2")}
@@ -309,9 +309,67 @@ class CommandLineTests(HealthCase):
         create = self.restart_calls()[0]
         self.assertIn("CLAUDE_CONFIG_DIR=" + str(self.tmp / "job"), create)
 
+    def test_path_flag_puts_a_folder_first_on_path_for_the_pass(self):
+        os.environ["PATH"] = "elsewhere"
+        self.run_pass("--path", str(self.tmp / "herdr-home"))
+        self.assertEqual(os.environ["PATH"].split(os.pathsep),
+                         [str(self.tmp / "herdr-home"), "elsewhere"])
+
+    def test_session_args_split_like_a_shell(self):
+        os.environ["LEGWORK_SESSION_ARGS"] = "--add-dir '/work/my notes' --effort high"
+        self.assertEqual(self.mod.session_args(),
+                         ["--add-dir", "/work/my notes", "--effort", "high"])
+
+    def test_session_args_keep_windows_backslashes(self):
+        self.patch("WINDOWS", True)
+        os.environ["LEGWORK_SESSION_ARGS"] = (
+            r"""--model opus --add-dir E:\dev\shared --add-dir "C:\my notes" --effort 'very high'""")
+        self.assertEqual(self.mod.session_args(),
+                         ["--model", "opus", "--add-dir", r"E:\dev\shared",
+                          "--add-dir", r"C:\my notes", "--effort", "very high"])
+
     @unittest.skipIf(os.name == "nt", "the executable bit is a POSIX idea")
     def test_script_is_executable(self):
         self.assertTrue(os.access(SCRIPT, os.X_OK))
+
+
+class StateFileTests(HealthCase):
+    """The state file is $SWITCHBOARD_STATE when it is set, as for
+    switchboard-state and switchboard-wait, else DIR/state.md."""
+
+    def test_switchboard_state_names_the_state_file(self):
+        other = self.tmp / "boards" / "state.md"
+        other.parent.mkdir()
+        os.environ["SWITCHBOARD_STATE"] = str(other)
+        self.state([("legwork", str(self.repo), "w1:p2")], path=other)
+        self.agents(sw("working"), orch("working"))
+        seen = []
+        real = self.world.wait_status
+        self.world.wait_status = lambda argv: (seen.append(argv), real(argv))[1]
+        self.run_pass()
+        (argv,) = seen
+        self.assertEqual(argv[3:5], ["--state", str(other)])
+        (line,) = self.log()
+        self.assertFalse(any("no state file" in n for n in line["notes"]), line["notes"])
+        self.assertEqual(self.ctl_calls(), [])
+
+    def test_restart_carries_the_switchboard_folder(self):
+        self.watch("legwork")
+        self.agents(orch("working"))
+        self.run_pass()
+        create = self.restart_calls()[0]
+        self.assertEqual(create[create.index(f"LEGWORK_SWITCHBOARD_DIR={self.dir}") - 1], "--env")
+        self.assertFalse(any(a.startswith("SWITCHBOARD_STATE=") for a in create))
+
+    def test_restart_carries_switchboard_state_when_it_is_set(self):
+        other = self.tmp / "boards" / "state.md"
+        other.parent.mkdir()
+        os.environ["SWITCHBOARD_STATE"] = str(other)
+        self.state([("legwork", str(self.repo), "w1:p2")], path=other)
+        self.agents(orch("working"))
+        self.run_pass()
+        create = self.restart_calls()[0]
+        self.assertEqual(create[create.index(f"SWITCHBOARD_STATE={other}") - 1], "--env")
 
 
 class PassRecordTests(HealthCase):
@@ -485,6 +543,30 @@ class WindowsBannerTests(HealthCase):
         (action,) = self.log()[-1]["actions"]
         self.assertIs(action["ok"], False)
         self.assertIn("no banner", self.err)
+
+    def test_failed_toast_error_is_plain_words_not_clixml(self):
+        # Windows PowerShell 5.1 writes stderr as CLIXML when it is not a
+        # console, a progress record first, as seen live.
+        self.world.banner_code = 1
+        self.world.banner_err = (
+            '#< CLIXML\n<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/'
+            '2004/04"><Obj S="progress" RefId="0"><TN RefId="0"><T>System.Management.Automation'
+            '.PSCustomObject</T><T>System.Object</T></TN><MS><I64 N="SourceId">1</I64><PR N="Record">'
+            '<AV>Preparing modules for first use.</AV><AI>0</AI><Nil /><PI>-1</PI><PC>-1</PC>'
+            '<T>Completed</T><SR>-1</SR><SD> </SD></PR></MS></Obj>'
+            '<S S="Error">The notification platform is unavailable &amp; off._x000D__x000A_</S>'
+            '<S S="Error">At line:9 char:1_x000D__x000A_</S></Objs>')
+        self.run_pass()
+        (action,) = self.log()[-1]["actions"]
+        self.assertIn("The notification platform is unavailable & off.", action["error"])
+        self.assertNotIn("CLIXML", action["error"])
+        self.assertNotIn("_x000D_", action["error"])
+
+    def test_toast_hides_powershell_progress(self):
+        self.run_pass()
+        ((argv, _),) = self.world.banner_calls
+        script = base64.b64decode(argv[argv.index("-EncodedCommand") + 1]).decode("utf-16-le")
+        self.assertIn("$ProgressPreference = 'SilentlyContinue'", script)
 
     def test_no_powershell_shows_nothing_and_notes_it(self):
         self.patch("POWERSHELL", None)
@@ -718,6 +800,18 @@ class OrchestratorTests(HealthCase):
                 self.run_pass(at=T0 + 5 * MIN)
                 self.assertEqual(self.prompt_texts("SWITCHBOARD HEALTH check-in"), [])
 
+    def test_repo_folder_with_a_space_in_its_name(self):
+        spaced = self.tmp / "my project"
+        (spaced / ".legwork").mkdir(parents=True)
+        self.board(spaced, "## proj-1 UPDATE 2026-10-10 18:00\nStarted.\n\n"
+                           "## proj-2 DONE 2026-10-10 19:00\nStopping here.\n\n")
+        self.state([("proj", str(spaced), "w1:p2")])
+        self.agents(sw("idle"), orch("done", name="proj"))
+        self.run_pass()
+        self.run_pass(at=T0 + 5 * MIN)
+        self.assertEqual(self.prompt_texts(), [f"SWITCHBOARD HEALTH wait-none: {spaced}"],
+                         "wait none is seen, and the trailing DONE means no check-in")
+
     def test_done_from_an_earlier_run_does_not_hide_an_idle_orchestrator(self):
         # The latest entry was the DONE of the run before this one.
         self.watch("legwork")
@@ -880,6 +974,7 @@ class RestartTests(HealthCase):
         self.assertEqual(calls[0], ["workspace", "create", "--cwd", "/legwork",
                                     "--label", "switchboard",
                                     "--env", "CLAUDE_CONFIG_DIR=/claude-home",
+                                    "--env", f"LEGWORK_SWITCHBOARD_DIR={self.dir}",
                                     "--env", "DISABLE_AUTO_UPDATE=true", "--no-focus"])
         self.assertEqual(calls[1], ["pane", "rename", "wS:p1", "switchboard"])
         start = calls[2]
@@ -1166,6 +1261,34 @@ class DryRunTests(HealthCase):
         self.run_pass("--dry-run", at=T0 + 5 * MIN)
         self.assertEqual(self.state_path.read_text(encoding="utf-8"), before)
         self.assertEqual(len(self.log()), 1)
+
+
+class WindowlessTests(HealthCase):
+    """The Windows task runs under pythonw.exe, which has no stdout or
+    stderr. The pass writes them to DIR's log files, as launchd does."""
+
+    def test_no_stderr_goes_to_the_error_log(self):
+        self.watch("legwork")
+        self.agents(sw("blocked"), orch("working"))
+        self.world.banner_code = 1
+        opened = []
+        with mock.patch.object(sys, "stdout", None), mock.patch.object(sys, "stderr", None), \
+                mock.patch.object(self.mod, "now", lambda: T0):
+            try:
+                self.assertEqual(self.mod.main(["--once", "--state-dir", str(self.dir)]), 0)
+            finally:
+                opened = [f for f in (sys.stdout, sys.stderr) if f is not None]
+                for f in opened:
+                    f.close()
+        self.assertEqual(len(opened), 2)
+        self.assertIn("no banner", (self.dir / "health.err.log").read_text(encoding="utf-8"))
+        self.assertTrue((self.dir / "health.out.log").exists())
+
+    def test_a_console_keeps_its_own_streams(self):
+        self.watch("legwork")
+        self.agents(sw("working"), orch("working"))
+        self.run_pass()
+        self.assertFalse((self.dir / "health.err.log").exists())
 
 
 class RobustnessTests(HealthCase):
