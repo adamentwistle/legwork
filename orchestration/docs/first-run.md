@@ -59,7 +59,8 @@ With a Claude Code switchboard, set up as in
 [switchboard-setup.md](switchboard-setup.md) (its allow rules, and the
 health watcher if you want it):
 
-1. New Herdr pane, in the legwork repo: `claude --model opus --effort high`
+1. New Herdr pane, in the legwork repo: `claude <LEGWORK_SESSION_ARGS>`
+   (unset: `--model opus --effort high`)
 2. Type `/switchboard <project>`. It names its pane `switchboard` and starts watching.
 3. While it runs:
    - Answer decisions with a letter, or in your own words.

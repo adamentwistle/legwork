@@ -861,6 +861,15 @@ class DocCommandTests(unittest.TestCase):
                         self.assertIn(piece, set(install.PIECES) | {"all"},
                                       f"{path.name}: {snippet}")
 
+    def test_session_start_lines_use_the_session_args_setting(self):
+        # The health watcher restarts the switchboard with
+        # LEGWORK_SESSION_ARGS, so a start line that spells out the default
+        # would run a different model from the one the user set.
+        default = re.compile(r"(?:\bclaude|(?:^|\s)--)\s+--model opus --effort high")
+        for path in self.DOCS:
+            for snippet in self.snippets(path):
+                self.assertIsNone(default.search(snippet), f"{path.name}: {snippet}")
+
     def test_switchboard_setup_is_linked_where_users_look(self):
         for path in (REPO / "SETUP.md", REPO / "README.md", REPO / "CONFIG.md",
                      ORCH / "README.md", ORCH / "docs" / "first-run.md"):
@@ -875,8 +884,14 @@ class DocCommandTests(unittest.TestCase):
                        "brew install terminal-notifier", "Windows PowerShell",
                        "launchd", "Task Scheduler", "/switchboard resume",
                        "LEGWORK_SESSION_ARGS", "LEGWORK_SWITCHBOARD_DIR",
-                       "context:", "## Manual mode"):
+                       "context:", "## Manual mode", "LEGWORK_DIR", "LEGWORK_CONFIG",
+                       "Git Bash", "SWITCHBOARD_STATE"):
             self.assertIn(needle, text)
+
+    def test_flow_diagram_shows_the_watcher_banner(self):
+        text = (ORCH / "README.md").read_text(encoding="utf-8")
+        diagram = text.split("## How it flows", 1)[1].split("```")[1]
+        self.assertIn("banner", diagram)
 
 
 if __name__ == "__main__":
