@@ -119,9 +119,12 @@ class NotifyCase(unittest.TestCase):
             os.environ.update(HERDR_ENV="1", HERDR_PANE_ID=PANE_ID)
         os.environ["CLAUDE_CODE_ENTRYPOINT"] = "cli"
         os.environ.update(env)
-        text = raw if raw is not None else json.dumps(hook)
+        text = raw if raw is not None else json.dumps(hook, ensure_ascii=False)
+        # Claude Code writes UTF-8. The text layer reads it as cp1252, the
+        # locale encoding of a Windows Python, so only the bytes are right.
+        stdin = io.TextIOWrapper(io.BytesIO(text.encode("utf-8")), encoding="cp1252")
         out = io.StringIO()
-        with mock.patch.object(sys, "stdin", io.StringIO(text)), \
+        with mock.patch.object(sys, "stdin", stdin), \
                 contextlib.redirect_stdout(out):
             self.script.main()
         self.assertEqual(out.getvalue(), "")
@@ -205,6 +208,18 @@ class Rules:
                 self.assertEqual(self.shows(), [])
                 self.assertEqual(self.spawns, [])
 
+    def test_switchboard_name_beats_any_other_label(self):
+        # The switchboard started in a pane that already had a label.
+        for pane in ({"label": "review", "title": "switchboard"},
+                     {"label": "review", "terminal_title_stripped": "switchboard"}):
+            with self.subTest(pane=pane):
+                self.runs.clear()
+                self.pane(**pane)
+                self.fire(stop())
+                self.fire(notification())
+                self.assertEqual(self.shows(), [])
+                self.assertEqual(self.spawns, [])
+
     def test_fanout_worker_pane_is_quiet(self):
         for pane in ({"label": "fw-wait-script", "title": "Rewrite the wait script"},
                      {"label": "fw-x"}):
@@ -280,6 +295,11 @@ class Rules:
         self.pane(title="orch-legwork")
         self.fire(stop(last_assistant_message="\nPR 29 is open with the hook.\n\nDetails."))
         self.assertEqual(self.shows(), [("orch-legwork: done", "PR 29 is open with the hook.")])
+
+    def test_text_that_is_not_ascii_survives(self):
+        self.pane(title="Café")
+        self.fire(stop(last_assistant_message="Merged → main, “done”"))
+        self.assertEqual(self.shows(), [("Café: done", "Merged → main, “done”")])
 
     def test_long_body_is_cut(self):
         self.pane(title="orch-legwork")
@@ -487,6 +507,34 @@ class RealProcessTests(unittest.TestCase):
         with mock.patch.object(self.script.subprocess, "run", fake_run):
             self.assertEqual(self.script.herdr("pane", "get", PANE_ID), "{}")
         self.assertEqual(seen, [["/opt/herdr/herdr", "pane", "get", PANE_ID]])
+
+    def test_herdr_output_is_read_as_utf8(self):
+        # A real herdr writes UTF-8 whatever the locale. Under cp1252 the
+        # bytes of の and Ł cannot be decoded at all.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        folder = Path(tmp.name)
+        pane = {"pane_id": PANE_ID, "title": "Fix “task” → の Ł", "cwd": "/srv/Café"}
+        answer = json.dumps({"result": {"pane": pane, "type": "pane_info"}},
+                            ensure_ascii=False).encode("utf-8")
+        helper = folder / "fake_herdr.py"
+        helper.write_text("import sys\nsys.stdout.buffer.write(%r)\n" % answer,
+                          encoding="utf-8", newline="\n")
+        if os.name == "nt":
+            shim = folder / "herdr.cmd"
+            shim.write_text(f'@echo off\r\n"{sys.executable}" "{helper}" %*\r\n',
+                            encoding="ascii", newline="")
+        else:
+            shim = folder / "herdr"
+            shim.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{helper}" "$@"\n',
+                            encoding="utf-8", newline="\n")
+            shim.chmod(0o755)
+        os.environ["HERDR_BIN_PATH"] = str(shim)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            got = self.script.pane_info(PANE_ID)
+        self.assertEqual(got, pane)
+        self.assertEqual(err.getvalue(), "")
 
     def test_herdr_failure_answers_none(self):
         def fake_run(argv, **kw):

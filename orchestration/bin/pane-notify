@@ -9,7 +9,8 @@ or title orch-<project>) and from a normal Claude session. Not `herdr
 notification show`: with Herdr's toasts off it answers shown:true and shows
 nothing. It says nothing from:
 
-- the switchboard pane (label, title or window title `switchboard`),
+- the switchboard pane (label, title or window title `switchboard`, whatever
+  the other two say),
 - a /fanout worker pane (label `fw-<slug>`; the label beats the title, because
   a worker's session title is whatever its task is called),
 - a subagent (`agent_id` in the input) or a SubagentStop,
@@ -83,7 +84,8 @@ PLAY = ("import sys, winsound; "
 def herdr(*args):
     try:
         done = subprocess.run([os.environ.get("HERDR_BIN_PATH") or "herdr", *args],
-                              capture_output=True, text=True, timeout=HERDR_TIMEOUT)
+                              capture_output=True, encoding="utf-8", errors="replace",
+                              timeout=HERDR_TIMEOUT)
     except (OSError, subprocess.SubprocessError):
         return None
     return done.stdout if done.returncode == 0 else None
@@ -92,8 +94,8 @@ def herdr(*args):
 def run(argv, **kw):
     """Run a notifier and wait for it; None when it could not run."""
     try:
-        return subprocess.run(argv, capture_output=True, text=True,
-                              timeout=NOTIFY_TIMEOUT, **kw)
+        return subprocess.run(argv, capture_output=True, encoding="utf-8",
+                              errors="replace", timeout=NOTIFY_TIMEOUT, **kw)
     except (OSError, subprocess.SubprocessError):
         return None
 
@@ -155,9 +157,9 @@ def pane_info(pane_id):
 
 def quiet_pane(pane):
     label = pane.get("label") or ""
-    if label:
-        return label == QUIET_NAME or label.startswith(WORKER_PREFIX)
-    return QUIET_NAME in (pane.get("title"), pane.get("terminal_title_stripped"))
+    if QUIET_NAME in (label, pane.get("title"), pane.get("terminal_title_stripped")):
+        return True
+    return label.startswith(WORKER_PREFIX)
 
 
 def name_of(pane):
@@ -189,7 +191,8 @@ def message(hook):
 
 def main():
     try:
-        hook = json.loads(sys.stdin.read() or "{}")
+        # Claude Code writes UTF-8; the text layer would use the locale's code page.
+        hook = json.loads(sys.stdin.buffer.read().decode("utf-8", "replace") or "{}")
     except ValueError:
         return
     if not isinstance(hook, dict) or hook.get("agent_id"):
