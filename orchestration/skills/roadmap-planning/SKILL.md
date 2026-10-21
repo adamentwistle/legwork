@@ -26,6 +26,11 @@ The ones this skill reads:
 - `LEGWORK_SWITCHBOARD`: `manual` means the user relays by hand, so no
   switchboard session starts the run.
 
+House rules: every list item of `{{LEGWORK_DIR}}/house-rules.md` applies to
+each commit, pull request and comment this session writes (the design doc
+and its pull request in step 4, the legwork commit in step 5), as it does
+for `/ship`. If the file does not exist, say so once and carry on.
+
 ## Steps
 
 1. Inputs: the tracker file `projects/<project>.md` in `{{LEGWORK_DIR}}`

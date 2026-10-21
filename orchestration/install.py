@@ -41,7 +41,9 @@ that).
 LEGWORK_SWITCHBOARD is `claude` (the default) or `manual`. It is read from
 --set, then the environment, then the legwork config. A config written for
 an older switchboard is upgraded: its LEGWORK_SWITCHBOARD becomes `claude`
-and the key in RETIRED_KEYS is dropped, with one note.
+and the key in RETIRED_KEYS is dropped, with one note. That switchboard's
+piece and its profile flag, from an older install command, are skipped with
+one line, so a re-run of that command still refreshes everything else.
 
 --set KEY=VALUE writes a setting into the legwork `config` file, replacing
 the key if it is already there. Re-running is safe: files are overwritten
@@ -88,6 +90,9 @@ SESSION_FILES = ("skills/switchboard/SKILL.md", "skills/roadmap-planning/SKILL.m
 
 # Keys an older install wrote for a switchboard legwork no longer ships.
 RETIRED_KEYS = ("LEGWORK_HERMES_PROFILE",)
+# Its piece name, read from the key so the name is spelt once.
+RETIRED_PIECE = RETIRED_KEYS[0].split("_")[1].lower()
+RETIRED_FLAG = f"--{RETIRED_PIECE}-profile"
 
 CONFIG_SECTION = ("# --- Orchestration (OPTIONAL) ---------------------------"
                   "-----------------")
@@ -100,8 +105,9 @@ SCHEDULERS = {"mac": "launchctl", "windows": "schtasks"}
 
 def parse_pieces(raw):
     """The pieces named in a --with value, in PIECES order. `all` is every
-    piece. Raises ValueError on a name that is not a piece."""
-    names = {p.strip() for p in (raw or "").split(",") if p.strip()}
+    piece. RETIRED_PIECE is dropped (main() says so). Raises ValueError on
+    any other name that is not a piece."""
+    names = {p.strip() for p in (raw or "").split(",") if p.strip()} - {RETIRED_PIECE}
     if "all" in names:
         return list(PIECES)
     unknown = sorted(names - set(PIECES))
@@ -224,23 +230,51 @@ def upgrade_config(text):
     """(text, changed): config text with an older switchboard's settings
     brought up to date. An active LEGWORK_SWITCHBOARD that is neither
     `claude` nor `manual` becomes `claude`, and active RETIRED_KEYS lines go.
+    `changed` names each key that changed, in that order, or is empty.
     Comments and every other line are kept as they are."""
-    out, changed = [], False
+    out, changed = [], set()
     for line in text.splitlines(keepends=True):
         key, sep, value = line.strip().partition("=")
         key = key.strip()
         if sep and not key.startswith("#"):
             if key in RETIRED_KEYS:
-                changed = True
+                changed.add(key)
                 continue
             value = value.strip().strip('"').strip("'").strip().lower()
             if key == "LEGWORK_SWITCHBOARD" and value not in ("", "claude", "manual"):
                 ending = line[len(line.rstrip("\r\n")):] or "\n"
                 out.append("LEGWORK_SWITCHBOARD=claude" + ending)
-                changed = True
+                changed.add(key)
                 continue
         out.append(line)
-    return "".join(out), changed
+    order = ("LEGWORK_SWITCHBOARD",) + RETIRED_KEYS
+    return "".join(out), tuple(k for k in order if k in changed)
+
+
+def upgrade_note(cfg_path, changed):
+    """The one note line for what upgrade_config changed, or None."""
+    parts = []
+    if "LEGWORK_SWITCHBOARD" in changed:
+        parts.append("LEGWORK_SWITCHBOARD now reads claude")
+    if any(k in changed for k in RETIRED_KEYS):
+        parts.append("the old profile key goes")
+    if not parts:
+        return None
+    return (f"note: {cfg_path} had settings for a switchboard legwork no longer "
+            f"ships; {' and '.join(parts)}")
+
+
+def given_switchboard(value):
+    """(value to write, note or None) for a --set LEGWORK_SWITCHBOARD value.
+    `claude` and `manual` go in as lowercase; RETIRED_PIECE goes in as
+    `claude` with a note. Raises ValueError on anything else."""
+    word = value.strip().strip('"').strip("'").strip().lower()
+    if word in ("claude", "manual"):
+        return word, None
+    if word == RETIRED_PIECE:
+        return "claude", (f"note: legwork no longer ships the {word} switchboard; "
+                          "writing LEGWORK_SWITCHBOARD=claude")
+    raise ValueError(f"LEGWORK_SWITCHBOARD takes claude or manual, got {value!r}")
 
 
 def hook_python():
@@ -386,13 +420,26 @@ def main(argv=None):
                     "orchestrator panes start under (default: --claude-dir "
                     "when it is not ~/.claude)")
     ap.add_argument("--dry-run", action="store_true", help="print the plan only")
+    ap.add_argument(RETIRED_FLAG, dest="retired_profile", help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
 
+    set_notes = []
     try:
         pieces = parse_pieces(args.pieces)
         pairs = parse_set(args.set)
+        for i, (key, value) in enumerate(pairs):
+            if key == "LEGWORK_SWITCHBOARD":
+                value, note = given_switchboard(value)
+                pairs[i] = (key, value)
+                set_notes += [note] if note else []
     except ValueError as e:
         ap.error(str(e))
+    named = {p.strip() for p in args.pieces.split(",")}
+    retired = ([RETIRED_PIECE] if RETIRED_PIECE in named else []) + \
+        ([RETIRED_FLAG] if args.retired_profile is not None else [])
+    if retired:
+        print(f"skip {' and '.join(retired)}: legwork no longer ships that "
+              "switchboard; the switchboard piece installs the Claude Code one")
 
     legwork_dir = Path(os.path.expanduser(
         args.legwork_dir or os.environ.get("LEGWORK_DIR") or REPO)).resolve()
@@ -416,16 +463,18 @@ def main(argv=None):
         print(("would " if args.dry_run else "") + line)
         done.append(line)
 
-    if upgraded:
-        print(f"note: {cfg_path} named a switchboard legwork no longer ships; "
-              "LEGWORK_SWITCHBOARD now reads claude and the old profile key goes")
+    note = upgrade_note(cfg_path, upgraded)
+    for line in ([note] if note else []) + set_notes:
+        print(line)
     if not os.environ.get("LEGWORK_DIR") and legwork_dir != (Path.home() / "legwork").resolve():
         print(f"note: the skills look for the legwork repo at $LEGWORK_DIR, else ~/legwork; "
               f"add 'export LEGWORK_DIR={legwork_dir}' to your shell profile")
-    if any(p in pieces for p in ("shipping", "fanout")) \
+    planning = "switchboard" in pieces and switchboard != "manual"
+    if (planning or any(p in pieces for p in ("shipping", "fanout"))) \
             and not (legwork_dir / "house-rules.md").exists():
-        print(f"note: no {legwork_dir / 'house-rules.md'}; workers, /ship and /bugbot "
-              "will have no house rules (see house-rules.example.md)")
+        print(f"note: no {legwork_dir / 'house-rules.md'}; workers, /ship, /bugbot "
+              "and planning sessions will have no house rules (see "
+              "house-rules.example.md)")
 
     pane_dir = pane_config_dir(args.pane_config_dir, claude_dir)
     for src, dest in plan_copies(pieces, claude_dir, switchboard):

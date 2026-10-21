@@ -168,13 +168,13 @@ it.
   each destination now exists.
 - With orchestration: `<python> orchestration/bin/switchboard-wait --status
   <checkout>:none` must exit 0.
-- With a Claude Code switchboard, these steps are the user's. List them,
-  do not run them:
+- These steps are the user's. List the ones that apply, do not run them:
   - with `pane-notify`: switch Herdr's own toasts and Claude sounds off, as
     the installer's note says, then `herdr server reload-config`
   - with `switchboard-health`: trust the legwork repo in Claude Code (start
     `claude` there once), since the watcher restarts the switchboard there
-  - run the 15 minute plumbing test in `orchestration/docs/smoke-test.md`
+  - with orchestration: run the 15 minute plumbing test in
+    `orchestration/docs/smoke-test.md`, including its clean-up step
 - In every repo an orchestrator will work in: `.legwork/` gitignored, and
   the allow and deny rules in `orchestration/docs/first-run.md`
   ("Permissions") in its gitignored `.claude/settings.local.json`.
