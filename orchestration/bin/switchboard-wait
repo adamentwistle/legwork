@@ -27,6 +27,19 @@ each watched repo:
   - the pane, if it is already idle, done, blocked or gone
 If anything is printed on start it exits 0 straight away.
 
+Not every pane change is news. A pane that goes from idle to done, or from
+done to idle, did no work in between, so that is not reported; a move into
+idle or done from working, from herdr's unknown, or with no state kept yet
+(as on the first start) is. The same idle or done again with a new
+state_change_seq means the pane moved without the wait seeing it, so that is
+still reported. And while a repo's latest entry is an open DECISION that has
+already been reported (the cursor is on it), its pane going idle or done is
+not reported at all: the orchestrator is waiting on the user, which the
+switchboard already knows. Once the DECISION is answered or replaced, or any
+later entry lands, pane reports come back as usual. blocked, gone and
+unreachable are always reported. --status is a snapshot, not an event, and
+always shows the pane as it is.
+
 A CYCLE or DONE from an earlier run is never reported, by the wait or by
 --status. The switchboard's state file (written by switchboard-state) has a
 "## started" line per project it started a run for; a CYCLE or DONE whose
@@ -54,7 +67,7 @@ check a pid with, so every listed pid counts as gone and --status says
 
 Otherwise it waits, and returns as soon as, in any watched repo:
   - a new DECISION, CYCLE or DONE entry lands
-  - the pane goes idle, done, blocked or gone, or a herdr call fails
+  - the pane goes idle or done (see above), blocked or gone, or a herdr call fails
     ("unreachable": a timeout, herdr missing, or any error other than
     agent_not_found; reported once)
   - the weekly all-models or Fable usage reaches 99% (the ccstatusline
@@ -83,6 +96,7 @@ except ImportError:  # Windows: lock with msvcrt instead
 
 WAKE = ("DECISION", "CYCLE", "DONE")
 STOPPED = ("idle", "done", "blocked", "gone")
+RESTING = ("idle", "done")  # moving between these two is not news
 sys.path.insert(1, os.path.join(os.path.dirname(os.path.realpath(__file__)), ".."))
 try:
     from settings import setting  # orchestration/settings.py, same checkout
@@ -296,8 +310,24 @@ def pane_status(pane, deadline):
         return (UNREACHABLE, None)
 
 
-def pane_event(mem, seen):
-    """Status to report for one pane observation, or None. Updates mem."""
+def awaiting_user(w):
+    """True while the repo's latest entry is an open DECISION the cursor is on:
+    the orchestrator waits on the user, so its pane resting is not news."""
+    entries, answered = parse(w["path"])
+    last = len(entries) - 1
+    if last < 0 or entries[last][1] != "DECISION":
+        return False
+    if reportable(entries, answered, last - 1, latest_only=False) != [last]:
+        return False  # answered, or replaced by an entry that reuses an id
+    return cursor_index(entries, w["state"].get(w["path"])) >= last
+
+
+def pane_event(mem, seen, quiet=False):
+    """Status to report for one pane observation, or None. Updates mem.
+
+    idle to done or done to idle is not reported, and with quiet (an open
+    DECISION already reported) idle and done are not reported at all.
+    """
     if seen is None:
         return None
     status, seq = seen
@@ -309,9 +339,11 @@ def pane_event(mem, seen):
     mem[UNREACHABLE] = False
     before = (mem.get("status"), mem.get("seq"))
     mem["status"], mem["seq"] = status, seq
-    if status in STOPPED and (status, seq) != before:
-        return status
-    return None
+    if status not in STOPPED or (status, seq) == before:
+        return None
+    if status in RESTING and (quiet or (before[0] in RESTING and before[0] != status)):
+        return None
+    return status
 
 
 def load_state(path):
@@ -518,6 +550,7 @@ def poll(watched, since_start, deadline):
     for w in watched:
         since = w["seen"] if since_start else 0
         seen = pane_status(w["pane"], deadline)
+        quiet = awaiting_user(w)  # before this poll's entries move the cursor
         stopped = not since_start and seen is not None and seen[0] in ("idle", "done")
         events += entry_events(w, since, latest_only=not since_start, pane_stopped=stopped)
         panes = w["state"].setdefault("panes", {})
@@ -526,7 +559,7 @@ def poll(watched, since_start, deadline):
         mem = panes.setdefault(w["pane"], {})
         if not isinstance(mem, dict):
             mem = panes[w["pane"]] = {}
-        status = pane_event(mem, seen)
+        status = pane_event(mem, seen, quiet)
         if status:
             events.append(f"{w['name']} pane {status}")
     return events
