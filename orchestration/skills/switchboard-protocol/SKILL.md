@@ -6,8 +6,8 @@ description: Use when running as a project orchestrator that reports to the legw
 # Switchboard protocol
 
 You run one project for hours while the user works from a single
-switchboard: a Hermes thread, or the user reading the file by hand. The
-switchboard reads what you write to the switchboard file and relays answers
+switchboard: a Claude Code session running the switchboard skill, or the
+user reading the file by hand. The switchboard reads what you write to the switchboard file and relays answers
 back into your pane. Decide what you can, and send up only what changes
 direction.
 
@@ -16,8 +16,9 @@ direction.
 - `<legwork>` below is the legwork repo: `$LEGWORK_DIR` if set, otherwise
   `~/legwork`. Its settings are KEY=VALUE lines in `<legwork>/config`; a
   real environment variable wins over the file. Read these once:
-  - `LEGWORK_SWITCHBOARD`: `hermes` (a Hermes thread relays) or `manual`
-    (the user relays by hand). Unset means `hermes`.
+  - `LEGWORK_SWITCHBOARD`: `claude` (a switchboard session relays) or
+    `manual` (the user relays by hand). Unset, or any value but `manual`,
+    means a switchboard relays.
   - `LEGWORK_OWN_OWNERS`: the GitHub users or orgs whose repos are the
     user's own. Every other owner is a shared repo.
   - `LEGWORK_BUGBOT_OWNERS`: the owners that have Cursor Bugbot installed.
@@ -31,10 +32,22 @@ direction.
   shows a different title, write an `UPDATE` saying so.
 - The switchboard file is `<repo>/.legwork/switchboard.md`. Create it if
   missing. The repo must gitignore `.legwork/`.
+- Before any other work, write an `UPDATE` that says the run started and
+  what it is for. The switchboard reads a `DONE` as the end of the run, so
+  an old `DONE` must not stay the latest entry while you work.
 - Read `CONTEXT.md`, any ADRs and the project's `## Vision` before deciding
   anything. They are what you decide from.
 - If the start prompt says you may merge pull requests that pass the gate,
   that covers every merge in this run. Do not escalate merges.
+- After each merge, delete its branch yourself. `gh pr merge
+  --delete-branch` leaves the remote branch behind while a worktree still
+  has it checked out, and a squash merge leaves the local one. From the main
+  checkout, never the worktree: remove the worktree, then
+  `git push origin --delete <branch>`, then check
+  `git ls-remote --heads origin <branch>` prints nothing and
+  `git branch -D <branch>`. Run that check even when `--delete-branch`
+  seemed to work. A branch you could not delete goes in your `DONE` with the
+  error, never "left for the user" without one.
 
 ## Decide or escalate
 
@@ -59,6 +72,10 @@ on it. Stop only when nothing is left that does not depend on it.
 ## Entry format
 
 Append to the switchboard file. Newest last. The id is `<project>-<n>`.
+Take `<n>` from the file each time you write: one more than the highest
+`<n>` in a `## <project>-<n>` heading already there, never from memory.
+The switchboard writes its `GRANT` entries as `<project>-g<N>`, so they
+never take your numbers.
 Stamp every entry with the output of `date '+%Y-%m-%d %H:%M'`, run at the
 moment you write the entry. Never compose or estimate a time from memory.
 
@@ -84,15 +101,18 @@ Resume: <exact command, usually /go <project> or /fanout <project> --resume>
 <the /fanout wrap list: PRs, review state, skipped, blocked, unproven>
 ```
 
-A `DECISION` that supersedes an earlier one carries `Replaces <id>` on its
-first line. Writing it closes the earlier `DECISION`; do not also answer
+A `DECISION` that supersedes an earlier one carries `Replaces <id>` on the
+line after its heading. Writing it closes the earlier `DECISION`; do not also answer
 or decide the earlier one separately.
 
 Answers arrive in your pane as `SWITCHBOARD ANSWER <id>: <answer>`. Act on
-them. Only the switchboard writes the `ANSWERED` line; you never write one,
-even when the user answers in the pane directly instead of through the
-switchboard. In that case, write a `DECIDED` entry quoting what the user
-said.
+them. A `SWITCHBOARD GRANT <id>: ...` prompt is a delegation the user gave
+the switchboard, already recorded in the switchboard file; note it and
+carry on. Only the switchboard writes the `ANSWERED` line; you never write
+one, even when the user answers in the pane directly instead of through the
+switchboard. In that case, write a `DECIDED` entry with `Replaces <id>` on
+the line after its heading, then what the user said, quoted. Without that
+line the `DECISION` stays open.
 
 The one exception is `LEGWORK_SWITCHBOARD=manual`. Then there is no relay,
 and an answer the user types into your pane, with or without the
