@@ -335,10 +335,11 @@ the repo.
 ## 7. Optional: orchestration
 
 The orchestrator and switchboard layer lives in `orchestration/`: `/ship`,
-`/bugbot`, `/fanout`, the switchboard-protocol skill, the Hermes switchboard
-skill, and three scripts. It needs a checkout and `gh`; Herdr is strongly
-recommended, and Hermes is optional. The easy way in is `/onboard`, which
-asks what you want. By hand:
+`/bugbot`, `/fanout`, the switchboard-protocol skill, the switchboard and
+roadmap-planning skills, and the scripts in `orchestration/bin/`. It needs a
+checkout and `gh`; Herdr is strongly recommended, and the Claude Code
+switchboard runs in a Herdr pane. The easy way in is `/onboard`, which asks
+what you want. By hand:
 
 ```
 cp house-rules.example.md house-rules.md     # then edit it
@@ -348,9 +349,11 @@ python3 orchestration/install.py --with shipping,fanout,switchboard,herdr-skill
 ```
 
 Add `usage-guard` to install the pause-before-a-limit hook, `codex-agent`
-for the codex subagent (needs the `codex` CLI), and `hermes`
-with `--hermes-profile <name>` for a Hermes switchboard. `--dry-run` shows
-the plan first. The pieces, settings and a first run are in
+for the codex subagent (needs the `codex` CLI), `switchboard-health` for the
+switchboard's health watcher and `pane-notify` for banners from the panes
+worth hearing (both macOS and Windows). With `LEGWORK_SWITCHBOARD=manual`,
+`switchboard` installs the protocol only. On Windows, run the installer as
+`python orchestration/install.py`. `--dry-run` shows the plan first. The pieces, settings and a first run are in
 [orchestration/README.md](orchestration/README.md).
 
 ## Verify

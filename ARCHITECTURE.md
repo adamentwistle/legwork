@@ -109,9 +109,11 @@ dependency rule, not just filing:
   `suite/reply-capture/`, `suite/alerts/`). suite imports from core, never
   the reverse.
 - `orchestration/` is the optional orchestrator layer: `/ship`, `/bugbot`
-  and `/fanout`, the switchboard-protocol skill, the Hermes switchboard
-  skill (a template), `switchboard-wait`, `bugbot-wait`, `usage-guard`, and
-  `install.py`, which installs the pieces a user picks. Like suite, it
+  and `/fanout`, the switchboard-protocol skill, the switchboard and
+  roadmap-planning skills (templates), the scripts in `bin/` (the
+  switchboard's wait, answer, state and health watcher, `bugbot-wait`,
+  `usage-guard`, `pane-notify`), and `install.py`, which installs the pieces
+  a user picks. Like suite, it
   imports from core, never the reverse, and neither core nor suite depends
   on it. See [orchestration/README.md](orchestration/README.md).
 - `scripts/` holds `legwork_install.py`, the wizard behind `./install.sh`.

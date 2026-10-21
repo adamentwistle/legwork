@@ -1,11 +1,10 @@
 # House rules
 
-Rules every worker, orchestrator and switchboard follows, whatever the repo.
-Copy this file to `house-rules.md` (same folder) and make it yours, or let
-`/onboard` write it from your answers. Only the list items below are rules:
-`/fanout` pastes them into every worker's brief, `/ship` and `/bugbot` follow
-them for commits, PRs and replies, and the Hermes install puts them in the
-profile's SOUL.md.
+Rules every worker and orchestrator follows, whatever the repo. Copy this
+file to `house-rules.md` (same folder) and make it yours, or let `/onboard`
+write it from your answers. Only the list items below are rules: `/fanout`
+pastes them into every worker's brief, and `/ship` and `/bugbot` follow them
+for commits, PRs and replies.
 
 - Everything is authored as me. No attribution trailer, no co-author line, no mention of an AI agent in commits, pull requests, comments or documents.
 - Work lands on a branch through a pull request. Never commit to or push main.

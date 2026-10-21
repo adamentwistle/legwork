@@ -67,22 +67,23 @@ Notes:
 ## Orchestration
 
 Read by the optional orchestration layer (`orchestration/`): the
-switchboard-protocol and fanout skills, `/ship`, `/bugbot`, the Hermes
-switchboard skill and the scripts in `orchestration/bin/`. The runner
+switchboard-protocol, fanout, switchboard and roadmap-planning skills,
+`/ship`, `/bugbot` and the scripts in `orchestration/bin/`. The runner
 ignores them. `orchestration/install.py --set` writes them, and
 `./install.sh` keeps them when it rewrites `config`.
 
 | Variable | Default | What it does |
 | --- | --- | --- |
 | `LEGWORK_ORCHESTRATION` | unset | Set to `1` by the installer when fanout or the switchboard is installed. A record, nothing reads it to decide. |
-| `LEGWORK_SWITCHBOARD` | `hermes` | Who relays an orchestrator's `DECISION`s: `hermes` (a Hermes thread with the switchboard skill writes the `ANSWERED` lines) or `manual` (you answer in the pane, and the orchestrator writes the `ANSWERED` line itself). |
-| `LEGWORK_HERMES_PROFILE` | `default` | The Hermes profile the switchboard skill is installed into. `default` is `~/.hermes` itself. |
+| `LEGWORK_SWITCHBOARD` | `claude` | Who relays an orchestrator's `DECISION`s: `claude` (a Claude Code session in a Herdr pane named `switchboard`, started with `/switchboard <project>`, relays your answers and writes the `ANSWERED` lines) or `manual` (you answer in the pane, and the orchestrator writes the `ANSWERED` line itself). Any other value reads as `claude`. With `manual`, the installer leaves out the switchboard and roadmap-planning skills. |
+| `LEGWORK_SWITCHBOARD_HEALTH` | unset | Set to `1` by the installer's `switchboard-health` piece (macOS and Windows). It tells the switchboard the health watcher is there, so the switchboard runs `switchboard-health-ctl on` when it starts watching and `off` when it stops. The watcher checks the switchboard every 5 minutes, cycles its context and restarts it if it dies. It needs `herdr` and `claude` on your own PATH, and the legwork repo trusted in Claude Code. Unset means no watcher. |
+| `LEGWORK_SESSION_ARGS` | `--model opus --effort high` | The arguments `claude` starts with when the switchboard opens a new orchestrator, and when the health watcher restarts the switchboard. |
 | `LEGWORK_SWITCHBOARD_DIR` | `$CLAUDE_CONFIG_DIR/switchboard`, else `~/.claude/switchboard` | The switchboard's own folder. `switchboard-state` writes its state file, `state.md`, there, and `switchboard-wait` reads it and leaves out a `CYCLE` or `DONE` dated before a run's `started` line, so an earlier run's `DONE` does not end a new one. `SWITCHBOARD_STATE` in the environment, or `switchboard-wait --state FILE`, names the state file itself instead. No state file means nothing is left out. |
 | `LEGWORK_OWN_OWNERS` | unset | GitHub users or orgs whose repos are yours, comma-separated. On these, issue ids may appear in PRs, planning docs go up as PRs, and merges may be allowed. Every other owner is a shared repo. |
 | `LEGWORK_BUGBOT_OWNERS` | unset | GitHub owners with Cursor Bugbot installed. `bugbot-wait` returns `NO_BUGBOT` at once for any other owner, without posting. Unset means no owner has Bugbot. |
 | `LEGWORK_LINEAR_TEAM` | unset | The Linear team every issue lives in. Unset skips the Linear rules entirely. |
 | `LEGWORK_LINEAR_TEAM_KEY` | unset | That team's issue key, the `PLT` in `PLT-12`. Ids with it never appear on shared repos. |
-| `LEGWORK_LINEAR_SWEEP_LABELS` | unset | Labels a Hermes planning session also sweeps, comma-separated. |
+| `LEGWORK_LINEAR_SWEEP_LABELS` | unset | Labels a planning session (the roadmap-planning skill) also sweeps, comma-separated. |
 | `LEGWORK_PR_SKILL` | unset | A skill of yours that writes PR bodies. `/ship` and `/fanout`'s worker briefs use it, run in full, instead of the built-in TL;DR and Verification shape. |
 | `LEGWORK_UI_SKILL` | unset | A skill of yours that verifies a UI journey in a browser. The quality gate uses it instead of plain Playwright. |
 | `LEGWORK_USAGE_CACHE` | `~/.cache/ccstatusline/usage.json` | The usage cache `usage-guard` and `switchboard-wait` read. No cache means the usage checks are skipped. |

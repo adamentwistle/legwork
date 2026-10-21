@@ -99,6 +99,13 @@ def iter_config_pairs(text):
         yield key.strip(), value.strip().strip('"').strip("'")
 
 
+def switchboard_mode(value):
+    """LEGWORK_SWITCHBOARD read the way the switchboard-protocol skill reads
+    it: `manual` means the user relays decisions by hand; anything else,
+    unset or an older value included, means a Claude Code switchboard."""
+    return "manual" if (value or "").strip().lower() == "manual" else "claude"
+
+
 # The repo root: this module lives at <root>/core/legwork_common.py, and the
 # runner, the hooks and the dashboard builder all sit one level below it too.
 ROOT = Path(__file__).resolve().parent.parent

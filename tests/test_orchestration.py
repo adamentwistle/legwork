@@ -2,8 +2,9 @@
 
 Covers the installer's pure functions, the settings the scripts read
 (LEGWORK_BUGBOT_OWNERS, LEGWORK_USAGE_CACHE), the wizard carrying those
-settings through a config rewrite, and a scan that keeps the public copies
-free of anything tied to one person's setup.
+settings through a config rewrite, real runs into scratch dirs, and scans
+that keep the public copies free of anything tied to one person's setup and
+of the switchboard legwork no longer ships.
 """
 
 import importlib.machinery
@@ -17,7 +18,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 from unittest import mock
@@ -39,12 +40,25 @@ def load(path, name):
 
 
 install = load(ORCH / "install.py", "orchestration_install")
+from legwork_common import switchboard_mode  # noqa: E402
+
+# The dropped switchboard's name, read from the one compatibility line in
+# orchestration/install.py, so no test spells it out.
+OLD = install.RETIRED_KEYS[0].split("_")[1].lower()
+
+
+def no_tool(_name):
+    return None
+
+
+def every_tool(name):
+    return f"/fake/bin/{name}"
 
 
 class PiecesTests(unittest.TestCase):
     def test_parse_pieces_keeps_canonical_order(self):
-        self.assertEqual(install.parse_pieces("hermes, shipping"),
-                         ["shipping", "hermes"])
+        self.assertEqual(install.parse_pieces("pane-notify, shipping"),
+                         ["shipping", "pane-notify"])
         self.assertEqual(install.parse_pieces("all"), list(install.PIECES))
         self.assertEqual(install.parse_pieces(""), [])
 
@@ -52,15 +66,56 @@ class PiecesTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             install.parse_pieces("shipping,runner")
 
+    def test_the_old_switchboard_piece_and_flag_are_gone(self):
+        with self.assertRaises(ValueError):
+            install.parse_pieces(OLD)
+        self.assertFalse(hasattr(install, OLD + "_home"))
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            install.main([f"--{OLD}-profile", "x", "--dry-run"])
+
+    def test_new_pieces_are_in_all(self):
+        for piece in ("switchboard-health", "pane-notify"):
+            self.assertIn(piece, install.parse_pieces("all"))
+
+    def test_docstring_names_every_piece(self):
+        for piece in install.PIECES:
+            self.assertRegex(install.__doc__, rf"\n  {re.escape(piece)} ", piece)
+
     def test_plan_copies_mirrors_layout_and_sources_exist(self):
         dest = Path("/tmp/fake-claude")
         pairs = install.plan_copies(["shipping", "fanout", "switchboard"], dest)
         got = {d.relative_to(dest).as_posix() for _, d in pairs}
         self.assertEqual(got, {
             "commands/ship.md", "commands/bugbot.md", "commands/fanout.md",
-            "skills/fanout/SKILL.md", "skills/switchboard-protocol/SKILL.md"})
+            "skills/fanout/SKILL.md", "skills/switchboard-protocol/SKILL.md",
+            "skills/switchboard/SKILL.md", "skills/roadmap-planning/SKILL.md"})
         for src, _ in pairs:
             self.assertTrue(src.is_file(), src)
+
+    def test_manual_switchboard_installs_the_protocol_only(self):
+        # Orchestrators follow the protocol either way. The switchboard
+        # session's skill and the planning skill that queues its runs are
+        # for a Claude Code switchboard only.
+        dest = Path("/tmp/fake-claude")
+        pairs = install.plan_copies(["switchboard"], dest, switchboard="manual")
+        self.assertEqual([d.relative_to(dest).as_posix() for _, d in pairs],
+                         ["skills/switchboard-protocol/SKILL.md"])
+        pairs = install.plan_copies(["switchboard"], dest, switchboard="claude")
+        self.assertEqual(len(pairs), 3)
+
+    def test_switchboard_value_is_claude_unless_manual(self):
+        for raw, want in ((None, "claude"), ("", "claude"), ("claude", "claude"),
+                          ("manual", "manual"), (" Manual ", "manual"),
+                          (OLD, "claude")):
+            self.assertEqual(switchboard_mode(raw), want, raw)
+
+    def test_pane_config_dir_follows_a_non_default_claude_dir(self):
+        home = Path("/home/u")
+        self.assertIsNone(install.pane_config_dir(None, home / ".claude", home))
+        self.assertEqual(install.pane_config_dir(None, Path("/alt"), home),
+                         str(Path("/alt")))
+        self.assertEqual(install.pane_config_dir("/x", Path("/alt"), home), "/x")
+        self.assertIsNone(install.pane_config_dir("", Path("/alt"), home))
 
     # fanout and the protocol send cross-model reviews to "the codex agent,
     # when you have one"; this piece is how you get one.
@@ -81,31 +136,35 @@ class PiecesTests(unittest.TestCase):
                          Path("/y"))
         self.assertEqual(install.claude_home(None, {}), Path.home() / ".claude")
 
-    def test_hermes_home(self):
-        root = Path("/h")
-        self.assertEqual(install.hermes_home("default", root), root)
-        self.assertEqual(install.hermes_home("work", root),
-                         root / "profiles" / "work")
 
-
-class HermesSkillTests(unittest.TestCase):
+class RenderTests(unittest.TestCase):
     def setUp(self):
-        self.text = (ORCH / "hermes" / "switchboard" / "SKILL.md").read_text()
+        self.text = (ORCH / "skills" / "switchboard" / "SKILL.md").read_text(
+            encoding="utf-8")
 
     def test_render_fills_every_placeholder(self):
         out = install.render(self.text, "/srv/legwork", "/srv/legwork/orchestration/bin", "/c/dir")
         self.assertNotIn("{{", out)
         self.assertIn("/srv/legwork/orchestration/bin/switchboard-wait", out)
-        self.assertIn("--env\n   CLAUDE_CONFIG_DIR=/c/dir`", out)
+        self.assertIn("--cwd <repo> --env\n   CLAUDE_CONFIG_DIR=/c/dir "
+                      "--env DISABLE_AUTO_UPDATE=true", out)
 
     def test_render_without_config_dir_has_no_env_flag(self):
         out = install.render(self.text, "/srv/legwork")
-        self.assertNotIn("CLAUDE_CONFIG_DIR", out)
-        self.assertIn("--cwd <repo>`", out)
+        self.assertNotIn("CLAUDE_CONFIG_DIR=", out)
+        self.assertIn("--cwd <repo> --env DISABLE_AUTO_UPDATE=true", out)
+
+    def test_pane_config_dir_renders_with_forward_slashes(self):
+        # The pane line runs through Git Bash too, which eats backslashes.
+        with mock.patch.object(install, "Path", PureWindowsPath), \
+                mock.patch.object(install, "script_python", return_value=None):
+            out = install.render("x{{PANE_ENV}}", r"E:\q", r"E:\b",
+                                 pane_config_dir=r"E:\dev\claude-alt")
+        self.assertEqual(out, "x --env\n   CLAUDE_CONFIG_DIR=E:/dev/claude-alt")
 
     def test_every_installed_file_renders_clean(self):
         for src, _ in install.plan_copies(list(install.PIECES), Path("/c")):
-            out = install.render(src.read_text(), "/q", "/engine/bin")
+            out = install.render(src.read_text(encoding="utf-8"), "/q", "/engine/bin")
             self.assertNotIn("{{", out, src)
             self.assertNotIn("<legwork>/orchestration", out, src)
 
@@ -157,8 +216,9 @@ class HermesSkillTests(unittest.TestCase):
 
     def test_every_script_line_gets_the_interpreter(self):
         sources = [s for s, _ in install.plan_copies(list(install.PIECES), Path("/c"))]
-        for src in sources + [ORCH / "hermes" / "switchboard" / "SKILL.md"]:
-            text = src.read_text()
+        self.assertIn(ORCH / "skills" / "switchboard" / "SKILL.md", sources)
+        for src in sources:
+            text = src.read_text(encoding="utf-8")
             calls = len(re.findall(r"\{\{LEGWORK_BIN\}\}/", text))
             out = install.render(text, "/q", "/engine/bin", python="/py/python")
             self.assertEqual(out.count("/py/python /engine/bin/"), calls, src)
@@ -229,12 +289,66 @@ class ConfigTests(unittest.TestCase):
             again = install.set_config_keys(text, [("LEGWORK_SWITCHBOARD", "manual")])
             self.assertEqual(again.count(install.CONFIG_SECTION), 1)
 
+    def test_wizard_carries_the_new_settings_and_not_the_retired_key(self):
+        keys = legwork_install.ORCHESTRATION_KEYS
+        for key in ("LEGWORK_SESSION_ARGS", "LEGWORK_SWITCHBOARD_HEALTH"):
+            self.assertIn(key, keys)
+        for key in install.RETIRED_KEYS:
+            self.assertNotIn(key, keys)
+
+    def test_wizard_rewrite_of_an_old_config_reads_as_claude(self):
+        existing = {"LEGWORK_SWITCHBOARD": OLD, install.RETIRED_KEYS[0]: "work",
+                    "LEGWORK_SESSION_ARGS": "--model opus --effort high",
+                    "LEGWORK_SWITCHBOARD_HEALTH": "1"}
+        carried = legwork_install.carried_settings(existing)
+        self.assertEqual(carried, [
+            ("LEGWORK_SWITCHBOARD", "claude"),
+            ("LEGWORK_SWITCHBOARD_HEALTH", "1"),
+            ("LEGWORK_SESSION_ARGS", "--model opus --effort high")])
+        text = legwork_install.render_config(
+            {"level": 1, "legwork_dir": "/a", "carried": carried})
+        self.assertNotIn(install.RETIRED_KEYS[0], text)
+        self.assertEqual(legwork_install.parse_config_text(text)
+                         ["LEGWORK_SESSION_ARGS"], "--model opus --effort high")
+
+    def test_wizard_keeps_manual(self):
+        self.assertEqual(legwork_install.carried_settings(
+            {"LEGWORK_SWITCHBOARD": "manual"}), [("LEGWORK_SWITCHBOARD", "manual")])
+
+    def test_upgrade_config_rewrites_an_old_switchboard(self):
+        text = (f"LEGWORK_DIR=/a\n# LEGWORK_SWITCHBOARD={OLD}\n"
+                f"LEGWORK_SWITCHBOARD={OLD}\n{install.RETIRED_KEYS[0]}=work\n"
+                "LEGWORK_OWN_OWNERS=me\n")
+        out, changed = install.upgrade_config(text)
+        self.assertTrue(changed)
+        self.assertEqual(out, (f"LEGWORK_DIR=/a\n# LEGWORK_SWITCHBOARD={OLD}\n"
+                               "LEGWORK_SWITCHBOARD=claude\nLEGWORK_OWN_OWNERS=me\n"))
+
+    def test_upgrade_config_leaves_a_current_config_alone(self):
+        for text in ("", "LEGWORK_SWITCHBOARD=manual\n",
+                     "LEGWORK_SWITCHBOARD=claude\nA=1\n"):
+            self.assertEqual(install.upgrade_config(text), (text, False), text)
+
+    def test_settings_are_documented(self):
+        example = (REPO / "config.example").read_text(encoding="utf-8")
+        self.assertIn("# LEGWORK_SESSION_ARGS=--model opus --effort high\n", example)
+        self.assertIn("# LEGWORK_SWITCHBOARD_HEALTH=1\n", example)
+        self.assertIn("# LEGWORK_SWITCHBOARD=claude\n", example)
+        doc = (REPO / "CONFIG.md").read_text(encoding="utf-8")
+        rows = {m.group(1): m.group(2) for m in re.finditer(
+            r"^\| `(LEGWORK_[A-Z_]+)` \| ([^|]+) \|", doc, re.M)}
+        self.assertEqual(rows["LEGWORK_SWITCHBOARD"].strip(), "`claude`")
+        self.assertEqual(rows["LEGWORK_SESSION_ARGS"].strip(),
+                         "`--model opus --effort high`")
+        for key in legwork_install.ORCHESTRATION_KEYS:
+            self.assertIn(key, rows, key)
+
     def test_render_config_without_carried_is_unchanged(self):
         v = {"level": 1, "legwork_dir": "/a"}
         self.assertNotIn("Orchestration", legwork_install.render_config(v))
 
 
-class HookAndSoulTests(unittest.TestCase):
+class HookTests(unittest.TestCase):
     def test_usage_guard_hook_is_added_once_and_repointed(self):
         settings = {"model": "opus", "hooks": {"UserPromptSubmit": [
             {"hooks": [{"type": "command", "command": "other.sh"}]}]}}
@@ -263,75 +377,208 @@ class HookAndSoulTests(unittest.TestCase):
         cmd = install.usage_guard_command(r"E:\dev\x\usage-guard", r"C:\Py\python.exe")
         self.assertEqual(cmd, r"'C:\Py\python.exe' 'E:\dev\x\usage-guard'")
 
-    def test_soul_block_replaces_rather_than_appends(self):
-        once = install.merge_soul("Be kind.\n", "- rule one")
-        twice = install.merge_soul(once, "- rule two")
-        self.assertEqual(twice.count(install.SOUL_START), 1)
-        self.assertIn("- rule two", twice)
-        self.assertNotIn("- rule one", twice)
-        self.assertTrue(twice.startswith("Be kind.\n\n"))
+    def test_pane_notify_hook_is_added_once_and_repointed(self):
+        settings = {"hooks": {"Stop": [
+            {"hooks": [{"type": "command", "command": "other.sh"}]}]}}
+        once = install.merge_pane_notify_hook(settings, "/old/bin/pane-notify")
+        twice = install.merge_pane_notify_hook(once, "/new/bin/pane-notify")
+        stop = twice["hooks"]["Stop"]
+        self.assertEqual(len(stop), 2)
+        self.assertEqual(stop[0]["hooks"][0]["command"], "other.sh")
+        self.assertEqual(stop[1]["hooks"], [{"type": "command", "timeout": 10,
+                                             "command": "/new/bin/pane-notify"}])
+        self.assertEqual(twice["hooks"]["Notification"],
+                         [{"hooks": [{"type": "command", "timeout": 10,
+                                      "command": "/new/bin/pane-notify"}]}])
+        self.assertNotIn("pane-notify", json.dumps(settings))
 
-    def test_house_rules_lines_joins_wrapped_items(self):
-        text = "# H\n\nIntro prose.\n\n- One rule\n  wrapped here.\n- Two.\n\nAfter.\n"
-        self.assertEqual(install.house_rules_lines(text),
-                         "- One rule wrapped here.\n- Two.")
+    def test_pane_notify_command_on_posix_is_the_bare_script(self):
+        with mock.patch.object(install, "script_python", return_value=None):
+            self.assertEqual(install.pane_notify_command("/engine/bin"),
+                             "/engine/bin/pane-notify")
 
-    def test_house_rules_lines_indented_line_after_a_gap_is_not_a_continuation(self):
-        self.assertEqual(install.house_rules_lines("- a\n\n  b\n- c\n"), "- a\n- c")
+    def test_pane_notify_command_on_windows_names_the_interpreter(self):
+        # Same reason as usage-guard: Claude Code runs hooks through Git
+        # Bash, and python3 there is the Store stub.
+        with mock.patch.object(install, "Path", PureWindowsPath):
+            cmd = install.pane_notify_command(
+                r"E:\dev\engine\bin", python=r"C:\Program Files\Py\python.exe")
+        self.assertEqual(cmd, "'C:/Program Files/Py/python.exe' "
+                              "E:/dev/engine/bin/pane-notify")
 
-    def test_unmarked_preferences_block_is_spotted(self):
-        self.assertTrue(install.unmarked_preferences("Standing preferences:\n- x\n"))
-        marked = install.merge_soul("", "- x")
-        self.assertFalse(install.unmarked_preferences(marked))
 
-    def test_house_rules_lines_takes_list_items_only(self):
-        text = (REPO / "house-rules.example.md").read_text()
-        lines = install.house_rules_lines(text).splitlines()
-        self.assertGreater(len(lines), 2)
-        self.assertTrue(all(line.startswith("- ") for line in lines))
+class PlatformCheckTests(unittest.TestCase):
+    def test_platform_kind(self):
+        self.assertEqual(install.platform_kind("darwin"), "mac")
+        self.assertEqual(install.platform_kind("win32"), "windows")
+        self.assertEqual(install.platform_kind("linux"), "other")
+
+    def test_health_watcher_is_skipped_off_mac_and_windows(self):
+        skip, _ = install.health_check("other", every_tool, "claude")
+        self.assertIn("macOS", skip)
+        self.assertIn("Windows", skip)
+
+    def test_health_watcher_is_skipped_for_a_manual_switchboard(self):
+        skip, _ = install.health_check("mac", every_tool, "manual")
+        self.assertIn("manual", skip)
+
+    def test_health_watcher_needs_herdr_and_the_scheduler(self):
+        skip, _ = install.health_check("windows", no_tool, "claude")
+        self.assertIn("herdr", skip)
+        for kind, tool in (("mac", "launchctl"), ("windows", "schtasks")):
+            skip, _ = install.health_check(
+                kind, lambda n, t=tool: None if n == t else every_tool(n), "claude")
+            self.assertIn(tool, skip, kind)
+
+    def test_health_watcher_notes_a_missing_claude_and_the_trust_question(self):
+        for kind in ("mac", "windows"):
+            skip, notes = install.health_check(
+                kind, lambda n: None if n == "claude" else every_tool(n), "claude")
+            self.assertIsNone(skip, kind)
+            self.assertTrue(any("claude" in n and "PATH" in n for n in notes), kind)
+            self.assertTrue(any("trusted" in n for n in notes), kind)
+        skip, notes = install.health_check("windows", every_tool, "claude")
+        self.assertIsNone(skip)
+        self.assertFalse(any("PATH" in n for n in notes))
+
+    def test_pane_notify_is_skipped_off_mac_and_windows(self):
+        skip, _ = install.pane_notify_check("other", every_tool)
+        self.assertIn("macOS", skip)
+
+    def test_pane_notify_notes(self):
+        skip, notes = install.pane_notify_check("mac", no_tool, exists=lambda _: False)
+        self.assertIsNone(skip)
+        text = "\n".join(notes)
+        self.assertIn("terminal-notifier", text)
+        self.assertIn("herdr", text)
+        self.assertIn('delivery = "off"', text)
+        self.assertIn("reload-config", text)
+        skip, notes = install.pane_notify_check("windows", every_tool)
+        self.assertIsNone(skip)
+        text = "\n".join(notes)
+        self.assertNotIn("terminal-notifier", text)
+        self.assertIn("%APPDATA%", text)
 
 
 class InstallRunTests(unittest.TestCase):
     """A real run into scratch dirs: nothing under the real home is touched."""
 
+    def run_install(self, tmp, argv, config="LEGWORK_DIR=/x\n", kind="windows",
+                    which=every_tool, rules=True):
+        legwork, claude = tmp / "legwork", tmp / "claude"
+        legwork.mkdir(exist_ok=True)
+        cfg = legwork / "config"
+        if config is not None and not cfg.exists():
+            cfg.write_text(config)
+        if rules:
+            (legwork / "house-rules.md").write_text("# House rules\n\n- Rule A.\n")
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("LEGWORK_SWITCHBOARD", "LEGWORK_DIR")}
+        env.update(HOME=str(tmp), USERPROFILE=str(tmp), LEGWORK_CONFIG=str(cfg))
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(install, "platform_kind", return_value=kind), \
+                mock.patch.object(install.shutil, "which", which), \
+                redirect_stdout(out):
+            rc = install.main(argv + ["--claude-dir", str(claude),
+                                      "--legwork-dir", str(legwork)])
+        self.assertEqual(rc, 0)
+        return legwork, claude, out.getvalue()
+
     def test_full_install_into_scratch_dirs(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp = Path(tmp)
-            legwork, claude, hermes = tmp / "legwork", tmp / "claude", tmp / "hermes"
-            legwork.mkdir()
-            (legwork / "config").write_text("LEGWORK_DIR=/x\n")
-            (legwork / "house-rules.md").write_text("# House rules\n\n- Rule A.\n")
-            env = {"HOME": str(tmp), "LEGWORK_CONFIG": str(legwork / "config")}
-            with mock.patch.dict(os.environ, env), \
-                    mock.patch.object(install, "hermes_home",
-                                      lambda p: hermes / "profiles" / p), \
-                    redirect_stdout(io.StringIO()):
-                rc = install.main([
-                    "--with", "shipping,fanout,switchboard,usage-guard,hermes",
-                    "--claude-dir", str(claude), "--legwork-dir", str(legwork),
-                    "--hermes-profile", "work",
-                    "--set", "LEGWORK_BUGBOT_OWNERS=example-org"])
-            self.assertEqual(rc, 0)
+            legwork, claude, _ = self.run_install(Path(tmp), [
+                "--with", "shipping,fanout,switchboard,usage-guard,"
+                          "switchboard-health,pane-notify",
+                "--set", "LEGWORK_BUGBOT_OWNERS=example-org"])
             self.assertTrue((claude / "commands" / "ship.md").is_file())
             self.assertTrue((claude / "skills" / "fanout" / "SKILL.md").is_file())
+            self.assertTrue((claude / "skills" / "roadmap-planning" / "SKILL.md").is_file())
             settings = json.loads((claude / "settings.json").read_text())
             self.assertIn("PostToolUse", settings["hooks"])
+            for event in ("Stop", "Notification"):
+                hooks = [h for e in settings["hooks"][event] for h in e["hooks"]]
+                self.assertEqual(len(hooks), 1, event)
+                self.assertTrue(hooks[0]["command"].endswith(
+                    f"{(ORCH / 'bin').as_posix()}/pane-notify"), hooks[0])
+                self.assertEqual(hooks[0]["timeout"], 10)
             # On Windows each script line starts with the interpreter.
             python = install.script_python()
             run = f"{shlex.quote(Path(python).as_posix())} " if python else ""
             fanout = (claude / "skills" / "fanout" / "SKILL.md").read_text()
             self.assertIn(f"`{run}{(ORCH / 'bin').as_posix()}/bugbot-wait", fanout)
             self.assertNotIn("{{", fanout)
-            skill = (hermes / "profiles" / "work" / install.HERMES_SKILL).read_text()
+            skill = (claude / "skills" / "switchboard" / "SKILL.md").read_text()
             self.assertIn(f"`{run}{(ORCH / 'bin').as_posix()}/switchboard-wait", skill)
             self.assertIn(f"`{legwork.resolve().as_posix()}/config`", skill)
-            self.assertIn(f"CLAUDE_CONFIG_DIR={claude}", skill)
-            soul = (hermes / "profiles" / "work" / "SOUL.md").read_text()
-            self.assertIn("- Rule A.", soul)
+            # Not the default ~/.claude, so new panes start under it.
+            self.assertIn(f"CLAUDE_CONFIG_DIR={claude.as_posix()} ", skill)
             cfg = (legwork / "config").read_text()
             for line in ("LEGWORK_DIR=/x", "LEGWORK_BUGBOT_OWNERS=example-org",
-                         "LEGWORK_HERMES_PROFILE=work", "LEGWORK_ORCHESTRATION=1"):
+                         "LEGWORK_ORCHESTRATION=1", "LEGWORK_SWITCHBOARD_HEALTH=1"):
                 self.assertIn(line + "\n", cfg)
+
+    def test_rerun_registers_each_hook_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for _ in range(2):
+                _, claude, _ = self.run_install(
+                    Path(tmp), ["--with", "usage-guard,pane-notify"])
+            settings = json.loads((claude / "settings.json").read_text())
+            for event in ("Stop", "Notification", "UserPromptSubmit", "PostToolUse"):
+                self.assertEqual(len(settings["hooks"][event]), 1, event)
+
+    def test_manual_switchboard_skips_the_session_pieces(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            legwork, claude, out = self.run_install(
+                Path(tmp), ["--with", "switchboard,switchboard-health"],
+                config="LEGWORK_SWITCHBOARD=manual\n")
+            self.assertTrue((claude / "skills" / "switchboard-protocol" / "SKILL.md").is_file())
+            self.assertFalse((claude / "skills" / "switchboard").exists())
+            self.assertFalse((claude / "skills" / "roadmap-planning").exists())
+            self.assertIn("skip switchboard-health", out)
+            self.assertNotIn("LEGWORK_SWITCHBOARD_HEALTH", (legwork / "config").read_text())
+
+    def test_set_manual_wins_over_the_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            legwork, claude, _ = self.run_install(
+                Path(tmp), ["--with", "switchboard", "--set", "LEGWORK_SWITCHBOARD=manual"])
+            self.assertFalse((claude / "skills" / "switchboard").exists())
+            self.assertIn("LEGWORK_SWITCHBOARD=manual\n", (legwork / "config").read_text())
+
+    def test_an_old_config_still_installs_and_is_upgraded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            legwork, claude, out = self.run_install(
+                Path(tmp), ["--with", "switchboard"],
+                config=(f"LEGWORK_SWITCHBOARD={OLD}\n"
+                        f"{install.RETIRED_KEYS[0]}=work\nLEGWORK_OWN_OWNERS=me\n"))
+            self.assertTrue((claude / "skills" / "switchboard" / "SKILL.md").is_file())
+            cfg = (legwork / "config").read_text()
+            self.assertIn("LEGWORK_SWITCHBOARD=claude\n", cfg)
+            self.assertIn("LEGWORK_OWN_OWNERS=me\n", cfg)
+            self.assertNotIn(install.RETIRED_KEYS[0], cfg)
+            notes = [ln for ln in out.splitlines()
+                     if ln.startswith("note:") and "LEGWORK_SWITCHBOARD" in ln]
+            self.assertEqual(len(notes), 1, out)
+            self.assertNotIn(OLD, out.lower())
+
+    def test_linux_skips_the_watcher_and_the_notifier(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            legwork, claude, out = self.run_install(
+                Path(tmp), ["--with", "switchboard-health,pane-notify"], kind="other")
+            self.assertIn("skip switchboard-health", out)
+            self.assertIn("skip pane-notify", out)
+            self.assertFalse((claude / "settings.json").exists())
+            self.assertNotIn("LEGWORK_SWITCHBOARD_HEALTH", (legwork / "config").read_text())
+
+    def test_house_rules_note_is_for_shipping_and_fanout_only(self):
+        # The Claude Code switchboard reads no house rules: it writes no
+        # commits or PRs, and its reply rules are in its own skill.
+        with tempfile.TemporaryDirectory() as tmp:
+            _, _, out = self.run_install(Path(tmp), ["--with", "switchboard"], rules=False)
+            self.assertNotIn("house-rules.md", out)
+        with tempfile.TemporaryDirectory() as tmp:
+            _, _, out = self.run_install(Path(tmp), ["--with", "shipping"], rules=False)
+            self.assertIn("house-rules.md", out)
 
     def test_dry_run_writes_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -426,6 +673,54 @@ class GenericCopyTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             for m in self.LEAKS.finditer(text):
                 self.fail(f"{path.relative_to(REPO)}: {m.group(0)!r}")
+
+
+class RetiredSwitchboardTests(unittest.TestCase):
+    """The switchboard legwork no longer ships is named nowhere a user reads,
+    so nothing tells anyone to install it. The one exception is the
+    compatibility line in orchestration/install.py."""
+
+    def test_named_only_on_the_compatibility_line(self):
+        try:
+            listed = subprocess.run(["git", "ls-files", "-z"], cwd=REPO,
+                                    capture_output=True, timeout=60,
+                                    check=True).stdout
+        except (OSError, subprocess.SubprocessError):
+            self.skipTest("not a git checkout")
+        hits = []
+        for rel in filter(None, listed.decode("utf-8").split("\0")):
+            path = REPO / rel
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                continue
+            for line in text.splitlines():
+                if OLD in line.lower():
+                    hits.append((rel, line.strip()))
+        self.assertEqual(hits, [("orchestration/install.py",
+                                 f'RETIRED_KEYS = ("{install.RETIRED_KEYS[0]}",)')])
+        self.assertFalse((ORCH / OLD).exists())
+
+    def test_house_rules_example_names_no_switchboard_reader(self):
+        text = (REPO / "house-rules.example.md").read_text(encoding="utf-8")
+        self.assertNotIn("SOUL", text)
+        self.assertNotIn("switchboard", text)
+
+
+class OnboardTests(unittest.TestCase):
+    def setUp(self):
+        self.text = (REPO / "core" / "skills" / "legwork-onboard" / "SKILL.md").read_text(
+            encoding="utf-8")
+
+    def test_onboard_lists_every_piece(self):
+        for piece in install.PIECES:
+            self.assertIn(f"`{piece}`", self.text, piece)
+
+    def test_onboard_offers_a_claude_or_manual_switchboard(self):
+        self.assertIn("`LEGWORK_SWITCHBOARD=claude` or `manual`", self.text)
+        self.assertIn("/switchboard", self.text)
 
 
 class WindowsFormTests(unittest.TestCase):
