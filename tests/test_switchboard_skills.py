@@ -115,6 +115,14 @@ class SwitchboardSkillTests(unittest.TestCase):
         self.assertEqual(meta.get("disable-model-invocation"), "true")
         self.assertIn("/switchboard resume", self.body)
 
+    def test_self_cycle_reads_the_transcript_not_a_status_line(self):
+        section = self.body.split("## Cycling your own context", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("{{LEGWORK_BIN}}/switchboard-context", section)
+        for gone in ("status line", "context:", "herdr agent read"):
+            self.assertNotIn(gone, section)
+        for code in ("Exit 0", "Exit 3", "Exit 2"):
+            self.assertIn(code, section)
+
     def test_no_reviewers_rule(self):
         self.assertNotRegex(self.flat, re.compile(r"no reviewers|reviewers", re.I))
 

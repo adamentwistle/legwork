@@ -87,6 +87,13 @@ LEGWORK_DAILY_CAP=8
 # Default: --model opus --effort high.
 # LEGWORK_SESSION_ARGS=--model opus --effort high
 #
+# The switchboard session's context window, for its self-cycle check
+# (orchestration/bin/switchboard-context): a number of tokens, or 200k or 1m.
+# Unset: a 1M model named in the session's transcript gives 1m; otherwise the
+# window is unknown and the switchboard cycles past 300,000 tokens alone. Set
+# 200k on a 200k window, so it cycles at 60% before Claude Code compacts it.
+# LEGWORK_CONTEXT_WINDOW=1m
+#
 # The switchboard's own folder. switchboard-state writes the state file,
 # state.md, there, and switchboard-wait reads it: a CYCLE or DONE dated before a run's "started" line is
 # left out. Default: $CLAUDE_CONFIG_DIR/switchboard, else
