@@ -26,17 +26,20 @@ The ones this skill reads:
 - `LEGWORK_SWITCHBOARD`: `manual` means the user relays by hand, so no
   switchboard session starts the run.
 
-House rules: every list item of `{{LEGWORK_DIR}}/house-rules.md` applies to
-each commit, pull request and comment this session writes (the design doc
-and its pull request in step 4, the legwork commit in step 5), as it does
-for `/ship`. If the file does not exist, say so once and carry on.
+House rules: every list item of `{{LEGWORK_DIR}}/house-rules.md`, except
+those in its `Pull request reviews` section, applies to each commit, pull
+request and comment this session writes (the design doc and its pull
+request in step 4, the legwork commit in step 5), as it does for `/ship`.
+If the file does not exist, say so once and carry on.
 
 Its `Pull request reviews` section, if any, says per repo or per owner who
 reviews pull requests and when; a repo's item beats its owner's. The
 design doc's pull request follows it as `/ship` does: the reviewers named
 for when the PR opens are requested then, those for after the review bot
-once `/bugbot` on it ends clear, never the PR's author. If it names nothing
-for the repo, request nobody and leave reviews to the user.
+once `/bugbot` on it ends clear, never the PR's author. On a repo with no
+Bugbot, `/bugbot` says `NO_BUGBOT`, and they are requested once the PR is
+otherwise ready. If it names nothing for the repo, request nobody and
+leave reviews to the user.
 
 ## Steps
 
@@ -71,7 +74,8 @@ for the repo, request nobody and leave reviews to the user.
    denies `git push origin main`, `git push --force` and `git push -f`. Add
    missing rules now, and never commit them on a shared repo. With the
    merge rule in place the orchestrator merges a PR when it judges it ready
-   (gate green, review clean); no merge word from the user is needed at the
+   (gate green, review clean and, when the house rules name reviewers for
+   the repo, approved by them); no merge word from the user is needed at the
    start. An orchestrator cannot pass the user's approval on for them, so a
    missing rule stalls the run.
 
@@ -81,7 +85,8 @@ for the repo, request nobody and leave reviews to the user.
 4. Output: a dated design doc with numbered decisions and a PR-sized,
    dependency-ordered build plan with a model per item. On the user's own
    repo (owner in `LEGWORK_OWN_OWNERS`), it lives in the repo's ideas or
-   specs folder and goes up as a docs-only pull request. On a shared repo
+   specs folder and goes up as a docs-only pull request; run `/bugbot` on
+   it once it is open. On a shared repo
    (any owner not in `LEGWORK_OWN_OWNERS`), it stays local under
    `.legwork/` (gitignored) with any ADR or `CONTEXT.md`, and no pull
    request is opened for it; the orchestrator's PRs carry code, tests and
@@ -93,6 +98,8 @@ for the repo, request nobody and leave reviews to the user.
    the legwork repo. The run rules say who reviews this repo's PRs and
    when, from the house rules' `Pull request reviews` item for the repo, or
    that reviews are left to the user when it names nothing for the repo.
+   When it names reviewers, the run rules say their PRs wait for an
+   approval before a merge, so `--merge` leaves them open until then.
    The orchestrator runs on Opus at high effort
    (`Model: opus`, `Effort: high`); each item names the model that fits
    it for the worker that builds it.
