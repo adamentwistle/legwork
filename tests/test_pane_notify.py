@@ -518,16 +518,14 @@ class RealProcessTests(unittest.TestCase):
         answer = json.dumps({"result": {"pane": pane, "type": "pane_info"}},
                             ensure_ascii=False).encode("utf-8")
         helper = folder / "fake_herdr.py"
-        helper.write_text("import sys\nsys.stdout.buffer.write(%r)\n" % answer,
-                          encoding="utf-8", newline="\n")
+        # write_bytes: Python 3.9's write_text takes no newline.
+        helper.write_bytes(("import sys\nsys.stdout.buffer.write(%r)\n" % answer).encode())
         if os.name == "nt":
             shim = folder / "herdr.cmd"
-            shim.write_text(f'@echo off\r\n"{sys.executable}" "{helper}" %*\r\n',
-                            encoding="ascii", newline="")
+            shim.write_bytes(f'@echo off\r\n"{sys.executable}" "{helper}" %*\r\n'.encode())
         else:
             shim = folder / "herdr"
-            shim.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{helper}" "$@"\n',
-                            encoding="utf-8", newline="\n")
+            shim.write_bytes(f'#!/bin/sh\nexec "{sys.executable}" "{helper}" "$@"\n'.encode())
             shim.chmod(0o755)
         os.environ["HERDR_BIN_PATH"] = str(shim)
         err = io.StringIO()
