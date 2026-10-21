@@ -210,6 +210,13 @@ class SwitchboardSkillTests(unittest.TestCase):
         self.assertIn("open `DECISION`", health)
         self.assertIn("still prompts", health)
 
+    def test_idle_out_of_blocked_behind_a_decision_is_not_a_no_op(self):
+        # The wait reports idle behind a reported DECISION only when the pane
+        # comes out of blocked, so that wake is news, not one to skip.
+        part = self.section("Waking for nothing")
+        self.assertIn("unless you last heard that pane `blocked`", part)
+        self.assertIn("the block is gone", part)
+
     def test_run_checks_for_any_existing_orchestrator_first(self):
         part = self.section("Opening a pane")
         self.assertNotIn("no idle `orch-<project>` pane", part)

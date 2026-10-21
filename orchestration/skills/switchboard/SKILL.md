@@ -368,10 +368,11 @@ all of them cache reads, with its context sitting near 468k. So:
 - On a timeout (exit 124), do nothing but start the next wait, in the same
   turn: no reply text, no `--status`, no file reads, no context check.
 - On a no-op wake, the same: an event you have already acted on, a pane
-  state that changes nothing (`idle` with a `DECISION` already reported, a
-  `working` pane back from `unreachable`), or a health prompt whose one
-  `--status` shows nothing new. Make that one call at most, then go
-  straight back into the wait.
+  state that changes nothing (`idle` with a `DECISION` already reported,
+  unless you last heard that pane `blocked`: then tell the user in one line
+  the block is gone; a `working` pane back from `unreachable`), or a health
+  prompt whose one `--status` shows nothing new. Make that one call at
+  most, then go straight back into the wait.
 
 Only an event you act on earns a reply, and the context check that follows
 it.
