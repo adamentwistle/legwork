@@ -1,0 +1,330 @@
+#!/usr/bin/env python3
+"""Print how much context a Claude Code session is using, and whether to cycle.
+
+Usage: switchboard-context [--session ID] [--cwd DIR] [--config-dir DIR]
+                           [--window N] [--limit N] [--percent P]
+
+It reads the session's transcript, which Claude Code writes to
+<config dir>/projects/<folder>/<session id>.jsonl. The config dir is
+--config-dir, else $CLAUDE_CONFIG_DIR, else ~/.claude. <folder> is the
+session's working folder with every character that is not a letter or a
+digit turned into a dash (cut to 200 characters plus a hash when longer).
+
+Which session:
+  --session ID  that session's transcript, in any folder.
+  --cwd DIR     the newest transcript for DIR, such as an orchestrator's
+                repo. The own session id is then ignored.
+  otherwise     $CLAUDE_CODE_SESSION_ID, which Claude Code sets in every
+                Bash call to the session running it, else the newest
+                transcript for the current folder. The session's own
+                transcript was written at the very call that runs this, so
+                when another transcript in its folder is more than 30
+                seconds newer, the id is taken as stale (one left from
+                before a /clear) and that newest one is read instead.
+
+The context in use is the last assistant message's input_tokens plus
+cache_read_input_tokens plus cache_creation_input_tokens. Subagent and
+synthetic messages are skipped.
+
+The window, to give a percentage, is the first of: --window, the setting
+LEGWORK_CONTEXT_WINDOW (environment or legwork config), then a 1M marker
+in the transcript. Claude Code names the session's model on a "model"
+attachment line, near the start and again when the model changes; the
+latest one ending [1m] means a 1M window. A thinking_drop attachment or
+an assistant message whose model ends [1m] counts too. A plain model id
+tells nothing: a plain id can still run on a 1M window. A window is a
+number of tokens, or one with k or m after it (200k, 1m). With none of
+these the window is unknown, and the --limit alone decides.
+
+It cycles past --limit tokens (default 300000) or past --percent of the
+window (default 60), whichever comes first. One line out. Exit 0 means
+carry on, 3 means cycle now, 2 means it cannot tell (no transcript, a bad
+argument or setting).
+"""
+import argparse
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+sys.path.insert(1, os.path.join(os.path.dirname(os.path.realpath(__file__)), ".."))
+try:
+    from settings import setting  # orchestration/settings.py, same checkout
+except ImportError:  # copied out of the checkout: environment only
+    def setting(key, default=None):
+        return os.environ.get(key) or default
+
+LIMIT = 300000
+PERCENT = 60
+SLUG_MAX = 200
+FRESH = 30  # seconds a newer transcript may lead the own one by
+CARRY_ON, CANNOT_TELL, CYCLE = 0, 2, 3
+ONE_M = re.compile(r"\[1m\]", re.I)
+
+
+class CannotTell(Exception):
+    pass
+
+
+def project_slug(path, windows=None):
+    """The transcript folder name for a working folder, cut to SLUG_MAX
+    characters (Claude Code adds a hash past that; project_folder matches
+    it). On Windows a Git Bash path (/d/src) names its drive (D:/src)."""
+    windows = os.name == "nt" if windows is None else windows
+    path = str(path)
+    if windows:
+        m = re.match(r"^/([A-Za-z])(/.*)?$", path)
+        if m:
+            path = f"{m.group(1)}:{m.group(2) or '/'}"
+        if re.match(r"^[a-z]:", path):
+            path = path[0].upper() + path[1:]
+    slug = re.sub(r"[^A-Za-z0-9]", "-", path)
+    return slug[:SLUG_MAX]
+
+
+def working_folder(raw):
+    windows = os.name == "nt"
+    if windows:
+        m = re.match(r"^/([A-Za-z])(/.*)?$", raw)
+        if m:
+            raw = f"{m.group(1)}:{m.group(2) or '/'}"
+    return os.path.realpath(os.path.expanduser(raw))
+
+
+def project_folder(projects, path):
+    """The transcript folder for working folder `path` under `projects`, or
+    None: an exact match, else one that differs only in case, else (for a
+    long path) one that starts with the cut slug and a dash."""
+    projects = Path(projects)
+    slug = project_slug(path)
+    if (projects / slug).is_dir():
+        return projects / slug
+    try:
+        folders = sorted((p for p in projects.iterdir() if p.is_dir()),
+                         key=mtime, reverse=True)
+    except OSError:
+        return None
+    name = match_folder(slug, [p.name for p in folders])
+    return projects / name if name else None
+
+
+def match_folder(slug, names):
+    """The first of `names` that is `slug` but for case, else, for a slug
+    cut at SLUG_MAX, the first that starts with it and a dash."""
+    for name in names:
+        if name.lower() == slug.lower():
+            return name
+    if len(slug) == SLUG_MAX:
+        for name in names:
+            if name.startswith(slug + "-"):
+                return name
+    return None
+
+
+def mtime(path):
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0
+
+
+def newest(folder):
+    found = sorted(Path(folder).glob("*.jsonl"), key=mtime, reverse=True)
+    return found[0] if found else None
+
+
+def own_transcript(projects, session):
+    """The transcript for the session id from the environment, unless it is
+    stale: then the newest in its folder. None when there is none."""
+    hits = sorted(projects.glob(f"*/{session}.jsonl"), key=mtime, reverse=True)
+    if not hits:
+        return None
+    top = newest(hits[0].parent)
+    if top and top != hits[0] and mtime(top) - mtime(hits[0]) > FRESH:
+        return top
+    return hits[0]
+
+
+def find_transcript(config_dir, session=None, cwd=None, own=None):
+    """The transcript to read: session `session`'s, else (when `own`, the
+    environment's session id, is set and found) own_transcript(), else the
+    newest for working folder `cwd`."""
+    projects = Path(config_dir) / "projects"
+    if own and re.fullmatch(r"[\w.-]+", own):
+        found = own_transcript(projects, own)
+        if found:
+            return found
+    if session:
+        if not re.fullmatch(r"[\w.-]+", session):
+            raise CannotTell(f"bad session id {session!r}")
+        folder = project_folder(projects, cwd) if cwd else None
+        if folder and (folder / f"{session}.jsonl").is_file():
+            return folder / f"{session}.jsonl"
+        hits = sorted(projects.glob(f"*/{session}.jsonl"), key=mtime, reverse=True)
+        if hits:
+            return hits[0]
+        raise CannotTell(f"no transcript for session {session} under {projects}")
+    folder = project_folder(projects, cwd)
+    found = newest(folder) if folder else None
+    if not found:
+        raise CannotTell(f"no transcript for {cwd} under {projects}")
+    return found
+
+
+def lines_backwards(path, block=1 << 16):
+    """The file's lines as bytes, last first, without line endings. An
+    empty piece after the final newline is not a line."""
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        pos, rest, first = f.tell(), b"", True
+        while pos > 0:
+            step = min(block, pos)
+            pos -= step
+            f.seek(pos)
+            parts = (f.read(step) + rest).split(b"\n")
+            rest = parts[0]
+            for part in reversed(parts[1:]):
+                if first and part == b"":
+                    first = False
+                    continue
+                first = False
+                yield part.rstrip(b"\r")
+        if not (first and rest == b""):
+            yield rest.rstrip(b"\r")
+
+
+def usable(entry):
+    """The usage of a main-thread assistant message, or None."""
+    if entry.get("type") != "assistant" or entry.get("isSidechain"):
+        return None
+    message = entry.get("message") or {}
+    if message.get("model") == "<synthetic>":
+        return None
+    usage = message.get("usage")
+    return usage if isinstance(usage, dict) else None
+
+
+def model_says(entry):
+    """True for a line that names a 1M model, False for a "model" attachment
+    that names a plain one, None for a line that says nothing either way."""
+    kind = entry.get("type")
+    if kind == "attachment":
+        attachment = entry.get("attachment") or {}
+        if attachment.get("type") == "model":
+            identity = attachment.get("identity") or {}
+            return bool(ONE_M.search(str(identity.get("modelId") or "")))
+        if attachment.get("type") == "thinking_drop":
+            return True if ONE_M.search(str(attachment.get("model") or "")) else None
+        return None
+    if kind == "assistant" and not entry.get("isSidechain"):
+        model = str((entry.get("message") or {}).get("model") or "")
+        return True if ONE_M.search(model) else None
+    return None
+
+
+def read_transcript(path):
+    """(tokens or None, 1M marker seen) from the transcript's end. It reads
+    back until it has the last usage and the latest line that names the
+    model, which can be near the start of the file."""
+    usage, marker = None, None
+    for raw in lines_backwards(path):
+        if b'"model' not in raw and b"thinking_drop" not in raw:
+            continue
+        try:
+            entry = json.loads(raw.decode("utf-8", "replace"))
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if marker is None:
+            marker = model_says(entry)
+        if usage is None:
+            usage = usable(entry)
+        if usage is not None and marker is not None:
+            break
+    marker = bool(marker)
+    if usage is None:
+        return None, marker
+    tokens = sum(int(usage.get(k) or 0) for k in
+                 ("input_tokens", "cache_read_input_tokens",
+                  "cache_creation_input_tokens"))
+    return tokens, marker
+
+
+def parse_window(raw, where):
+    m = re.fullmatch(r"\s*(\d[\d,_]*)\s*([kKmM]?)\s*", str(raw))
+    if not m:
+        raise CannotTell(f"{where} wants a number of tokens (200k, 1m), got {raw!r}")
+    n = int(m.group(1).replace(",", "").replace("_", ""))
+    n *= {"": 1, "k": 1000, "m": 1000000}[m.group(2).lower()]
+    if n <= 0:
+        raise CannotTell(f"{where} must be above 0, got {raw!r}")
+    return n
+
+
+def window_for(given, marker):
+    if given:
+        return parse_window(given, "--window")
+    configured = setting("LEGWORK_CONTEXT_WINDOW")
+    if configured:
+        return parse_window(configured, "LEGWORK_CONTEXT_WINDOW")
+    return 1000000 if marker else None
+
+
+def verdict(tokens, window, limit, percent):
+    """(line, exit code)."""
+    if tokens is None:
+        return "context: no usage yet in this session: carry on", CARRY_ON
+    if window:
+        point = min(limit, int(window * percent / 100))
+        head = f"context {tokens:,} of {window:,} ({100 * tokens / window:.1f}%)"
+        if tokens > point:
+            return f"{head}: cycle now, past {point:,}", CYCLE
+        return f"{head}: carry on, cycle past {point:,}", CARRY_ON
+    head = (f"context {tokens:,} tokens, window unknown (LEGWORK_CONTEXT_WINDOW "
+            f"sets it) so only the {limit:,} limit counts")
+    if tokens > limit:
+        return f"{head}: cycle now", CYCLE
+    return f"{head}: carry on", CARRY_ON
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        print(f"context unknown: {message}")
+        sys.exit(CANNOT_TELL)
+
+
+def main(argv=None):
+    ap = Parser(description=__doc__.split("\n")[0])
+    ap.add_argument("--session")
+    ap.add_argument("--cwd")
+    ap.add_argument("--config-dir")
+    ap.add_argument("--window")
+    ap.add_argument("--limit", type=int, default=LIMIT)
+    ap.add_argument("--percent", type=float, default=PERCENT)
+    args = ap.parse_args(argv)
+    config_dir = os.path.expanduser(args.config_dir or os.environ.get("CLAUDE_CONFIG_DIR")
+                                    or "~/.claude")
+    try:
+        if args.limit <= 0 or not 0 < args.percent <= 100:
+            raise CannotTell("--limit must be above 0 and --percent from 1 to 100")
+        cwd = working_folder(args.cwd) if args.cwd else os.getcwd()
+        own = (None if args.session or args.cwd
+               else os.environ.get("CLAUDE_CODE_SESSION_ID"))
+        path = find_transcript(config_dir, args.session, cwd, own)
+        try:
+            tokens, marker = read_transcript(path)
+        except OSError as e:
+            raise CannotTell(f"cannot read {path}: {e.strerror or e}")
+        window = window_for(args.window, marker)
+    except CannotTell as e:
+        print(f"context unknown: {e}")
+        return CANNOT_TELL
+    line, code = verdict(tokens, window, args.limit, args.percent)
+    print(line)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())
