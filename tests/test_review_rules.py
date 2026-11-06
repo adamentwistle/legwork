@@ -15,7 +15,6 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 ORCH = REPO / "orchestration"
-EXAMPLE = REPO / "house-rules.example.md"
 
 # Each place, with the way it already reaches the house rules.
 PLACES = {
@@ -153,22 +152,6 @@ class ReviewItemsAreNotHouseRulesTests(unittest.TestCase):
         self.assertIn("Every list item in it, " + HOUSE_RULES_ONLY
                       + ", goes into every brief below, verbatim.", step)
 
-    def test_the_example_says_the_section_is_not_pasted(self):
-        body = flat(EXAMPLE)
-        intro = body[:body.index("## Pull request reviews")]
-        self.assertIn("Only the list items above the `Pull request reviews` "
-                      "section are rules", intro)
-        self.assertIn("are not rules and are not pasted into briefs", intro)
-
-    def test_the_example_rules_say_nothing_about_reviewers(self):
-        text = EXAMPLE.read_text(encoding="utf-8")
-        rules = text[:text.index("\n## Pull request reviews")]
-        items = [line for line in rules.splitlines() if line.startswith("- ")]
-        self.assertTrue(items)
-        for line in items:
-            self.assertNotIn("review", line.lower(), line)
-
-
 class MergeWaitsForTheReviewersTests(unittest.TestCase):
     """Reviewers named for a repo are asked to review before a merge, not
     after one: a merge waits for their approval."""
@@ -219,86 +202,6 @@ class ProtocolHoldTests(unittest.TestCase):
         bullet = item(body, "- Pull request reviews:", " - The switchboard file")
         self.assertIn("run `/ship` or `/bugbot` there with `--hold-reviewers` until "
                       "then", bullet)
-
-
-class ExampleTests(unittest.TestCase):
-    PLACEHOLDER = re.compile(r"your-[a-z-]+(?:/your-[a-z-]+)?")
-
-    def setUp(self):
-        self.body = EXAMPLE.read_text(encoding="utf-8")
-        start = self.body.index("\n## Pull request reviews")
-        end = self.body.find("\n## ", start + 1)
-        self.section = self.body[start:end if end != -1 else len(self.body)]
-        self.items = [line for line in self.section.splitlines()
-                      if line.startswith("- ")]
-
-    def test_section_has_a_repo_item_and_an_owner_item(self):
-        firsts = [re.match(r"- `([^`]+)`", line).group(1) for line in self.items]
-        self.assertTrue(any("/" in name for name in firsts), firsts)
-        self.assertTrue(any("/" not in name for name in firsts), firsts)
-
-    def test_items_use_placeholders_only(self):
-        self.assertTrue(self.items)
-        for line in self.items:
-            for name in re.findall(r"`([^`]+)`", line):
-                self.assertRegex(name, "^" + self.PLACEHOLDER.pattern + "$", line)
-            for name in re.findall(r"[\w.-]+/[\w.-]+", line):
-                self.assertRegex(name, "^" + self.PLACEHOLDER.pattern + "$", line)
-            self.assertNotIn("@", line)
-
-    # Every word the section may use that is not a placeholder. A bare
-    # name (a login, an org) is not in it, so it fails until it is
-    # replaced by a `your-...` placeholder. A new plain word goes here.
-    VOCABULARY = set("""
-        a after agents.md an and ask asked author beats below bot bugbot
-        clear contributing current delete each end even every example
-        fanout for github head if is it item items its leave list logins
-        loop means name names never no nobody of on once one open opens
-        or orchestrators org otherwise out own owner owner's per pr pr's
-        pull read ready replace repo repo's request requested review
-        reviewers reviews roadmap-planning says section ship skill team
-        that the them they this to two under user want when whenever who
-        with workers you your
-    """.split())
-
-    def test_every_word_is_plain_or_a_placeholder(self):
-        text = self.section.replace("`", " ")
-        for word in re.findall(r"[A-Za-z][\w'-]*(?:\.md)?", text):
-            if re.fullmatch(self.PLACEHOLDER.pattern, word):
-                continue
-            self.assertIn(word.lower(), self.VOCABULARY, word)
-
-    def test_items_show_both_times_and_both_kinds_of_who(self):
-        items = re.sub(r"\s+", " ", "\n".join(self.items))
-        self.assertIn("when the PR opens", items)
-        self.assertIn("after the review bot is clear on the current head", items)
-        self.assertIn("the reviewers the repo's AGENTS.md or CONTRIBUTING names", items)
-
-    def test_section_states_the_default_the_author_and_the_order(self):
-        prose = re.sub(r"\s+", " ", self.section)
-        self.assertIn("request nobody and leave reviews to you", prose)
-        self.assertIn("The PR's author is never requested", prose)
-        self.assertIn("A repo's item beats its owner's", prose)
-
-    def test_section_is_generic(self):
-        work = re.compile(r"\badam\b|/Users/|/home/[a-z]|C:\\Users|"
-                          r"~/\.claude-[a-z]|\b[A-Z]{2,5}-[0-9]+\b", re.I)
-        for m in work.finditer(self.section):
-            self.fail(f"leak: {m.group(0)!r}")
-        self.assertNotIn(chr(0x2014), self.section)
-
-
-class OnboardTests(unittest.TestCase):
-    def test_house_rules_step_mentions_the_section(self):
-        body = flat(REPO / "core" / "skills" / "legwork-onboard" / "SKILL.md")
-        step = item(body, "11. **House rules.**", "## 3.")
-        self.assertIn("`## Pull request reviews` section", step)
-
-    def test_install_step_writes_the_section(self):
-        body = flat(REPO / "core" / "skills" / "legwork-onboard" / "SKILL.md")
-        step = item(body, "1. House rules, if they gave", " 2. Settings:")
-        self.assertIn("if they gave any rules or review answers", step)
-        self.assertIn("under a `## Pull request reviews` heading after the rules", step)
 
 
 if __name__ == "__main__":

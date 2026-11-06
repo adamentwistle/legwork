@@ -13,6 +13,15 @@ whole system depends on.
 
 The legwork repo lives at `$LEGWORK_DIR` if set, otherwise `~/legwork`.
 
+## House rules
+
+When the legwork repo holds a `house-rules.md`, read it before a verb
+writes anything and follow each list item in it. An item that names a
+verb, such as one that says what to run after `/wrap`, applies when that
+verb runs. The rules never change the file format or the wrap steps
+below: when one clashes with them, follow this skill and say which rule
+you set aside.
+
 ## File format
 
 Frontmatter holds simple one-line values only:
@@ -135,6 +144,8 @@ move on, never error on the missing remote.
    `/projects/` is still gitignored (a fresh clone of the public repo ships
    that way), skip the commit (the file is saved on disk) and point the
    user at SETUP.md's "Make this repo your tracker" step in your reply.
+10. Do what any house rule says to do after this verb, and report it in
+    your reply.
 
 ## Minting the next prompt
 

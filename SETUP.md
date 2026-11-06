@@ -332,37 +332,6 @@ id, and activating), follow `suite/reply-capture/SETUP.md`. The write-back token
 is a fine-grained, repo-scoped PAT held only as an n8n credential, never in
 the repo.
 
-## 7. Optional: orchestration
-
-The orchestrator and switchboard layer lives in `orchestration/`: `/ship`,
-`/bugbot`, `/fanout`, the switchboard-protocol skill, the switchboard and
-roadmap-planning skills, and the scripts in `orchestration/bin/`. It needs a
-checkout and `gh`; Herdr is strongly recommended, and the Claude Code
-switchboard runs in a Herdr pane. The easy way in is `/onboard`, which asks
-what you want. By hand:
-
-```
-cp house-rules.example.md house-rules.md     # then edit it
-python3 orchestration/install.py --set LEGWORK_OWN_OWNERS=you \
-    --set LEGWORK_BUGBOT_OWNERS=your-org
-python3 orchestration/install.py --with shipping,fanout,switchboard,herdr-skill
-```
-
-Add `usage-guard` to install the pause-before-a-limit hook, `codex-agent`
-for the codex subagent (needs the `codex` CLI), `switchboard-health` for the
-switchboard's health watcher and `pane-notify` for banners from the panes
-worth hearing (both macOS and Windows). With `LEGWORK_SWITCHBOARD=manual`,
-`switchboard` installs the protocol and roadmap-planning skills and leaves
-out the switchboard skill. On Windows, run the installer as
-`python orchestration/install.py`. `--dry-run` shows the plan first. The
-pieces, settings and a first run are in
-[orchestration/README.md](orchestration/README.md).
-
-Setting up the Claude Code switchboard on a Mac or on Windows (what it
-needs, the allow rules its session needs, starting it in a Herdr pane, the
-health watcher and pane notifications) is in
-[orchestration/docs/switchboard-setup.md](orchestration/docs/switchboard-setup.md).
-
 ## Verify
 
 Run these from your legwork repo to confirm the install:

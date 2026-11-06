@@ -44,18 +44,35 @@ class TrackerDocsTests(unittest.TestCase):
 
     def test_readme_points_at_orchi(self):
         text = (REPO / "README.md").read_text(encoding="utf-8")
-        self.assertIn(ORCHI, text)
+        self.assertTrue(ORCHI in text, "README.md has no link to Orchi")
+
+
+class OnboardTests(unittest.TestCase):
+    def test_onboard_runs_python_through_the_detected_interpreter(self):
+        text = (REPO / "core" / "skills" / "legwork-onboard" / "SKILL.md").read_text(
+            encoding="utf-8")
+        self.assertIn("`<python>` below", text)
+        for m in re.finditer(r"\bpython3? (suite|scripts|core)/", text):
+            self.fail(f"bare call in the onboard skill: {m.group(0)!r}")
+
+    def test_no_machine_paths(self):
+        leaks = re.compile(r"/Users/|/home/[a-z]|C:\\\\Users")
+        for path in user_docs():
+            for m in leaks.finditer(path.read_text(encoding="utf-8")):
+                self.fail(f"{path.relative_to(REPO)}: {m.group(0)!r}")
 
 
 class HouseRulesTests(unittest.TestCase):
     def test_tracker_skill_follows_the_house_rules(self):
         text = (REPO / "core" / "skills" / "legwork-tracker" / "SKILL.md").read_text(
             encoding="utf-8")
-        self.assertIn("`house-rules.md`", text)
+        self.assertTrue("`house-rules.md`" in text,
+                        "the legwork-tracker skill never names house-rules.md")
 
     def test_example_has_no_review_section(self):
         text = (REPO / "house-rules.example.md").read_text(encoding="utf-8")
-        self.assertNotIn("## Pull request reviews", text)
+        self.assertFalse("## Pull request reviews" in text,
+                         "house-rules.example.md still has a review section")
 
 
 if __name__ == "__main__":

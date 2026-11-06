@@ -1,5 +1,5 @@
 ---
-description: Set up legwork the way you want it. Asks about each optional layer, then installs only what you choose.
+description: Set up legwork the way you want it. Asks about the runner and house rules, then installs only what you choose.
 ---
 
 Run the legwork-onboard skill. $ARGUMENTS
