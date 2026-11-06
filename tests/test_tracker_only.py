@@ -128,6 +128,13 @@ class ReviewFindingTests(unittest.TestCase):
         step = text[text.index("2. Settings"):text.index("3. The queue")]
         self.assertIn("comment out the review keys of the modes they did not pick", step)
 
+    def test_an_older_review_section_is_not_a_rule(self):
+        # An earlier /onboard wrote a `## Pull request reviews` section into
+        # house-rules.md, whose items say who reviews pull requests.
+        text = self.read("core", "skills", "legwork-tracker", "SKILL.md")
+        rules = text[text.index("## House rules"):text.index("## File format")]
+        self.assertIn("`## Pull request reviews`", rules)
+
 
 if __name__ == "__main__":
     unittest.main()
