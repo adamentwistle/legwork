@@ -106,6 +106,14 @@ class ReviewFindingTests(unittest.TestCase):
         self.assertNotIn("must exit 0", step)
         self.assertIn("Doctor: all green", step)
 
+    def test_every_command_that_writes_follows_the_house_rules(self):
+        # A session runs the command's own steps, so a rule that says what
+        # to run after /wrap only works when the command says to follow it.
+        for verb in ("add", "log", "shelve", "wrap"):
+            text = self.read("core", "commands", f"{verb}.md")
+            self.assertTrue("`house-rules.md`" in text, f"/{verb} never names house-rules.md")
+            self.assertTrue(f"after /{verb}" in text, f"/{verb} has no after-step")
+
 
 if __name__ == "__main__":
     unittest.main()
