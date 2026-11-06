@@ -95,5 +95,17 @@ class HouseRulesTests(unittest.TestCase):
                          "house-rules.example.md still has a review section")
 
 
+class ReviewFindingTests(unittest.TestCase):
+    def read(self, *parts):
+        return (REPO.joinpath(*parts)).read_text(encoding="utf-8")
+
+    def test_onboard_reads_the_doctor_verdict_not_its_exit_status(self):
+        # --doctor prints its verdict and exits 0 either way.
+        text = self.read("core", "skills", "legwork-onboard", "SKILL.md")
+        step = text[text.index("## 5."):text.index("## Rules")]
+        self.assertNotIn("must exit 0", step)
+        self.assertIn("Doctor: all green", step)
+
+
 if __name__ == "__main__":
     unittest.main()
