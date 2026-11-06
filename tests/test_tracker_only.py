@@ -65,6 +65,30 @@ class NoOrchestrationTests(unittest.TestCase):
                 self.fail(f"{path.relative_to(REPO)}:{line} names {m.group(0)!r}")
 
 
+class MovedNoteTests(unittest.TestCase):
+    """An install from an older checkout left commands, skills, hooks and a
+    scheduled job that call scripts this checkout no longer has. One note
+    says what they are and how to remove each."""
+
+    NOTE = REPO / "docs" / "orchestrator-moved.md"
+
+    def test_readme_links_the_note(self):
+        text = (REPO / "README.md").read_text(encoding="utf-8")
+        self.assertTrue("docs/orchestrator-moved.md" in text, "README.md has no link to the note")
+
+    def test_note_says_how_to_remove_each_piece(self):
+        self.assertTrue(self.NOTE.is_file(), "docs/orchestrator-moved.md is missing")
+        text = self.NOTE.read_text(encoding="utf-8")
+        for piece in ("commands/ship.md", "commands/bugbot.md", "commands/fanout.md",
+                      "skills/fanout", "skills/switchboard-protocol", "skills/switchboard",
+                      "skills/roadmap-planning", "agents/codex.md",
+                      "orchestration/bin/usage-guard", "orchestration/bin/pane-notify",
+                      "launchctl bootout gui/$(id -u)/dev.legwork.switchboard-health",
+                      "schtasks /Delete /TN dev.legwork.switchboard-health /F",
+                      ".claude/settings.local.json"):
+            self.assertIn(piece, text)
+
+
 class OnboardTests(unittest.TestCase):
     def test_onboard_runs_python_through_the_detected_interpreter(self):
         text = (REPO / "core" / "skills" / "legwork-onboard" / "SKILL.md").read_text(
