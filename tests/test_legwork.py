@@ -2832,6 +2832,32 @@ class TestInstaller(unittest.TestCase):
             self.assertEqual(parsed.get("LEGWORK_DAILY_CAP"),
                              None if level == 1 else "8", level)
 
+    def test_a_carried_key_has_no_commented_example_too(self):
+        # One home for each setting: a carried CLAUDE_CONFIG_DIR_WORK is not
+        # also shown as a commented example in the Claude config dir section.
+        carried = legwork_install.carried_settings(
+            "CLAUDE_CONFIG_DIR_WORK=$HOME/.claude-acct\n")
+        text = legwork_install.render_config(
+            {"level": 2, "legwork_dir": "/a", "daily_cap": 8,
+             "daily_cost_cap": 0, "review_mode": "off", "reviewer_model": "",
+             "interval_minutes": 5, "carried": carried})
+        self.assertEqual(text.count("CLAUDE_CONFIG_DIR_WORK="), 1, text)
+
+    def test_wizard_keys_cover_every_line_the_wizard_writes(self):
+        # A key the wizard writes but WIZARD_KEYS leaves out would be carried
+        # as well, and the config would hold it twice.
+        written = set()
+        for mode in ("local", "n8n", "off"):
+            for level in (1, 2):
+                text = legwork_install.render_config(
+                    {"level": level, "legwork_dir": "/a", "daily_cap": 8,
+                     "daily_cost_cap": 5, "review_mode": mode,
+                     "webhook_url": "https://h/w", "alert_url": "https://h/a",
+                     "reviewer_model": "other-model",
+                     "claude_config_dir": "/c", "interval_minutes": 5})
+                written |= set(legwork_install.parse_config_text(text))
+        self.assertLessEqual(written, legwork_install.WIZARD_KEYS)
+
     def test_write_repo_files_level_1_skips_runner_logs(self):
         orig_repo = legwork_install.REPO
         try:
