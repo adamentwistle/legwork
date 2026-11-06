@@ -121,6 +121,13 @@ class ReviewFindingTests(unittest.TestCase):
         self.assertLess(after, text.index("Rebuild the dashboard from the legwork repo"))
         self.assertLess(after, text.index("Commit your changes with an honest message"))
 
+    def test_switching_review_mode_clears_the_old_mode(self):
+        # The wizard picks n8n whenever LEGWORK_WEBHOOK_URL is set, so a
+        # re-run that moves to the local reviewer must take that line out.
+        text = self.read("core", "skills", "legwork-onboard", "SKILL.md")
+        step = text[text.index("2. Settings"):text.index("3. The queue")]
+        self.assertIn("comment out the review keys of the modes they did not pick", step)
+
 
 if __name__ == "__main__":
     unittest.main()
