@@ -2892,6 +2892,29 @@ class TestInstaller(unittest.TestCase):
                 setattr(legwork_install, name, value)
         return rc, received
 
+    def _rerun_lite(self, config_text):
+        repo = Path(tempfile.mkdtemp(dir=str(TMP)))
+        (repo / "config").write_text(config_text, encoding="utf-8")
+        rc, received = self._run_main_with_stubbed_steps(
+            ["--yes", "--lite", "--no-color"], repo=repo)
+        self.assertEqual(rc, 0)
+        return legwork_install.render_config(received["write_repo_files"])
+
+    def test_rerun_keeps_a_carried_line_byte_for_byte(self):
+        # Quotes and spaces inside a value survive: the line is kept as the
+        # user wrote it, not rebuilt from its parsed value.
+        line = "OTHER_TOOL_ARGS='--settings \"/srv/with spaces/s.json\"'"
+        out = self._rerun_lite(f"LEGWORK_DIR=/a\n{line}\n")
+        self.assertIn(f"\n{line}\n", out)
+
+    def test_rerun_keeps_a_repeated_key_and_its_order(self):
+        # The runner reads the first of two lines for a key, so both stay,
+        # first one first, and the effective value does not change.
+        out = self._rerun_lite("LEGWORK_DIR=/a\nCLAUDE_CONFIG_DIR_WORK=/srv/work\n"
+                               "CLAUDE_CONFIG_DIR_WORK=/srv/other\n")
+        self.assertIn("CLAUDE_CONFIG_DIR_WORK=/srv/work\n"
+                      "CLAUDE_CONFIG_DIR_WORK=/srv/other\n", out)
+
     def test_main_lite_reaches_hooks_but_never_the_timer(self):
         # --yes --lite: a level-1 config is written, the verbs and hook
         # steps still run (both skipped headless without their --with-*
