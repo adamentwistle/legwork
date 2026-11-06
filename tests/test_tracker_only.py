@@ -69,6 +69,19 @@ class OnboardTests(unittest.TestCase):
                 self.fail(f"{path.relative_to(REPO)}: {m.group(0)!r}")
 
 
+class OnboardConfigTests(unittest.TestCase):
+    def test_settings_step_writes_the_legwork_dir(self):
+        # A config copied from config.example would carry its
+        # LEGWORK_DIR=$HOME/legwork, and the wizard's --yes run keeps it, so
+        # a checkout anywhere else would get its timer and hooks pointed at
+        # ~/legwork. The step sets LEGWORK_DIR itself and copies nothing.
+        text = (REPO / "core" / "skills" / "legwork-onboard" / "SKILL.md").read_text(
+            encoding="utf-8")
+        step = text[text.index("2. Settings"):text.index("3. The queue")]
+        self.assertIn("`LEGWORK_DIR`", step)
+        self.assertNotIn("config.example", step)
+
+
 class HouseRulesTests(unittest.TestCase):
     def test_tracker_skill_follows_the_house_rules(self):
         text = (REPO / "core" / "skills" / "legwork-tracker" / "SKILL.md").read_text(
