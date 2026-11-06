@@ -927,7 +927,7 @@ class TestLocalReview(unittest.TestCase):
         self.assertIn("NEEDS YOU  demo", esc)
         self.assertIn("Reply with a letter.", esc)
 
-    def test_review_orchestration_with_stubbed_call(self):
+    def test_review_with_stubbed_call(self):
         original = legwork_review.call_claude
         legwork_review.call_claude = lambda *a, **k: \
             '{"verdict":"pass","summary":"fine"}'

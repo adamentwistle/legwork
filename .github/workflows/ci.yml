@@ -158,6 +158,40 @@ jobs:
           test -s dashboard/index.html
           grep "rebuilt dashboard" hook.log
 
+  # The plugin a user installs: Claude Code adds a marketplace and installs
+  # legwork@legwork from it, as the README and other tools do, into a scratch
+  # profile. Here the marketplace is this checkout rather than GitHub, so the
+  # job tests the change in front of it. Claude Code is pinned and needs no
+  # login for this. Blocking: if the plugin stops installing, everyone who
+  # installs it is stuck.
+  plugin:
+    name: plugin (installs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install legwork@legwork from this checkout
+        shell: bash
+        env:
+          CLAUDE_CODE: "@anthropic-ai/claude-code@2.1.309"
+        run: |
+          export HOME="$RUNNER_TEMP/home" CLAUDE_CONFIG_DIR="$RUNNER_TEMP/profile"
+          mkdir -p "$HOME"
+          npm install --silent --no-save --prefix "$RUNNER_TEMP/cli" "$CLAUDE_CODE"
+          claude="$RUNNER_TEMP/cli/node_modules/.bin/claude"
+          "$claude" plugin validate .
+          "$claude" plugin validate ./core
+          "$claude" plugin marketplace add "$GITHUB_WORKSPACE"
+          "$claude" plugin install legwork@legwork
+          "$claude" plugin list > "$RUNNER_TEMP/list.txt"
+          cat "$RUNNER_TEMP/list.txt"
+          grep -A4 "legwork@legwork" "$RUNNER_TEMP/list.txt" | grep -q "Status: .*enabled"
+          version=$(python3 -c 'import json; print(json.load(open("core/.claude-plugin/plugin.json"))["version"])')
+          root="$CLAUDE_CONFIG_DIR/plugins/cache/legwork/legwork/$version"
+          diff <(ls core/commands) <(ls "$root/commands")
+          diff <(ls core/skills) <(ls "$root/skills")
+
   # Dev-only, advisory. continue-on-error keeps it off the critical path: it
   # surfaces lint and byte-compile signal without ever blocking the gate above.
   quality:
