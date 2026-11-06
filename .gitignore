@@ -9,8 +9,8 @@ __pycache__/
 /config
 
 # Your house rules: your private copy of house-rules.example.md, read by
-# /fanout, /ship and /bugbot. Kept out of this repo for
-# the same reason as projects/ below.
+# the tracker skill. Kept out of this repo for the same reason as projects/
+# below.
 /house-rules.md
 
 # The generated wedge repo: scripts/build_wedge.py output. A build artifact
