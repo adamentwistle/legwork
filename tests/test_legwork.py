@@ -2808,6 +2808,56 @@ class TestInstaller(unittest.TestCase):
             self.assertEqual(parsed.get("LEGWORK_LEVEL"), "2", values)
             self.assertIn("LEGWORK_DAILY_CAP", parsed)
 
+    def test_rewrite_keeps_every_setting_the_wizard_does_not_ask_for(self):
+        # A re-run rewrites config wholesale. Settings it never asks for,
+        # such as a per-account config dir or one another tool wrote, stay
+        # as they were; the ones it asks for come from the answers alone.
+        existing = ("LEGWORK_LEVEL=2\nLEGWORK_DIR=/old\nLEGWORK_DAILY_CAP=3\n"
+                    "CLAUDE_CONFIG_DIR_WORK=$HOME/.claude-acct\n"
+                    "SOME_TOOL_SETTING=a b\nLEGWORK_SWITCHBOARD=odd\n")
+        carried = legwork_install.carried_settings(existing)
+        for level in (1, 2):
+            values = {"level": level, "legwork_dir": "/srv/legwork",
+                      "daily_cap": 8, "daily_cost_cap": 0,
+                      "review_mode": "off", "reviewer_model": "",
+                      "interval_minutes": 5, "carried": carried}
+            text = legwork_install.render_config(values)
+            parsed = legwork_install.parse_config_text(text)
+            self.assertEqual(parsed["CLAUDE_CONFIG_DIR_WORK"],
+                             "$HOME/.claude-acct", level)
+            self.assertEqual(parsed["SOME_TOOL_SETTING"], "a b", level)
+            self.assertEqual(parsed["LEGWORK_SWITCHBOARD"], "odd", level)
+            self.assertEqual(parsed["LEGWORK_DIR"], "/srv/legwork", level)
+            self.assertEqual(text.count("LEGWORK_DIR="), 1, level)
+            self.assertEqual(parsed.get("LEGWORK_DAILY_CAP"),
+                             None if level == 1 else "8", level)
+
+    def test_a_carried_key_has_no_commented_example_too(self):
+        # One home for each setting: a carried CLAUDE_CONFIG_DIR_WORK is not
+        # also shown as a commented example in the Claude config dir section.
+        carried = legwork_install.carried_settings(
+            "CLAUDE_CONFIG_DIR_WORK=$HOME/.claude-acct\n")
+        text = legwork_install.render_config(
+            {"level": 2, "legwork_dir": "/a", "daily_cap": 8,
+             "daily_cost_cap": 0, "review_mode": "off", "reviewer_model": "",
+             "interval_minutes": 5, "carried": carried})
+        self.assertEqual(text.count("CLAUDE_CONFIG_DIR_WORK="), 1, text)
+
+    def test_wizard_keys_cover_every_line_the_wizard_writes(self):
+        # A key the wizard writes but WIZARD_KEYS leaves out would be carried
+        # as well, and the config would hold it twice.
+        written = set()
+        for mode in ("local", "n8n", "off"):
+            for level in (1, 2):
+                text = legwork_install.render_config(
+                    {"level": level, "legwork_dir": "/a", "daily_cap": 8,
+                     "daily_cost_cap": 5, "review_mode": mode,
+                     "webhook_url": "https://h/w", "alert_url": "https://h/a",
+                     "reviewer_model": "other-model",
+                     "claude_config_dir": "/c", "interval_minutes": 5})
+                written |= set(legwork_install.parse_config_text(text))
+        self.assertLessEqual(written, legwork_install.WIZARD_KEYS)
+
     def test_write_repo_files_level_1_skips_runner_logs(self):
         orig_repo = legwork_install.REPO
         try:
@@ -2866,6 +2916,29 @@ class TestInstaller(unittest.TestCase):
             for name, value in orig.items():
                 setattr(legwork_install, name, value)
         return rc, received
+
+    def _rerun_lite(self, config_text):
+        repo = Path(tempfile.mkdtemp(dir=str(TMP)))
+        (repo / "config").write_text(config_text, encoding="utf-8")
+        rc, received = self._run_main_with_stubbed_steps(
+            ["--yes", "--lite", "--no-color"], repo=repo)
+        self.assertEqual(rc, 0)
+        return legwork_install.render_config(received["write_repo_files"])
+
+    def test_rerun_keeps_a_carried_line_byte_for_byte(self):
+        # Quotes and spaces inside a value survive: the line is kept as the
+        # user wrote it, not rebuilt from its parsed value.
+        line = "OTHER_TOOL_ARGS='--settings \"/srv/with spaces/s.json\"'"
+        out = self._rerun_lite(f"LEGWORK_DIR=/a\n{line}\n")
+        self.assertIn(f"\n{line}\n", out)
+
+    def test_rerun_keeps_a_repeated_key_and_its_order(self):
+        # The runner reads the first of two lines for a key, so both stay,
+        # first one first, and the effective value does not change.
+        out = self._rerun_lite("LEGWORK_DIR=/a\nCLAUDE_CONFIG_DIR_WORK=/srv/work\n"
+                               "CLAUDE_CONFIG_DIR_WORK=/srv/other\n")
+        self.assertIn("CLAUDE_CONFIG_DIR_WORK=/srv/work\n"
+                      "CLAUDE_CONFIG_DIR_WORK=/srv/other\n", out)
 
     def test_main_lite_reaches_hooks_but_never_the_timer(self):
         # --yes --lite: a level-1 config is written, the verbs and hook

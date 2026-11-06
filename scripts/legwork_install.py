@@ -69,7 +69,7 @@ REPO = Path(__file__).resolve().parent.parent
 # graph, which a direct run of this script does not have on sys.path.
 sys.path.insert(1, str(REPO / "core"))
 
-from legwork_common import iter_config_pairs, switchboard_mode  # noqa: E402
+from legwork_common import iter_config_pairs  # noqa: E402
 
 PLIST_TEMPLATE = REPO / "suite" / "com.legwork.runner.plist"
 START_HOOK = "session_start_hook.py"
@@ -78,20 +78,18 @@ PLIST_NAME = "com.legwork.runner.plist"
 VERB_SKILLS = ("legwork-tracker", "legwork-onboard")
 DEFAULT_REVIEWER_MODEL = "claude-sonnet-4-6"
 
-# Settings owned by the optional orchestration layer (orchestration/install.py
-# writes them). This wizard never asks for them, but rewrites `config`
-# wholesale, so it carries them over under the same section header that
-# installer uses. Keep both lists and headers in step. A key that is not
-# listed here, such as one an older install wrote, is dropped on a rewrite.
-ORCHESTRATION_KEYS = (
-    "LEGWORK_ORCHESTRATION", "LEGWORK_SWITCHBOARD", "LEGWORK_SWITCHBOARD_HEALTH",
-    "LEGWORK_SWITCHBOARD_DIR", "LEGWORK_SESSION_ARGS", "LEGWORK_CONTEXT_WINDOW",
-    "LEGWORK_OWN_OWNERS", "LEGWORK_BUGBOT_OWNERS", "LEGWORK_LINEAR_TEAM",
-    "LEGWORK_LINEAR_TEAM_KEY", "LEGWORK_LINEAR_SWEEP_LABELS",
-    "LEGWORK_PR_SKILL", "LEGWORK_UI_SKILL", "LEGWORK_USAGE_CACHE",
-)
-ORCHESTRATION_SECTION = ("# --- Orchestration (OPTIONAL) -------------------"
-                         "-------------------------")
+# The settings this wizard asks for and writes itself. It rewrites `config`
+# wholesale, so every other key an existing config holds, such as a
+# per-account CLAUDE_CONFIG_DIR_<NAME> or one another tool wrote, is carried
+# over as it was, under OTHER_SECTION.
+WIZARD_KEYS = frozenset((
+    "LEGWORK_LEVEL", "LEGWORK_DIR", "LEGWORK_DAILY_CAP",
+    "LEGWORK_DAILY_COST_CAP", "LEGWORK_TICK_MINUTES", "LEGWORK_WEBHOOK_URL",
+    "LEGWORK_ALERT_URL", "LEGWORK_LOCAL_REVIEW", "REVIEWER_MODEL",
+    "CLAUDE_CONFIG_DIR",
+))
+OTHER_SECTION = ("# --- Other settings -----------------------------------"
+                 "------------------")
 
 
 # ---------------------------------------------------------------------------
@@ -199,24 +197,29 @@ def render_schtasks_argv(legwork_dir, python_bin, minutes, task_name=TASK_NAME):
             *schedule, "/f"]
 
 
-def carried_settings(existing):
-    """(key, value) pairs from an existing config that render_config must
-    keep although the wizard does not ask for them: the orchestration
-    layer's settings, in ORCHESTRATION_KEYS order. LEGWORK_SWITCHBOARD is
-    `claude` or `manual`; any other value an older install wrote reads as
-    `claude`, the way the skills read it."""
-    return [(k, switchboard_mode(existing[k]) if k == "LEGWORK_SWITCHBOARD"
-             else existing[k])
-            for k in ORCHESTRATION_KEYS if k in existing]
+def carried_settings(text):
+    """The lines of an existing config that render_config must keep although
+    the wizard does not ask for them: every KEY=VALUE line whose key is
+    outside WIZARD_KEYS, as written and in order, repeats included. They are
+    copied, never rebuilt from a parsed value, so quotes and spaces survive
+    and the runner, which reads the first line for a key, sees what it saw."""
+    kept = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.partition("=")[0].strip() not in WIZARD_KEYS:
+            kept.append(line)
+    return kept
 
 
 def _render_carried(w, carried):
     if not carried:
         return
-    w(ORCHESTRATION_SECTION)
-    w("# Written by orchestration/install.py. See config.example.")
-    for key, value in carried:
-        w(f"{key}={value}")
+    w(OTHER_SECTION)
+    w("# Settings this wizard does not ask for, kept as they were.")
+    for line in carried:
+        w(line)
     w("")
 
 
@@ -226,7 +229,7 @@ def render_config(v):
     guidance, so the file documents itself and mirrors config.example. A
     level-1 install (`v['level'] == 1`, the manual loop) stops after
     LEGWORK_DIR: none of the runner values were asked, so none are written.
-    Orchestration settings in `v['carried']` are written at either level."""
+    The settings in `v['carried']` are written at either level."""
     level = int(v.get("level", 2))
     out = []
     w = out.append
@@ -308,7 +311,9 @@ def render_config(v):
         w(f"CLAUDE_CONFIG_DIR={v['claude_config_dir']}")
     else:
         w("# CLAUDE_CONFIG_DIR=$HOME/.claude-legwork")
-    w("# CLAUDE_CONFIG_DIR_WORK=$HOME/.claude-legwork-work")
+    carried_keys = {line.partition("=")[0].strip() for line in v.get("carried") or ()}
+    if "CLAUDE_CONFIG_DIR_WORK" not in carried_keys:
+        w("# CLAUDE_CONFIG_DIR_WORK=$HOME/.claude-legwork-work")
     w("")
     _render_carried(w, v.get("carried"))
     return "\n".join(out) + "\n"
@@ -1219,10 +1224,11 @@ def main(argv=None):
     # opts in. Interactive runs still ask (force=None).
     force_verbs, force_timer, force_hooks = plan_forces(args, interactive)
 
-    existing = {}
+    existing, existing_text = {}, ""
     config_path = REPO / "config"
     if config_path.exists():
-        existing = parse_config_text(config_path.read_text(encoding="utf-8"))
+        existing_text = config_path.read_text(encoding="utf-8")
+        existing = parse_config_text(existing_text)
 
     try:
         default_level, level_fixed = plan_level(args, existing)
@@ -1258,7 +1264,7 @@ def main(argv=None):
             default_index=default_level - 1)
 
     values = collect_values(wiz, existing, level=level)
-    values["carried"] = carried_settings(existing)
+    values["carried"] = carried_settings(existing_text)
     values["python_bin"] = detect_python()
 
     config_text = render_config(values)

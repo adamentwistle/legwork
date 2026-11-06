@@ -10,6 +10,7 @@ legwork needs no code of its own for it.
 """
 
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -28,6 +29,38 @@ GONE = re.compile(
 LEAKS = re.compile(r"/Users/|/home/[a-z]|C:\\{1,2}Users")
 
 
+# The one file that names what moved, so a user can remove it.
+MOVED_NOTE = Path("docs") / "orchestrator-moved.md"
+TEXT = {".py", ".md", ".sh", ".js", ".json", ".yml", ".yaml", ".plist",
+        ".tape", ".txt", ".toml", ""}
+
+
+def shipped_files():
+    """Every file in the repo but the tests and the note, as git tracks it,
+    or as found on disk outside a checkout. Caches are never shipped."""
+    try:
+        out = subprocess.run(["git", "ls-files"], cwd=REPO, capture_output=True,
+                             text=True, check=True).stdout.split()
+        paths = [REPO / p for p in out]
+    except (OSError, subprocess.CalledProcessError):
+        paths = [p for p in REPO.rglob("*") if ".git" not in p.parts]
+    return [p for p in paths if p.is_file()
+            and p.relative_to(REPO).parts[0] != "tests"
+            and p.relative_to(REPO) != MOVED_NOTE
+            and "__pycache__" not in p.parts and p.suffix in TEXT]
+
+
+def names_gone(test, paths):
+    for path in paths:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        for m in GONE.finditer(text):
+            line = text.count("\n", 0, m.start()) + 1
+            test.fail(f"{path.relative_to(REPO)}:{line} names {m.group(0)!r}")
+
+
 def user_docs():
     files = [REPO / n for n in ("README.md", "ARCHITECTURE.md", "SETUP.md",
                                 "CONFIG.md", "CONTRIBUTING.md", "SECURITY.md",
@@ -39,15 +72,47 @@ def user_docs():
 
 class TrackerDocsTests(unittest.TestCase):
     def test_docs_and_plugin_describe_only_the_tracker(self):
-        for path in user_docs():
-            text = path.read_text(encoding="utf-8")
-            for m in GONE.finditer(text):
-                line = text.count("\n", 0, m.start()) + 1
-                self.fail(f"{path.relative_to(REPO)}:{line} names {m.group(0)!r}")
+        names_gone(self, user_docs())
 
     def test_readme_points_at_orchi(self):
         text = (REPO / "README.md").read_text(encoding="utf-8")
         self.assertTrue(ORCHI in text, "README.md has no link to Orchi")
+
+
+class NoOrchestrationTests(unittest.TestCase):
+    def test_the_orchestration_layer_is_gone(self):
+        # A checkout that ran the old suite keeps an ignored __pycache__
+        # there after the pull; only real files count.
+        left = [p for p in (REPO / "orchestration").rglob("*")
+                if p.is_file() and "__pycache__" not in p.parts]
+        self.assertFalse(left, f"orchestration/ still holds {left[:3]}")
+
+    def test_nothing_shipped_names_the_orchestrator(self):
+        names_gone(self, shipped_files())
+
+
+class MovedNoteTests(unittest.TestCase):
+    """An install from an older checkout left commands, skills, hooks and a
+    scheduled job that call scripts this checkout no longer has. One note
+    says what they are and how to remove each."""
+
+    NOTE = REPO / "docs" / "orchestrator-moved.md"
+
+    def test_readme_links_the_note(self):
+        text = (REPO / "README.md").read_text(encoding="utf-8")
+        self.assertTrue("docs/orchestrator-moved.md" in text, "README.md has no link to the note")
+
+    def test_note_says_how_to_remove_each_piece(self):
+        self.assertTrue(self.NOTE.is_file(), "docs/orchestrator-moved.md is missing")
+        text = self.NOTE.read_text(encoding="utf-8")
+        for piece in ("commands/ship.md", "commands/bugbot.md", "commands/fanout.md",
+                      "skills/fanout", "skills/switchboard-protocol", "skills/switchboard",
+                      "skills/roadmap-planning", "agents/codex.md",
+                      "orchestration/bin/usage-guard", "orchestration/bin/pane-notify",
+                      "launchctl bootout gui/$(id -u)/dev.legwork.switchboard-health",
+                      "schtasks /Delete /TN dev.legwork.switchboard-health /F",
+                      ".claude/settings.local.json"):
+            self.assertIn(piece, text)
 
 
 class OnboardTests(unittest.TestCase):

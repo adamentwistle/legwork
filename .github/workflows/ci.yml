@@ -48,9 +48,7 @@ jobs:
         run: python3 -m unittest discover -s tests
 
   # macOS, with the system /usr/bin/python3 and bash a Mac really has, so a
-  # change made for one platform cannot quietly break the Mac. The last step
-  # installs /bugbot into a scratch dir and runs the rendered line as a Mac
-  # user's Claude would: a bare script path, run by its python3 shebang.
+  # change made for one platform cannot quietly break the Mac.
   macos:
     name: tests (macOS)
     runs-on: macos-latest
@@ -71,21 +69,6 @@ jobs:
 
       - name: Installer under the system bash
         run: /bin/bash -n install.sh
-
-      - name: Installed script lines run by their shebang
-        run: |
-          q="$RUNNER_TEMP/q"; c="$RUNNER_TEMP/c"
-          mkdir -p "$q"
-          LEGWORK_CONFIG="$q/config" /usr/bin/python3 orchestration/install.py \
-            --with shipping --claude-dir "$c" --legwork-dir "$q"
-          line=$(grep -o '`[^`]*bugbot-wait <pr> --trigger' "$c/commands/bugbot.md" \
-                 | head -1 | tr -d '`')
-          echo "rendered: $line"
-          case "$line" in
-            /*) ;;
-            *) echo "expected a bare script path on macOS" >&2; exit 1 ;;
-          esac
-          "${line%% *}" --help > /dev/null
 
   # Cheap blocking syntax checks for everything the Python suite cannot
   # import: the n8n workflow JSONs, the bash installer + hooks, and the
@@ -111,14 +94,6 @@ jobs:
         run: |
           python3 -m py_compile core/session_start_hook.py \
                                 core/session_end_hook.py
-
-      - name: Orchestration syntax (scripts and installer)
-        run: |
-          python3 -m py_compile orchestration/install.py
-          for f in orchestration/bin/switchboard-wait orchestration/bin/bugbot-wait \
-                   orchestration/bin/usage-guard; do
-            python3 -c 'import sys; compile(open(sys.argv[1]).read(), sys.argv[1], "exec")' "$f"
-          done
 
       - name: Node syntax (reviewer build node)
         run: node --check suite/reviewer/n8n-build-node.js

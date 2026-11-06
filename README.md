@@ -141,6 +141,8 @@ Review is three options deep. Set `LEGWORK_LOCAL_REVIEW=1` and the runner triage
 
 The orchestrator layer that used to ship here, one long session per project that works its roadmap into pull requests, is now [Orchi](https://github.com/adamentwistle/orchi-build). Orchi works from a legwork tracker and installs this plugin. Legwork doesn't need Orchi.
 
+If you set the orchestrator up from an older checkout, the commands, skills, hooks and scheduled job it installed call scripts this checkout no longer has. [docs/orchestrator-moved.md](docs/orchestrator-moved.md) lists each one and how to remove it.
+
 ## What this is not
 
 - Not a hosted service, not an agent-ops platform, not a paid tier.
