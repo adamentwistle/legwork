@@ -91,7 +91,8 @@ it.
 ## 5. Check it, and hand over
 
 - Re-read `config` and confirm every setting landed.
-- With the runner: `<python> suite/legwork_runner.py --doctor` must exit 0.
+- With the runner: `<python> suite/legwork_runner.py --doctor` must end
+  with `Doctor: all green`. It exits 0 either way, so read what it prints.
 
 Finish with one line per piece: installed, skipped, or waiting on the
 user, each marked OBSERVED (you checked it) or NOT RUN. Then the first
