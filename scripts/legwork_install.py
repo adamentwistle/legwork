@@ -311,7 +311,9 @@ def render_config(v):
         w(f"CLAUDE_CONFIG_DIR={v['claude_config_dir']}")
     else:
         w("# CLAUDE_CONFIG_DIR=$HOME/.claude-legwork")
-    w("# CLAUDE_CONFIG_DIR_WORK=$HOME/.claude-legwork-work")
+    carried_keys = {line.partition("=")[0].strip() for line in v.get("carried") or ()}
+    if "CLAUDE_CONFIG_DIR_WORK" not in carried_keys:
+        w("# CLAUDE_CONFIG_DIR_WORK=$HOME/.claude-legwork-work")
     w("")
     _render_carried(w, v.get("carried"))
     return "\n".join(out) + "\n"
