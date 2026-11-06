@@ -158,6 +158,34 @@ jobs:
           test -s dashboard/index.html
           grep "rebuilt dashboard" hook.log
 
+  # The plugin a user installs: Claude Code adds this checkout as a
+  # marketplace and installs legwork@legwork from it, the same two commands
+  # the README gives and other tools run, into a scratch profile. Claude Code
+  # is pinned and needs no login for this. Blocking: if the plugin stops
+  # installing, everyone who installs it is stuck.
+  plugin:
+    name: plugin (installs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install legwork@legwork from this checkout
+        env:
+          CLAUDE_CODE: "@anthropic-ai/claude-code@2.1.309"
+        run: |
+          export HOME="$RUNNER_TEMP/home" CLAUDE_CONFIG_DIR="$RUNNER_TEMP/profile"
+          mkdir -p "$HOME"
+          npx -y "$CLAUDE_CODE" plugin validate .
+          npx -y "$CLAUDE_CODE" plugin marketplace add "$GITHUB_WORKSPACE"
+          npx -y "$CLAUDE_CODE" plugin install legwork@legwork
+          npx -y "$CLAUDE_CODE" plugin list | tee "$RUNNER_TEMP/list.txt"
+          grep -q "legwork@legwork" "$RUNNER_TEMP/list.txt"
+          root=$(ls -d "$CLAUDE_CONFIG_DIR"/plugins/cache/legwork/legwork/*)
+          test "$(ls "$root/commands" | wc -l)" -eq 8
+          test -f "$root/skills/legwork-tracker/SKILL.md"
+          test -f "$root/skills/legwork-onboard/SKILL.md"
+
   # Dev-only, advisory. continue-on-error keeps it off the critical path: it
   # surfaces lint and byte-compile signal without ever blocking the gate above.
   quality:

@@ -297,13 +297,18 @@ grant autonomy), `/wrap` (close out a session and mint the next prompt), and
 optional layer and install only those). `/vision` is the single gate into autonomy: it captures the
 Vision and is the only place `autonomy: loop` is set.
 
-### Tests (`tests/test_legwork.py`)
+### Tests (`tests/`)
 
-A stdlib test suite covering the runner, the local reviewer, the
-installer, the dashboard builder and the hooks. The hook tests run the real
-shell scripts as subprocesses against
-throwaway git repos; nothing touches the real legwork repo, the webhook, or
-the network. Run:
+A stdlib test suite. `test_legwork.py` covers the runner, the local
+reviewer, the installer, the dashboard builder and the hooks; its hook tests
+run the real scripts as subprocesses against throwaway git repos.
+`test_plugin_manifest.py` and `test_wedge.py` pin the plugin and its
+standalone copy. `test_tracker_only.py` keeps legwork the tracker alone: no
+orchestrator code, docs that describe only the tracker, and the house rules
+followed by the tracker skill and its commands. Nothing touches the real
+legwork repo, the webhook, or the network. CI's `plugin` job also installs
+`legwork@legwork` from the checkout with a pinned Claude Code, the way a
+user does. Run:
 
 ```
 python3 -m unittest discover -s tests
