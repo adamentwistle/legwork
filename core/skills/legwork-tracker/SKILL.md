@@ -20,7 +20,9 @@ writes anything and follow each list item in it. An item that names a
 verb, such as one that says what to run after `/wrap`, applies when that
 verb runs. The rules never change the file format or the wrap steps
 below: when one clashes with them, follow this skill and say which rule
-you set aside.
+you set aside. Skip the items in a `## Pull request reviews` section,
+which an earlier `/onboard` wrote: they say who reviews pull requests,
+and no verb opens one.
 
 ## File format
 
