@@ -2812,10 +2812,9 @@ class TestInstaller(unittest.TestCase):
         # A re-run rewrites config wholesale. Settings it never asks for,
         # such as a per-account config dir or one another tool wrote, stay
         # as they were; the ones it asks for come from the answers alone.
-        existing = {"LEGWORK_LEVEL": "2", "LEGWORK_DIR": "/old",
-                    "LEGWORK_DAILY_CAP": "3",
-                    "CLAUDE_CONFIG_DIR_WORK": "$HOME/.claude-acct",
-                    "SOME_TOOL_SETTING": "a b", "LEGWORK_SWITCHBOARD": "odd"}
+        existing = ("LEGWORK_LEVEL=2\nLEGWORK_DIR=/old\nLEGWORK_DAILY_CAP=3\n"
+                    "CLAUDE_CONFIG_DIR_WORK=$HOME/.claude-acct\n"
+                    "SOME_TOOL_SETTING=a b\nLEGWORK_SWITCHBOARD=odd\n")
         carried = legwork_install.carried_settings(existing)
         for level in (1, 2):
             values = {"level": level, "legwork_dir": "/srv/legwork",

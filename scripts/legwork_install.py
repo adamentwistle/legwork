@@ -197,11 +197,20 @@ def render_schtasks_argv(legwork_dir, python_bin, minutes, task_name=TASK_NAME):
             *schedule, "/f"]
 
 
-def carried_settings(existing):
-    """(key, value) pairs from an existing config that render_config must
-    keep although the wizard does not ask for them: every key outside
-    WIZARD_KEYS, in the order the config held them, values as written."""
-    return [(k, v) for k, v in existing.items() if k not in WIZARD_KEYS]
+def carried_settings(text):
+    """The lines of an existing config that render_config must keep although
+    the wizard does not ask for them: every KEY=VALUE line whose key is
+    outside WIZARD_KEYS, as written and in order, repeats included. They are
+    copied, never rebuilt from a parsed value, so quotes and spaces survive
+    and the runner, which reads the first line for a key, sees what it saw."""
+    kept = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.partition("=")[0].strip() not in WIZARD_KEYS:
+            kept.append(line)
+    return kept
 
 
 def _render_carried(w, carried):
@@ -209,8 +218,8 @@ def _render_carried(w, carried):
         return
     w(OTHER_SECTION)
     w("# Settings this wizard does not ask for, kept as they were.")
-    for key, value in carried:
-        w(f"{key}={value}")
+    for line in carried:
+        w(line)
     w("")
 
 
@@ -1213,10 +1222,11 @@ def main(argv=None):
     # opts in. Interactive runs still ask (force=None).
     force_verbs, force_timer, force_hooks = plan_forces(args, interactive)
 
-    existing = {}
+    existing, existing_text = {}, ""
     config_path = REPO / "config"
     if config_path.exists():
-        existing = parse_config_text(config_path.read_text(encoding="utf-8"))
+        existing_text = config_path.read_text(encoding="utf-8")
+        existing = parse_config_text(existing_text)
 
     try:
         default_level, level_fixed = plan_level(args, existing)
@@ -1252,7 +1262,7 @@ def main(argv=None):
             default_index=default_level - 1)
 
     values = collect_values(wiz, existing, level=level)
-    values["carried"] = carried_settings(existing)
+    values["carried"] = carried_settings(existing_text)
     values["python_bin"] = detect_python()
 
     config_text = render_config(values)
