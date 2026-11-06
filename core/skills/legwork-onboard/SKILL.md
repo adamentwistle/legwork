@@ -79,8 +79,10 @@ it.
    missing), set `LEGWORK_DIR` to the legwork repo, and with the runner
    `LEGWORK_DAILY_CAP`, `LEGWORK_DAILY_COST_CAP`, and
    `LEGWORK_LOCAL_REVIEW=1` or `LEGWORK_WEBHOOK_URL` / `LEGWORK_ALERT_URL`,
-   one `KEY=VALUE` line each, replacing an active line for that key. Leave
-   every other line as it is.
+   one `KEY=VALUE` line each, replacing an active line for that key, and
+   comment out the review keys of the modes they did not pick (the wizard
+   reads a set `LEGWORK_WEBHOOK_URL` as n8n). Leave every other line as it
+   is.
 3. The queue and runner: `./install.sh --yes --with-commands --with-hooks`,
    plus `--with-launchd` for the runner or `--lite` without it. The wizard
    pre-fills every value from the config step 2 wrote. When the legwork
