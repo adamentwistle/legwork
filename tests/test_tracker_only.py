@@ -114,6 +114,13 @@ class ReviewFindingTests(unittest.TestCase):
             self.assertTrue("`house-rules.md`" in text, f"/{verb} never names house-rules.md")
             self.assertTrue(f"after /{verb}" in text, f"/{verb} has no after-step")
 
+    def test_the_after_step_runs_before_the_commit(self):
+        # Whatever a house-rule step writes must be in the commit and push.
+        text = self.read("core", "skills", "legwork-tracker", "SKILL.md")
+        after = text.index("house rule says to do after this verb")
+        self.assertLess(after, text.index("Rebuild the dashboard from the legwork repo"))
+        self.assertLess(after, text.index("Commit your changes with an honest message"))
+
 
 if __name__ == "__main__":
     unittest.main()
