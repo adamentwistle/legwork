@@ -2808,6 +2808,31 @@ class TestInstaller(unittest.TestCase):
             self.assertEqual(parsed.get("LEGWORK_LEVEL"), "2", values)
             self.assertIn("LEGWORK_DAILY_CAP", parsed)
 
+    def test_rewrite_keeps_every_setting_the_wizard_does_not_ask_for(self):
+        # A re-run rewrites config wholesale. Settings it never asks for,
+        # such as a per-account config dir or one another tool wrote, stay
+        # as they were; the ones it asks for come from the answers alone.
+        existing = {"LEGWORK_LEVEL": "2", "LEGWORK_DIR": "/old",
+                    "LEGWORK_DAILY_CAP": "3",
+                    "CLAUDE_CONFIG_DIR_WORK": "$HOME/.claude-acct",
+                    "SOME_TOOL_SETTING": "a b", "LEGWORK_SWITCHBOARD": "odd"}
+        carried = legwork_install.carried_settings(existing)
+        for level in (1, 2):
+            values = {"level": level, "legwork_dir": "/srv/legwork",
+                      "daily_cap": 8, "daily_cost_cap": 0,
+                      "review_mode": "off", "reviewer_model": "",
+                      "interval_minutes": 5, "carried": carried}
+            text = legwork_install.render_config(values)
+            parsed = legwork_install.parse_config_text(text)
+            self.assertEqual(parsed["CLAUDE_CONFIG_DIR_WORK"],
+                             "$HOME/.claude-acct", level)
+            self.assertEqual(parsed["SOME_TOOL_SETTING"], "a b", level)
+            self.assertEqual(parsed["LEGWORK_SWITCHBOARD"], "odd", level)
+            self.assertEqual(parsed["LEGWORK_DIR"], "/srv/legwork", level)
+            self.assertEqual(text.count("LEGWORK_DIR="), 1, level)
+            self.assertEqual(parsed.get("LEGWORK_DAILY_CAP"),
+                             None if level == 1 else "8", level)
+
     def test_write_repo_files_level_1_skips_runner_logs(self):
         orig_repo = legwork_install.REPO
         try:

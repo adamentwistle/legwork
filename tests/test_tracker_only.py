@@ -50,6 +50,21 @@ class TrackerDocsTests(unittest.TestCase):
         self.assertTrue(ORCHI in text, "README.md has no link to Orchi")
 
 
+class NoOrchestrationTests(unittest.TestCase):
+    def test_the_orchestration_layer_is_gone(self):
+        self.assertFalse((REPO / "orchestration").exists(),
+                         "orchestration/ is still in the repo")
+
+    def test_code_names_no_orchestration_setting(self):
+        code = sorted((REPO / "core").glob("*.py")) + sorted((REPO / "scripts").glob("*.py"))
+        code += sorted((REPO / "suite").rglob("*.py")) + [REPO / "install.sh"]
+        for path in code:
+            text = path.read_text(encoding="utf-8")
+            for m in GONE.finditer(text):
+                line = text.count("\n", 0, m.start()) + 1
+                self.fail(f"{path.relative_to(REPO)}:{line} names {m.group(0)!r}")
+
+
 class OnboardTests(unittest.TestCase):
     def test_onboard_runs_python_through_the_detected_interpreter(self):
         text = (REPO / "core" / "skills" / "legwork-onboard" / "SKILL.md").read_text(
