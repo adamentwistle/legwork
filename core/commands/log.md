@@ -8,10 +8,13 @@ Update: $ARGUMENTS
 
 Steps:
 1. Resolve the legwork repo: $LEGWORK_DIR if set, otherwise ~/legwork.
+   If it holds a `house-rules.md`, follow it as the skill's House rules
+   section says.
 2. Work out which project this refers to and what kind of update it is:
    a note for the log, a status change, an edit to the description or
    frontmatter, or a tweak to the next prompt.
 3. Apply it. Notes are prepended to the log with today's date. Prompt
    tweaks replace the fenced block but keep the prompt shape rules.
    Never rewrite old log entries.
-4. Rebuild the dashboard and confirm in one line.
+4. Do what any house rule says to do after /log.
+5. Rebuild the dashboard and confirm in one line.
