@@ -24,6 +24,9 @@ GONE = re.compile(
     r"OWN_OWNERS|BUGBOT_OWNERS|LINEAR_|PR_SKILL|UI_SKILL|USAGE_CACHE)",
     re.I)
 
+# A path copied in from someone's machine.
+LEAKS = re.compile(r"/Users/|/home/[a-z]|C:\\\\Users")
+
 
 def user_docs():
     files = [REPO / n for n in ("README.md", "ARCHITECTURE.md", "SETUP.md",
@@ -55,10 +58,14 @@ class OnboardTests(unittest.TestCase):
         for m in re.finditer(r"\bpython3? (suite|scripts|core)/", text):
             self.fail(f"bare call in the onboard skill: {m.group(0)!r}")
 
+    def test_leak_pattern_catches_each_platform(self):
+        for sample in ("/Users/alice/legwork", "/home/alice/legwork",
+                       "C:\\Users\\alice\\legwork"):
+            self.assertTrue(LEAKS.search(sample), sample)
+
     def test_no_machine_paths(self):
-        leaks = re.compile(r"/Users/|/home/[a-z]|C:\\\\Users")
         for path in user_docs():
-            for m in leaks.finditer(path.read_text(encoding="utf-8")):
+            for m in LEAKS.finditer(path.read_text(encoding="utf-8")):
                 self.fail(f"{path.relative_to(REPO)}: {m.group(0)!r}")
 
 
