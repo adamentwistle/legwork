@@ -13,6 +13,18 @@ whole system depends on.
 
 The legwork repo lives at `$LEGWORK_DIR` if set, otherwise `~/legwork`.
 
+## House rules
+
+When the legwork repo holds a `house-rules.md`, read it before a verb
+writes anything and follow each list item in it. An item that names a
+verb, such as one that says what to run after `/wrap`, applies when that
+verb runs. The rules never change the file format or the wrap steps
+below: when one clashes with them, follow this skill and say which rule
+you set aside. An earlier `/onboard` wrote a `## Pull request reviews`
+section: its items that say who reviews pull requests are for other
+tools, since no verb opens one, so skip them. Any other item there is
+still a rule.
+
 ## File format
 
 Frontmatter holds simple one-line values only:
@@ -125,16 +137,18 @@ move on, never error on the missing remote.
    reviewer as test evidence, so writing it stops false "no test evidence"
    escalations. If you genuinely ran no commands, say so in one line rather
    than leaving stale output from a previous session.
-8. Rebuild the dashboard from the legwork repo:
+8. Do what any house rule says to do after this verb, and report it in
+   your reply.
+9. Rebuild the dashboard from the legwork repo:
    `python3 core/build_dashboard.py` — on Windows use `python`, as there is
    no python3 there beyond a stub that exits 9009 without running anything.
-9. Commit your changes with an honest message, then `git push` when the
-   repo has a remote: it is shared with n8n and other machines, so never
-   leave local tracker commits unpushed. Two graceful degradations: with no
-   remote, stop after the local commit; and if git refuses the add because
-   `/projects/` is still gitignored (a fresh clone of the public repo ships
-   that way), skip the commit (the file is saved on disk) and point the
-   user at SETUP.md's "Make this repo your tracker" step in your reply.
+10. Commit your changes with an honest message, then `git push` when the
+    repo has a remote: it is shared with n8n and other machines, so never
+    leave local tracker commits unpushed. Two graceful degradations: with no
+    remote, stop after the local commit; and if git refuses the add because
+    `/projects/` is still gitignored (a fresh clone of the public repo ships
+    that way), skip the commit (the file is saved on disk) and point the
+    user at SETUP.md's "Make this repo your tracker" step in your reply.
 
 ## Minting the next prompt
 

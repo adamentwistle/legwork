@@ -269,13 +269,6 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 install.parse_set([bad])
 
-    def test_wizard_and_installer_share_the_section_and_keys(self):
-        self.assertEqual(install.CONFIG_SECTION,
-                         legwork_install.ORCHESTRATION_SECTION)
-        documented = set(re.findall(r"^# (LEGWORK_[A-Z_]+)=",
-                                    (REPO / "config.example").read_text(), re.M))
-        self.assertLessEqual(set(legwork_install.ORCHESTRATION_KEYS), documented)
-
     def test_wizard_rewrite_keeps_orchestration_settings(self):
         existing = {"LEGWORK_DIR": "/a", "LEGWORK_OWN_OWNERS": "me",
                     "LEGWORK_LINEAR_TEAM": "Platform Team"}
@@ -336,22 +329,6 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(install.upgrade_config(
             f"LEGWORK_SWITCHBOARD=claude\n{install.RETIRED_KEYS[0]}=work\n")[1],
             (install.RETIRED_KEYS[0],))
-
-    def test_settings_are_documented(self):
-        example = (REPO / "config.example").read_text(encoding="utf-8")
-        self.assertIn("# LEGWORK_SESSION_ARGS=--model opus --effort high\n", example)
-        self.assertIn("# LEGWORK_SWITCHBOARD_HEALTH=1\n", example)
-        self.assertIn("# LEGWORK_SWITCHBOARD=claude\n", example)
-        self.assertIn("# LEGWORK_CONTEXT_WINDOW=1m\n", example)
-        self.assertIn("LEGWORK_CONTEXT_WINDOW", legwork_install.ORCHESTRATION_KEYS)
-        doc = (REPO / "CONFIG.md").read_text(encoding="utf-8")
-        rows = {m.group(1): m.group(2) for m in re.finditer(
-            r"^\| `(LEGWORK_[A-Z_]+)` \| ([^|]+) \|", doc, re.M)}
-        self.assertEqual(rows["LEGWORK_SWITCHBOARD"].strip(), "`claude`")
-        self.assertEqual(rows["LEGWORK_SESSION_ARGS"].strip(),
-                         "`--model opus --effort high`")
-        for key in legwork_install.ORCHESTRATION_KEYS:
-            self.assertIn(key, rows, key)
 
     def test_render_config_without_carried_is_unchanged(self):
         v = {"level": 1, "legwork_dir": "/a"}
@@ -995,13 +972,6 @@ class RetiredSwitchboardTests(unittest.TestCase):
                                  f'RETIRED_KEYS = ("{install.RETIRED_KEYS[0]}",)')])
         self.assertFalse((ORCH / OLD).exists())
 
-    def test_house_rules_example_names_no_switchboard_reader(self):
-        text = (REPO / "house-rules.example.md").read_text(encoding="utf-8")
-        self.assertNotIn("SOUL", text)
-        self.assertNotIn("switchboard", text)
-        # Planning sessions commit and open a docs PR, so they follow them.
-        self.assertIn("roadmap-planning", text)
-
     def test_smoke_test_cleans_up_before_the_panes_close(self):
         # Left in the state file, smoke keeps the health watcher restarting
         # a switchboard for a throwaway repo.
@@ -1012,37 +982,9 @@ class RetiredSwitchboardTests(unittest.TestCase):
                         text.index("## Known gotcha"))
 
 
-class OnboardTests(unittest.TestCase):
-    def setUp(self):
-        self.text = (REPO / "core" / "skills" / "legwork-onboard" / "SKILL.md").read_text(
-            encoding="utf-8")
-
-    def test_onboard_lists_every_piece(self):
-        for piece in install.PIECES:
-            self.assertIn(f"`{piece}`", self.text, piece)
-
-    def test_pane_notify_hand_over_applies_with_a_manual_switchboard_too(self):
-        # pane-notify is offered with Herdr either way, so its Herdr config
-        # step must not sit under the Claude Code switchboard bullet.
-        at = self.text.index("with `pane-notify`: switch Herdr")
-        bullet = self.text.rfind("\n- ", 0, at)
-        self.assertNotIn("Claude Code switchboard", self.text[bullet:at])
-
-    def test_onboard_offers_a_claude_or_manual_switchboard(self):
-        self.assertIn("`LEGWORK_SWITCHBOARD=claude` or `manual`", self.text)
-        self.assertIn("/switchboard", self.text)
-
-
 class WindowsFormTests(unittest.TestCase):
     """Commands run by hand or by /onboard must work on stock Windows, where
     `python3`, and so the scripts' own first line, is the Store stub."""
-
-    def test_onboard_runs_python_through_the_detected_interpreter(self):
-        text = (REPO / "core" / "skills" / "legwork-onboard" / "SKILL.md").read_text(
-            encoding="utf-8")
-        self.assertIn("`<python>` below", text)
-        for m in re.finditer(r"python3 orchestration/|`orchestration/bin/[\w-]+", text):
-            self.fail(f"bare call in the onboard skill: {m.group(0)!r}")
 
     def test_docs_give_hand_run_commands_a_windows_form(self):
         command = re.compile(r"`(?:orchestration/)?bin/[\w-]+ -|^python3 orchestration/")
@@ -1110,13 +1052,6 @@ class DocCommandTests(unittest.TestCase):
         for path in self.DOCS:
             for snippet in self.snippets(path):
                 self.assertIsNone(default.search(snippet), f"{path.name}: {snippet}")
-
-    def test_switchboard_setup_is_linked_where_users_look(self):
-        for path in (REPO / "SETUP.md", REPO / "README.md", REPO / "CONFIG.md",
-                     ORCH / "README.md", ORCH / "docs" / "first-run.md"):
-            self.assertIn("docs/switchboard-setup.md" if path.parent == REPO
-                          or path.name == "README.md" else "switchboard-setup.md",
-                          path.read_text(encoding="utf-8"), path.name)
 
     def test_switchboard_setup_covers_both_platforms(self):
         text = (ORCH / "docs" / "switchboard-setup.md").read_text(encoding="utf-8")

@@ -1,61 +1,42 @@
 ---
 name: legwork-onboard
-description: Set up legwork the way this user wants it. Interviews them about each optional layer (the autonomy runner, shipping commands, the fanout orchestrator, Herdr, a Claude Code or manual switchboard, Linear, the usage guard, house rules), then writes the config and installs only what they chose. Use for /onboard, "set up legwork", "install legwork", "configure legwork", "turn on the runner/orchestration/switchboard", or a re-run to change an earlier choice.
+description: Set up legwork the way this user wants it. Interviews them about the optional pieces (the autonomy runner and its reviewer, house rules), then writes the config and installs only what they chose. Use for /onboard, "set up legwork", "install legwork", "configure legwork", "turn on the runner", or a re-run to change an earlier choice.
 ---
 
 # Onboard
 
-You set legwork up for one user. Legwork is layers, and each one past the
-first is optional. Ask about each layer, install only what they choose, and
-leave a setup they can re-run to change any answer.
+You set legwork up for one user. The queue always comes first; the runner
+and house rules are optional. Ask about each, install only what they
+choose, and leave a setup they can re-run to change any answer.
 
-| Layer | What it is | Needs |
+| Piece | What it is | Needs |
 |---|---|---|
 | Queue (always) | `projects/*.md`, the `/add` `/wrap` `/pickup` `/go` `/log` `/shelve` `/vision` commands, the tracker skill, the dashboard | nothing |
 | Runner | a timer fires headless sessions for projects with a Vision and `autonomy: loop`, plus an optional reviewer | a checkout, `claude` on PATH |
-| Shipping | `/ship` (commit, push, PR, Bugbot, wrap) and `/bugbot` (the review loop) | `gh` signed in |
-| Orchestration | `/fanout` runs one project's roadmap to many PRs; the switchboard protocol has it report `DECISION`s instead of stopping | shipping |
-| Herdr | panes the orchestrator can start, watch and steer; strongly recommended | Herdr installed |
-| Switchboard | who relays an orchestrator's decisions: a Claude Code session in a Herdr pane, or the user by hand | orchestration; the Claude Code switchboard needs Herdr |
-| Health watcher | a script that checks the switchboard every 5 minutes, cycles its context and restarts it if it dies (macOS and Windows) | a Claude Code switchboard |
-| Pane notifications | a banner and a sound when an orchestrator or a normal session finishes or needs the user, and silence from workers and the switchboard (macOS and Windows) | Herdr |
-| Linear | an issue per change, kept in step with its PR | the Linear MCP |
-| Usage guard | a hook that makes long runs pause at a safe point before a usage limit | a usage cache (ccstatusline) |
-| Codex agent | a `codex` subagent that runs OpenAI's Codex CLI, for cross-model reviews in fanout and the quality gate | the `codex` CLI, signed in |
-| House rules | rules every worker follows: authorship, attribution, spelling, style | nothing |
+| House rules | rules the tracker follows whenever a command updates a project: authorship, spelling, style | nothing |
 
 ## 1. Find out what is there (no questions yet)
 
 Look these up yourself; never ask the user for a fact you can read:
 
 - The legwork checkout: the current repo if it has `core/` and
-  `orchestration/install.py`, else `$LEGWORK_DIR`, else `~/legwork`. If
-  none of those is a checkout, legwork is installed as a plugin only. The
-  queue layer works as it is; every other layer needs a checkout, so offer
-  to clone the legwork repo (the plugin's marketplace source) to
+  `install.sh`, else `$LEGWORK_DIR`, else `~/legwork`. If none of those is
+  a checkout, legwork is installed as a plugin only. The queue works as it
+  is; the runner and the self-rebuilding dashboard need a checkout, so
+  offer to clone the legwork repo (the plugin's marketplace source) to
   `~/legwork` and continue there once they say yes.
-- The legwork repo, where `config` and `house-rules.md` live and the
-  skills look: `$LEGWORK_DIR` if set, else the checkout. If `$LEGWORK_DIR`
-  is set and is not the checkout, that repo holds the queue; settings and
-  house rules go there, and the scripts still run from the checkout (the
-  installer writes their full path into every skill). If it is unset and
-  the checkout is not `~/legwork`, the user must add
+- The legwork repo, where `config` and `house-rules.md` live:
+  `$LEGWORK_DIR` if set, else the checkout. If it is unset and the
+  checkout is not `~/legwork`, the user must add
   `export LEGWORK_DIR=<checkout>` to their shell profile; say so in step 5.
 - An existing `config` and `house-rules.md` there. On a re-run, each
   question below defaults to what they already hold.
 - The interpreter, `<python>` below: the first of `python3` and `python`
   for which `<name> -c 'import sys'` exits 0. On macOS and Linux that is
   `python3`. On Windows it is `python`: `python3` there is usually the
-  Microsoft Store stub, which exits 9009 without running anything. Run the
-  scripts in `orchestration/bin/` through it too, not by their `python3`
-  first line.
+  Microsoft Store stub, which exits 9009 without running anything.
 - The Claude config dir: `$CLAUDE_CONFIG_DIR`, else `~/.claude`.
-- Tools: `command -v claude gh herdr codex`, `gh auth status`, and
-  whether `HERDR_ENV` is set (this session runs inside Herdr).
-- A usage cache: `~/.cache/ccstatusline/usage.json`, or the path in
-  `LEGWORK_USAGE_CACHE`.
-- The GitHub owner of the user's repos: `gh api user -q .login` and
-  `gh api user/orgs -q '.[].login'`, as suggestions for question 6.
+- Whether `claude` is on PATH (`command -v claude`).
 
 Tell the user in two or three lines what you found, then ask.
 
@@ -71,55 +52,13 @@ in one line. Record every answer as you go.
    n8n pipeline; none), the daily fire cap (default 8) and an optional
    daily cost cap. Recommend no for a first install: the manual loop is the
    whole product, and the runner is a re-run away.
-2. **Shipping.** "Install `/ship` and `/bugbot`?" Then: "Which GitHub
-   users or orgs have Cursor Bugbot installed?" (none is a fine answer).
-3. **Orchestration.** "Do you want `/fanout`, one orchestrator working a
-   project's roadmap into many PRs, reporting decisions instead of
-   stopping?" Needs shipping; if they said no to shipping, say so and offer
-   both.
-4. **Herdr.** Only with orchestration. If `herdr` is missing, recommend it
-   strongly: with Herdr, workers run in panes the user can watch and steer
-   in the morning, and the switchboard can open, cycle and resume
-   orchestrators. Without it, `/fanout` uses subagents only and the
-   switchboard cannot touch panes. Point them at herdr.dev to install it,
-   and ask whether to wait for that or carry on without. If `herdr` is
-   there, offer to install its skill (`herdr --skill`).
-5. **Switchboard.** Only with orchestration. "Who relays an orchestrator's
-   decisions to you?" A) Claude Code: one Claude Code session in a Herdr
-   pane named `switchboard`, started with `/switchboard <project>`, watches
-   every orchestrator, puts decisions in front of you, relays your answer
-   and cycles context (needs Herdr). B) By hand: you read
-   `.legwork/switchboard.md` (or `switchboard-wait --status <repo>:none`)
-   and type answers into the pane. Recommend A when Herdr is there, else B.
-   On macOS or Windows, ask two more. With A: "Install the health watcher,
-   which restarts the switchboard if it dies?" With Herdr, either way:
-   "Show a banner when an orchestrator finishes or needs you?" On Linux,
-   say both are macOS and Windows only and skip them.
-6. **Your repos.** Only with shipping or orchestration. "Which GitHub users
-   or orgs are yours?" Suggest the ones `gh` reported. On these,
-   orchestrators may merge when told to, put issue ids in PRs and push
-   planning docs; every other owner is treated as shared.
-7. **Linear.** Only with orchestration. "Track each change as a Linear
-   issue?" If yes: the team name, its issue key (the PLT in PLT-12), and
-   any labels worth sweeping at planning time.
-8. **Usage guard.** Only with orchestration, and only when a usage cache
-   exists (if none, say the guard would stay silent and skip it). "Install
-   the hook that pauses long runs before a usage limit?"
-9. **Codex agent.** Only with orchestration, and only when `codex` is on
-   PATH. "Install the codex agent, so reviews get a second opinion from
-   another model?" It runs on the user's Codex plan, not their Claude one.
-10. **Your own skills.** Only with shipping or orchestration. "Do you have
-   a skill that writes your PR bodies, or one that checks a UI in a
-   browser?" Read the installed skill names in the Claude config dir and
-   offer them. They become `LEGWORK_PR_SKILL` and `LEGWORK_UI_SKILL`.
-11. **House rules.** "Any rules every worker must follow?" Offer the common
-   ones as a multi-select, then ask for their own: authored as you with no
-   AI attribution or co-author lines; never push main, always a PR;
+2. **House rules.** "Any rules the tracker should follow when it updates a
+   project?" Offer the common ones as a multi-select, then ask for their
+   own: authored as you with no AI attribution or co-author lines;
    spellings to enforce (a product or company name); words or punctuation
-   to avoid; mark every result OBSERVED, STALE or NOT RUN; lead escalations
-   with the decision. `house-rules.example.md` shows the format. Then ask
-   who reviews pull requests, per repo or per owner, and when; the answers
-   go in a `## Pull request reviews` section, and with none nobody is asked.
+   to avoid; mark every result OBSERVED, STALE or NOT RUN; lead
+   escalations with the decision. `house-rules.example.md` shows the
+   format.
 
 ## 3. Show the plan, then confirm once
 
@@ -130,77 +69,43 @@ Ask once: "Install this?" Nothing is written before a yes.
 
 ## 4. Install
 
-Run these from the checkout, in order, with `--legwork-dir <legwork repo>`
-on every `orchestration/install.py` call. Show each command before running
+Run these from the checkout, in order. Show each command before running
 it.
 
-1. House rules, if they gave any rules or review answers: write
-   `house-rules.md` in the legwork repo, one `- ` list item per rule, under
-   a `# House rules` heading. Then the review answers, one `- ` list item
-   per repo or owner, under a `## Pull request reviews` heading after the
-   rules.
-2. Settings: `<python> orchestration/install.py --set KEY=VALUE ...` with
-   every setting they chose:
-   - runner: `LEGWORK_DAILY_CAP`, `LEGWORK_DAILY_COST_CAP`, and
-     `LEGWORK_LOCAL_REVIEW=1` or `LEGWORK_WEBHOOK_URL` / `LEGWORK_ALERT_URL`
-   - `LEGWORK_BUGBOT_OWNERS`, `LEGWORK_OWN_OWNERS`
-   - `LEGWORK_SWITCHBOARD=claude` or `manual`
-   - `LEGWORK_LINEAR_TEAM`, `LEGWORK_LINEAR_TEAM_KEY`,
-     `LEGWORK_LINEAR_SWEEP_LABELS`
-   - `LEGWORK_PR_SKILL`, `LEGWORK_UI_SKILL`
-   Values with spaces go in quotes on the command line; the file keeps
-   them as written.
+1. House rules, if they gave any: write `house-rules.md` in the legwork
+   repo, one `- ` list item per rule, under a `# House rules` heading. On a
+   re-run, keep every item already there that they did not ask to drop.
+2. Settings: in the legwork repo's `config` (create it if it is
+   missing), set `LEGWORK_DIR` to the legwork repo, and with the runner
+   `LEGWORK_DAILY_CAP`, `LEGWORK_DAILY_COST_CAP`, and
+   `LEGWORK_LOCAL_REVIEW=1` or `LEGWORK_WEBHOOK_URL` / `LEGWORK_ALERT_URL`,
+   one `KEY=VALUE` line each, replacing an active line for that key, and
+   comment out the review keys of the modes they did not pick (the wizard
+   reads a set `LEGWORK_WEBHOOK_URL` as n8n). Leave every other line as it
+   is.
 3. The queue and runner: `./install.sh --yes --with-commands --with-hooks`,
    plus `--with-launchd` for the runner or `--lite` without it. The wizard
-   pre-fills every value from the config step 2 wrote and keeps the
-   orchestration settings. When the legwork repo is a different checkout
-   from this one, run this step there, since the wizard writes the config
-   of the checkout it runs in. Never run it without `--yes`: it is an
-   interactive wizard and will hang this session.
-4. The optional layer: `<python> orchestration/install.py --with <pieces>`,
-   where the pieces are the ones they chose: `shipping`, `fanout`,
-   `switchboard` (always with fanout; it installs the protocol and
-   roadmap-planning skills, and the switchboard skill unless `manual`),
-   `herdr-skill`, `usage-guard`, `codex-agent`,
-   `switchboard-health` (the health watcher) and `pane-notify` (the pane
-   notifications). Run it with `--dry-run` first when anything already
-   exists at a destination, and show what it would overwrite. Pass on every
-   `note:` line it prints.
+   pre-fills every value from the config step 2 wrote. When the legwork
+   repo is a different checkout from this one, run this step there, since
+   the wizard writes the config of the checkout it runs in. Never run it
+   without `--yes`: it is an interactive wizard and will hang this session.
 
 ## 5. Check it, and hand over
 
-- Re-read `config` and confirm every setting landed. Run
-  `<python> orchestration/install.py --with <pieces> --dry-run` and confirm
-  each destination now exists.
-- With orchestration: `<python> orchestration/bin/switchboard-wait --status
-  <checkout>:none` must exit 0.
-- These steps are the user's. List the ones that apply, do not run them:
-  - with `pane-notify`: switch Herdr's own toasts and Claude sounds off, as
-    the installer's note says, then `herdr server reload-config`
-  - with `switchboard-health`: trust the legwork repo in Claude Code (start
-    `claude` there once), since the watcher restarts the switchboard there
-  - with a Claude Code switchboard: on a 200k context window,
-    `LEGWORK_CONTEXT_WINDOW=200k` in `config`, so the switchboard cycles
-    itself before Claude Code compacts it. The installer has already
-    written its session's allow rules into the legwork repo's gitignored
-    `.claude/settings.local.json`; a re-run after a project repo is added
-    on a new folder adds the `Read` rule for it
-  - with orchestration: run the 15 minute plumbing test in
-    `orchestration/docs/smoke-test.md`, including its clean-up step
-- In every repo an orchestrator will work in: `.legwork/` gitignored, and
-  the allow and deny rules in `orchestration/docs/first-run.md`
-  ("Permissions") in its gitignored `.claude/settings.local.json`.
+- Re-read `config` and confirm every setting landed.
+- With the runner: `<python> suite/legwork_runner.py --doctor` must end
+  with `Doctor: all green`. It exits 0 either way, so read what it prints.
 
-Finish with one line per layer: installed, skipped, or waiting on the user,
-each marked OBSERVED (you checked it) or NOT RUN. Then the first thing to
-try: `/add` a project, or for orchestration the first run in
-`orchestration/docs/first-run.md`.
+Finish with one line per piece: installed, skipped, or waiting on the
+user, each marked OBSERVED (you checked it) or NOT RUN. Then the first
+thing to try: `/add` a project.
 
 ## Rules
 
 - Never write outside the checkout before the confirm in step 3.
-- Never install a layer the user did not choose, and never remove one they
-  had; a re-run that turns a layer off says which files to delete instead.
+- Never install a piece the user did not choose, and never remove one they
+  had; a re-run that turns the runner off says which files to delete
+  instead.
 - Never commit `config` or `house-rules.md`; both are gitignored.
 - If a command fails, stop, show its output, and say what is installed so
   far. Do not retry with different flags without saying why.

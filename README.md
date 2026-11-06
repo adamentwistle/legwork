@@ -73,7 +73,7 @@ cd "$HOME/legwork"
 
 You supply the clone: fork this repo or push a copy to a private remote you control. Cloning this repo directly is fine just to try it; nothing in the manual loop needs a remote.
 
-Prefer to be asked in plain words? Run `claude` in the checkout and type `/onboard`. It asks which layers you want (the runner, the shipping commands, the orchestrator, Herdr, a switchboard, Linear, house rules), shows the plan, then drives the same installer for you.
+Prefer to be asked in plain words? Run `claude` in the checkout and type `/onboard`. It asks whether you want the runner and its reviewer, and any house rules, shows the plan, then drives the same installer for you.
 
 `./install.sh` is an interactive, dependency-free wizard. Its first question is which level you are installing:
 
@@ -137,9 +137,9 @@ Review is three options deep. Set `LEGWORK_LOCAL_REVIEW=1` and the runner triage
 
 </details>
 
-## Orchestration: one switchboard over many long runs
+## Orchi
 
-Optional, and separate from the runner. An orchestrator is one long Claude Code session per project, ideally in a [Herdr](https://herdr.dev) pane: `/fanout <project>` turns the project's roadmap into PR-sized tasks, hands them to worker panes or subagents, and lands each PR through its gate and the Bugbot loop. It follows the switchboard protocol, so instead of stopping on a question it writes a `DECISION` to `.legwork/switchboard.md` in the repo and carries on with whatever does not depend on it. A switchboard puts those decisions in front of you one at a time: a Claude Code session in a Herdr pane that watches every orchestrator and relays your answers, or you, by hand. `/ship` and `/bugbot` come with it and work on their own too. Every piece is optional, and `/onboard` installs only the ones you pick. See [orchestration/README.md](orchestration/README.md), and [orchestration/docs/switchboard-setup.md](orchestration/docs/switchboard-setup.md) to set up the switchboard on a Mac or on Windows.
+The orchestrator layer that used to ship here, one long session per project that works its roadmap into pull requests, is now [Orchi](https://github.com/adamentwistle/orchi-build). Orchi works from a legwork tracker and installs this plugin. Legwork doesn't need Orchi.
 
 ## What this is not
 
@@ -153,8 +153,6 @@ Optional, and separate from the runner. An orchestrator is one long Claude Code 
 - [ARCHITECTURE.md](ARCHITECTURE.md): how the pieces fit together.
 - [SETUP.md](SETUP.md): install the runner and wire the optional pipelines.
 - [CONFIG.md](CONFIG.md): every config variable.
-- [orchestration/README.md](orchestration/README.md): the optional orchestrator and switchboard layer.
-- [orchestration/docs/switchboard-setup.md](orchestration/docs/switchboard-setup.md): setting up the Claude Code switchboard on a Mac or on Windows.
 - [SECURITY.md](SECURITY.md): the permission and escalation model.
 - [CONTRIBUTING.md](CONTRIBUTING.md): scope, non-goals, and how to send a PR.
 - [LICENSE](LICENSE): the license.
