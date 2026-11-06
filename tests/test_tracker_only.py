@@ -134,6 +134,9 @@ class ReviewFindingTests(unittest.TestCase):
         text = self.read("core", "skills", "legwork-tracker", "SKILL.md")
         rules = text[text.index("## House rules"):text.index("## File format")]
         self.assertIn("`## Pull request reviews`", rules)
+        # Orchi's setup appends its line at the end of the file, which can
+        # fall inside that old section; it must still be followed.
+        self.assertIn("Any other item there is still a rule.", rules)
 
 
 if __name__ == "__main__":
