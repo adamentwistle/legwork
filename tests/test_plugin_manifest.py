@@ -146,5 +146,35 @@ class ArtifactIsCoreOnly(unittest.TestCase):
             )
 
 
+
+class FrontmatterIsPlainYaml(unittest.TestCase):
+    """Claude Code reads each command's and skill's frontmatter as YAML, and
+    `claude plugin validate` passes a value YAML can't read. These files use
+    one `key: value` line per field, so the check is the stdlib rule YAML
+    applies to a plain scalar: no `: ` or ` #` inside an unquoted value."""
+
+    @staticmethod
+    def fields(path):
+        text = path.read_text(encoding="utf-8")
+        if not text.startswith("---\n"):
+            return None
+        return text[4:text.index("\n---\n", 4)].splitlines()
+
+    def test_every_field_is_one_readable_line(self):
+        files = sorted((REPO / "core" / "commands").glob("*.md"))
+        files += sorted((REPO / "core" / "skills").glob("*/SKILL.md"))
+        for path in files:
+            lines = self.fields(path)
+            self.assertTrue(lines, f"{path.relative_to(REPO)} has no frontmatter")
+            for line in lines:
+                key, sep, value = line.partition(": ")
+                self.assertTrue(sep and key.isidentifier(),
+                                f"{path.relative_to(REPO)}: not `key: value`: {line!r}")
+                value = value.strip()
+                if value[:1] in ("'", '"'):
+                    continue
+                self.assertFalse(": " in value or " #" in value,
+                                 f"{path.relative_to(REPO)}: {key} needs quotes: {value[:60]!r}")
+
 if __name__ == "__main__":
     unittest.main()
