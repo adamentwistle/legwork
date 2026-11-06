@@ -197,8 +197,11 @@ class ReviewFindingTests(unittest.TestCase):
         # An earlier /onboard wrote a `## Pull request reviews` section into
         # house-rules.md, whose items say who reviews pull requests.
         text = self.read("core", "skills", "legwork-tracker", "SKILL.md")
-        rules = text[text.index("## House rules"):text.index("## File format")]
+        rules = " ".join(text[text.index("## House rules"):text.index("## File format")].split())
         self.assertIn("`## Pull request reviews`", rules)
+        # Orchi's setup appends its line at the end of the file, which can
+        # fall inside that old section; it must still be followed.
+        self.assertIn("Any other item there is still a rule.", rules)
 
 
 if __name__ == "__main__":
