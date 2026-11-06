@@ -25,7 +25,7 @@ GONE = re.compile(
     re.I)
 
 # A path copied in from someone's machine.
-LEAKS = re.compile(r"/Users/|/home/[a-z]|C:\\\\Users")
+LEAKS = re.compile(r"/Users/|/home/[a-z]|C:\\{1,2}Users")
 
 
 def user_docs():
