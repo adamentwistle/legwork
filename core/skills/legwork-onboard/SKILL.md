@@ -75,11 +75,12 @@ it.
 1. House rules, if they gave any: write `house-rules.md` in the legwork
    repo, one `- ` list item per rule, under a `# House rules` heading. On a
    re-run, keep every item already there that they did not ask to drop.
-2. Settings, with the runner: in the legwork repo's `config` (copy
-   `config.example` to it first if it is missing), set
+2. Settings: in the legwork repo's `config` (create it if it is
+   missing), set `LEGWORK_DIR` to the legwork repo, and with the runner
    `LEGWORK_DAILY_CAP`, `LEGWORK_DAILY_COST_CAP`, and
    `LEGWORK_LOCAL_REVIEW=1` or `LEGWORK_WEBHOOK_URL` / `LEGWORK_ALERT_URL`,
-   one `KEY=VALUE` line each, replacing an active line for that key.
+   one `KEY=VALUE` line each, replacing an active line for that key. Leave
+   every other line as it is.
 3. The queue and runner: `./install.sh --yes --with-commands --with-hooks`,
    plus `--with-launchd` for the runner or `--lite` without it. The wizard
    pre-fills every value from the config step 2 wrote. When the legwork
