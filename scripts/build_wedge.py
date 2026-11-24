@@ -279,7 +279,7 @@ def build_wedge(repo_root, out_dir, repo_slug=DEFAULT_WEDGE_SLUG, force=False):
     _copy_lf(license_file, out_dir / "LICENSE")
 
     # 4. Generated wrappers. newline="\n" so a Windows build emits the same
-    #    LF bytes as a macOS/Linux one, so the published repo and the --check
+    #    LF bytes as a macOS/Linux one: the published repo and the --check
     #    byte-compare must not depend on the platform that ran the build.
     with open(out_dir / "README.md", "w", encoding="utf-8", newline="\n") as f:
         f.write(render_wedge_readme(repo_slug))
