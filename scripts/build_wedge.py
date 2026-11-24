@@ -136,17 +136,16 @@ def render_wedge_readme(repo_slug, canonical_slug=CANONICAL_SLUG):
     return f"""# legwork
 
 > **This repository is a generated build artifact.** Its source of truth is
-> [`{canonical_slug}`](https://github.com/{canonical_slug}) — the `core/`
+> [`{canonical_slug}`](https://github.com/{canonical_slug}), in the `core/`
 > directory there. Do not edit files here; changes belong in that repo and are
 > republished by its `scripts/build_wedge.py`. See [Canonical source](#canonical-source).
 
-legwork is a project queue for Claude Code that survives you walking away. Each
-project is one markdown file with a status, an append-only log, and a
-ready-to-run next prompt. You end a work session with `/wrap`, which records
-what happened and writes the prompt your next session should start from, while
-the context is still hot. Days later, `/pickup` briefs you back into the
-project in thirty seconds instead of twenty minutes of re-reading. A static
-dashboard shows the whole queue at a glance.
+legwork is project memory for Claude Code, so a project survives you walking
+away from it. Each project is one markdown file with a status, an append-only
+log, and a ready-to-run next prompt. You end a work session with `/wrap`, which
+records what happened and writes the prompt your next session should start
+from, while the context is still hot. Days later, `/pickup` briefs you back
+into the project in thirty seconds instead of twenty minutes of re-reading.
 
 ## Install
 
@@ -160,7 +159,7 @@ From inside Claude Code, add the marketplace and install the plugin:
 That gives you the eight slash commands (`/add`, `/wrap`, `/pickup`, `/go`,
 `/log`, `/shelve`, `/vision`, `/onboard`) and the legwork-tracker and
 legwork-onboard skills in every repo on your
-machine, backed by a queue in `~/legwork` (set `LEGWORK_DIR` to move it).
+machine, backed by your project files in `~/legwork` (set `LEGWORK_DIR` to move it).
 
 ## The loop
 
@@ -171,7 +170,7 @@ writing down what the next session should do.
 /add      create projects/<name>.md: status, description, a real first prompt
  work     any Claude Code session, in any repo
 /wrap     log what happened, write the next prompt while context is hot
- away     days pass; the dashboard shows every project and its next step
+ away     days pass; each project file holds its next step
 /pickup   a 30-second re-entry briefing; run the queued prompt or adjust it
 ```
 
@@ -182,16 +181,16 @@ dependencies.
 
 ## Canonical source
 
-This repo is the level-1 manual loop, published on its own. The full project —
+This repo is the level-1 manual loop, published on its own. The full project,
 including the optional level-2 runner and LLM reviewer that fire queued prompts
-as unattended sessions — lives at
+as unattended sessions, lives at
 **[`{canonical_slug}`](https://github.com/{canonical_slug})**, which is also
 where `core/` is authored. If you found a copy of this loop somewhere else,
 that is the original. Install only from `{repo_slug}` or the canonical repo.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
 """
 
 
@@ -280,7 +279,7 @@ def build_wedge(repo_root, out_dir, repo_slug=DEFAULT_WEDGE_SLUG, force=False):
     _copy_lf(license_file, out_dir / "LICENSE")
 
     # 4. Generated wrappers. newline="\n" so a Windows build emits the same
-    #    LF bytes as a macOS/Linux one — the published repo and the --check
+    #    LF bytes as a macOS/Linux one: the published repo and the --check
     #    byte-compare must not depend on the platform that ran the build.
     with open(out_dir / "README.md", "w", encoding="utf-8", newline="\n") as f:
         f.write(render_wedge_readme(repo_slug))

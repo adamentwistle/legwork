@@ -21,7 +21,9 @@ jobs:
   # across the supported Python range. Keep it green.
   tests:
     name: tests (py${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    # Pinned: setup-python has no 3.9 build for Ubuntu 26.04, and 3.9 is the
+    # documented minimum.
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
