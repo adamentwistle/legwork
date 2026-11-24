@@ -1,27 +1,21 @@
 # legwork
 
-[![CI](https://github.com/adamentwistle/legwork/actions/workflows/ci.yml/badge.svg)](https://github.com/adamentwistle/legwork/actions/workflows/ci.yml)
-
-legwork is a project queue for Claude Code that survives you walking away. Each project is one markdown file with a status, an append-only log, and a ready-to-run next prompt. You end a work session with `/wrap`, which records what happened and writes the prompt your next session should start from, while the context is still hot. Days later, `/pickup` briefs you back into the project in thirty seconds instead of twenty minutes of re-reading. A static dashboard shows the whole queue at a glance. And when a project has earned it, there is a level 2: a runner that fires those queued prompts as unattended Claude Code sessions, with an LLM reviewer that only interrupts you when a human decision is actually needed.
+legwork is project memory for Claude Code, so a project survives you walking away from it. Each project is one markdown file with a status, an append-only log, and a ready-to-run next prompt. You end a work session with `/wrap`, which records what happened and writes the prompt your next session should start from, while the context is still hot. Days later, `/pickup` briefs you back into the project in thirty seconds instead of twenty minutes of re-reading.
 
 <img alt="A terminal recording: /wrap closes a session and mints the next prompt, then /pickup briefs a cold session straight back in from it" src="docs/loop.gif" />
 
-<sub>The core loop in motion. <code>/wrap</code> logs the session and writes the next prompt while context is hot; days later <code>/pickup</code> hands it straight back. Rendered from <a href="docs/loop.tape">docs/loop.tape</a> with <a href="https://github.com/charmbracelet/vhs">vhs</a> — run <code>vhs docs/loop.tape</code> to regenerate.</sub>
-
-<img alt="The legwork dashboard: a queue ribbon, a needs-you zone, status-spined project cards, and a changelog timeline" src="docs/dashboard-light.png" />
-
-<sub>The dashboard is one static HTML file, rebuilt from your project files by a standard-library Python script. No server, no dependencies. Light is the default; a blackboard <a href="docs/dashboard-dark.png">dark theme</a> is one toggle away.</sub>
+<sub>The core loop in motion. <code>/wrap</code> logs the session and writes the next prompt while context is hot; days later <code>/pickup</code> hands it straight back. Rendered from <a href="docs/loop.tape">docs/loop.tape</a> with <a href="https://github.com/charmbracelet/vhs">vhs</a>. Run <code>vhs docs/loop.tape</code> to regenerate.</sub>
 
 ## Install
 
-The fastest way in — from inside Claude Code, add the marketplace and install the plugin:
+From inside Claude Code, add the marketplace and install the plugin:
 
 ```
 /plugin marketplace add adamentwistle/legwork
 /plugin install legwork@legwork
 ```
 
-That gives you the eight slash commands (`/add`, `/wrap`, `/pickup`, `/go`, `/log`, `/shelve`, `/vision`, `/onboard`) and the legwork-tracker and legwork-onboard skills in every repo on your machine, backed by a queue in `~/legwork` (set `LEGWORK_DIR` to move it). The plugin is this repo's [`core/`](core/) directory itself: one editable source, nothing copied. For the self-rebuilding dashboard and the optional level-2 runner, clone the repo and run the wizard instead. See [Quickstart](#quickstart).
+That gives you the eight slash commands (`/add`, `/wrap`, `/pickup`, `/go`, `/log`, `/shelve`, `/vision`, `/onboard`) and the legwork-tracker and legwork-onboard skills in every repo on your machine, backed by your project files in `~/legwork` (set `LEGWORK_DIR` to move it). The plugin is this repo's [`core/`](core/) directory itself: one editable source, nothing copied. For the optional dashboard and the level 2 runner, clone the repo and run the wizard instead. See [Quickstart](#quickstart).
 
 ## The loop
 
@@ -31,7 +25,7 @@ The core of legwork is a habit, not a daemon: never end a session without writin
 /add      create projects/<name>.md: status, description, a real first prompt
  work     any Claude Code session, in any repo
 /wrap     log what happened, write the next prompt while context is hot
- away     days pass; the dashboard shows every project and its next step
+ away     days pass; each project file holds its next step
 /pickup   a 30-second re-entry briefing; run the queued prompt or adjust it
 ```
 
@@ -82,19 +76,27 @@ Prefer to be asked in plain words? Run `claude` in the checkout and type `/onboa
 
 Graduating is re-running `./install.sh` in the same checkout and picking level 2: your previous answers, including the level, pre-fill.
 
-Running headless? `./install.sh --yes` accepts every default and writes only the in-repo config; a fresh clone defaults to level 1 (`--lite` pins it). The outside-the-repo steps are opt-in via `--with-commands`, `--with-launchd` and `--with-hooks` — `--with-launchd` implies level 2, while `--with-hooks` works at either level.
+Running headless? `./install.sh --yes` accepts every default and writes only the in-repo config; a fresh clone defaults to level 1 (`--lite` pins it). The outside-the-repo steps are opt-in via `--with-commands`, `--with-launchd` and `--with-hooks`. `--with-launchd` implies level 2, while `--with-hooks` works at either level.
 
-Then the first five minutes: run `claude` in any repo you are working on, `/add <project>` to queue it, do some work, `/wrap` to close out, and open `dashboard/index.html` in the legwork checkout. Come back another day with `/pickup <project>`. Verify the install any time with `python3 suite/legwork_runner.py --doctor`.
+Then the first five minutes: run `claude` in any repo you are working on, `/add <project>` to queue it, do some work, and `/wrap` to close out. Come back another day with `/pickup <project>`. Verify the install any time with `python3 suite/legwork_runner.py --doctor`.
 
-> **Make this repo your tracker.** A fresh clone gitignores `/projects/`, so your real queue stays out of any public fork by accident. When you want your queue in version control (the level 2 runner requires it; the verbs commit and push when it is there), point the checkout at a private remote of your own and delete the `/projects/` and `/dashboard/index.html` lines from `.gitignore`. [SETUP.md](SETUP.md) walks through it.
+> **Make this repo your tracker.** A fresh clone gitignores `/projects/`, so your real projects stay out of any public fork by accident. When you want your queue in version control (the level 2 runner requires it; the verbs commit and push when it is there), point the checkout at a private remote of your own and delete the `/projects/` and `/dashboard/index.html` lines from `.gitignore`. [SETUP.md](SETUP.md) walks through it.
 
-If you cloned somewhere other than `$HOME/legwork`, add `export LEGWORK_DIR=/path/to/your/clone` to your shell profile; the slash commands resolve the queue through that variable.
+If you cloned somewhere other than `$HOME/legwork`, add `export LEGWORK_DIR=/path/to/your/clone` to your shell profile; the slash commands find your projects through that variable.
+
+## The dashboard (optional)
+
+You never need to open it, but every project can be seen on one page. The dashboard is one static HTML file, rebuilt from your project files by a standard-library Python script after each session. No server, no dependencies. Open `dashboard/index.html` in the legwork checkout. Light is the default; a blackboard [dark theme](docs/dashboard-dark.png) is one toggle away.
+
+<img alt="The legwork dashboard: a queue ribbon, a needs-you zone, status-spined project cards, and a changelog timeline" src="docs/dashboard-light.png" />
 
 ## What it costs
 
 The manual loop bills nothing beyond the Claude Code sessions you were already running; the dashboard and the queue are local files. Level 2 spends real money while you are away: each fire is one headless session, each reviewed session adds one `claude -p` reviewer call, and the runner records the per-fire dollar cost in `runner.log`. Two caps guard it: `LEGWORK_DAILY_CAP` (fires per project per day, default 8) and `LEGWORK_DAILY_COST_CAP` (a dollar ceiling across all projects). The n8n review path bills an Anthropic API key separately.
 
 ## Level 2: the autonomous loop
+
+When a project has earned it, level 2 adds a runner that fires its queued prompts as unattended Claude Code sessions, with an LLM reviewer that only interrupts you when a human decision is actually needed.
 
 The idea worth stealing is reviewer-by-exception. An LLM reviewer reads every autonomous session and only escalates to a human when a human decision is genuinely required: money, deploys, credentials, sending things to people, deleting data, or work that contradicts the stated intent. Everything else passes or is sent back for another pass. You stay in the loop by exception, not by babysitting.
 
